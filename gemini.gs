@@ -1,0 +1,290 @@
+/**
+ * Budget 2026 Automation v1 - Gemini Flash Provider Adapter
+ * File: gemini.gs
+ * 
+ * Implements the Provider Interface (§7, §7.2) for Gemini Flash multimodal extraction.
+ */
+
+const GEMINI_MODEL_ID = 'gemini-3.5-flash-lite';
+const BACKUP_MODEL_1 = 'gemini-3.6-flash';
+const BACKUP_MODEL_2 = 'gemini-3.1-flash-lite';
+
+/**
+ * Invokes the Gemini API with automatic retry and model fallback for HTTP 503 / 429 capacity spikes.
+ * 
+ * @param {Object} payload - Gemini request payload object.
+ * @param {string} apiKey - Gemini API key.
+ * @param {string} [preferredModel] - Optional preferred model ID to attempt first (e.g. 'gemini-3.6-flash').
+ * @return {string} Raw response text from successful Gemini API call.
+ */
+function callGeminiApiWithRetry(payload, apiKey, preferredModel) {
+  let modelsToTry = [GEMINI_MODEL_ID, BACKUP_MODEL_1, BACKUP_MODEL_2];
+  if (preferredModel) {
+    modelsToTry = [preferredModel, ...modelsToTry.filter(m => m !== preferredModel)];
+  }
+  let lastError = null;
+
+  for (let m = 0; m < modelsToTry.length; m++) {
+    const modelId = modelsToTry[m];
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
+    const options = {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      Logger.log(`Calling Gemini API (${modelId}) attempt ${attempt}...`);
+      const response = UrlFetchApp.fetch(url, options);
+      const responseCode = response.getResponseCode();
+      const responseText = response.getContentText();
+
+      if (responseCode === 200) {
+        return responseText;
+      }
+
+      Logger.log(`Gemini API (${modelId}) attempt ${attempt} returned error ${responseCode}: ${responseText}`);
+      lastError = new Error(`Gemini API returned error code ${responseCode}: ${responseText}`);
+
+      // If transient high demand (503) or rate limit (429), wait 1.5s before retry
+      if (responseCode === 503 || responseCode === 429) {
+        Utilities.sleep(1500);
+      } else {
+        // Non-transient error, break to try next model fallback
+        break;
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+/**
+ * Extracts financial transactions using Gemini Flash multimodal API.
+ * Provider Interface function (§7).
+ * 
+ * @param {Array<string|Object>} inputs - Array of input texts or media inlineData objects.
+ * @param {Object} [context] - Extraction context (vocabularies, hints, SGT date).
+ * @return {Array<Object>} Enriched ParsedTransaction array (with 50/30/20 bucket & dedupe keys).
+ * @throws {Error} If API key is missing, HTTP request fails, or JSON parsing fails.
+ */
+function extractTransactions(inputs, context) {
+  // 1. Retrieve API Key securely from Script Properties (§5.2, §7.2)
+  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY property is missing in Script Properties. Please configure it.');
+  }
+
+  // 2. Prepare System Prompt & Inputs with Learned Merchant Context (§6.3)
+  const ctx = context || {};
+  ctx.learned_merchants = getLearnedMerchantsContext();
+  if (!ctx.merchantMemoryHints) {
+    ctx.merchantMemoryHints = ctx.learned_merchants;
+  }
+
+  const systemPromptText = getSystemPrompt(ctx);
+  
+  // Format input items into Gemini parts structure
+  const parts = [];
+  const rawInputs = Array.isArray(inputs) ? inputs : [inputs];
+
+  for (let i = 0; i < rawInputs.length; i++) {
+    const item = rawInputs[i];
+
+    if (typeof item === 'string') {
+      parts.push({ text: item });
+    } else if (item && typeof item === 'object') {
+      if (item.text) {
+        parts.push({ text: item.text });
+      } else if (item.inlineData || item.inline_data) {
+        const inlineObj = item.inlineData || item.inline_data;
+        const mimeType = inlineObj.mimeType || inlineObj.mime_type || 'image/jpeg';
+        // Add a clear separator for Gemini to recognize multiple discrete images
+        parts.push({ text: `\n[Start of Attached Image/Document]\n` });
+        parts.push({
+          inlineData: {
+            mimeType: mimeType,
+            data: inlineObj.data
+          }
+        });
+      }
+    }
+  }
+
+  if (parts.length === 0) {
+    throw new Error('extractTransactions requires at least one text or image/audio input.');
+  }
+
+  // 3. Construct Gemini API Request Payload (§7.2)
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: systemPromptText }]
+    },
+    contents: [
+      {
+        parts: parts
+      }
+    ],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: GEMINI_RESPONSE_SCHEMA,
+      temperature: 0.1
+    }
+  };
+
+  // 4. Invoke Gemini API with automatic retry & model fallback
+  const responseText = callGeminiApiWithRetry(payload, apiKey);
+
+  // 5. Parse Structured Response & Enrich with Phase 1 Logic (§6.2, §7.2)
+  let rawParsedTransactions = [];
+  try {
+    const responseJson = JSON.parse(responseText);
+    const candidate = responseJson.candidates && responseJson.candidates[0];
+    const textOutput = candidate && candidate.content && candidate.content.parts && candidate.content.parts[0].text;
+
+    if (!textOutput) {
+      throw new Error('No candidate content text returned from Gemini API.');
+    }
+
+    const parsedJSON = JSON.parse(textOutput);
+    rawParsedTransactions = Array.isArray(parsedJSON) ? parsedJSON : [parsedJSON];
+  } catch (err) {
+    Logger.log(`Failed to parse Gemini output text: ${err.message}. Response raw: ${responseText}`);
+    throw new Error(`Gemini response JSON parsing failed: ${err.message}`);
+  }
+
+  // 6. Enrich each transaction deterministically & flag duplicates against existing sheet data (§6.7)
+  let enrichedTransactions = rawParsedTransactions.map(rawTxn => enrichTransaction(rawTxn));
+  if (typeof flagExistingDuplicates === 'function') {
+    enrichedTransactions = flagExistingDuplicates(enrichedTransactions);
+  }
+  Logger.log(`Successfully extracted, enriched, and checked ${enrichedTransactions.length} transaction(s).`);
+
+  return enrichedTransactions;
+}
+
+/**
+ * Downloads a file from Telegram API, converts it to base64, and returns Gemini inlineData structure.
+ * Helper function for Telegram Bot integration (§5.3).
+ * 
+ * @param {string} filePath - Relative Telegram file path (e.g., 'photos/file_0.jpg').
+ * @param {string} [botToken] - Optional Telegram Bot Token (defaults to Script Properties TELEGRAM_BOT_TOKEN).
+ * @param {string} [overrideMimeType] - Optional explicit MIME type override (e.g., 'application/pdf', 'text/csv').
+ * @return {Object} Object structured for Gemini inlineData: { inlineData: { mimeType, data } }.
+ */
+function fetchTelegramFileAsBase64(filePath, botToken, overrideMimeType) {
+  const token = botToken || PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
+  if (!token) {
+    throw new Error('TELEGRAM_BOT_TOKEN missing in parameters or Script Properties.');
+  }
+
+  const fileUrl = `https://api.telegram.org/file/bot${token}/${filePath}`;
+  Logger.log(`Downloading Telegram file from: ${filePath}...`);
+  
+  const response = typeof fetchWithRetry === 'function'
+    ? fetchWithRetry(fileUrl, { muteHttpExceptions: true })
+    : UrlFetchApp.fetch(fileUrl, { muteHttpExceptions: true });
+
+  if (response.getResponseCode() !== 200) {
+    throw new Error(`Failed to download Telegram file (${response.getResponseCode()}): ${response.getContentText()}`);
+  }
+
+  const blob = response.getBlob();
+  let mimeType = overrideMimeType || blob.getContentType();
+
+  // Fallback MIME type detection if generic or octet-stream
+  if (!mimeType || mimeType === 'application/octet-stream') {
+    const lowerPath = String(filePath || '').toLowerCase();
+    if (lowerPath.endsWith('.pdf')) {
+      mimeType = 'application/pdf';
+    } else if (lowerPath.endsWith('.csv')) {
+      mimeType = 'text/csv';
+    } else if (lowerPath.endsWith('.oga') || lowerPath.endsWith('.ogg')) {
+      mimeType = 'audio/ogg';
+    } else if (lowerPath.endsWith('.png')) {
+      mimeType = 'image/png';
+    } else {
+      mimeType = 'image/jpeg';
+    }
+  }
+
+  const base64Data = Utilities.base64Encode(blob.getBytes());
+
+  return {
+    inlineData: {
+      mimeType: mimeType,
+      data: base64Data
+    }
+  };
+}
+
+/**
+ * Reads learned merchant records and naming aliases from the 'Merchants' sheet & Script Properties (§5.2, §6.3).
+ * Returns an array of objects [{ merchant, category, aliases, count }].
+ * 
+ * @return {Array<Object>} Array of learned merchant objects.
+ */
+function getLearnedMerchantsContext() {
+  try {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = spreadsheet ? spreadsheet.getSheetByName("Merchants") : null;
+    const aliases = typeof getMerchantAliases === 'function' ? getMerchantAliases() : {};
+
+    const learnedMap = new Map();
+
+    // 1. Read up to top 50 learned merchants from sheet (Cols A-E)
+    if (sheet) {
+      const lastRow = sheet.getLastRow();
+      if (lastRow > 1) {
+        const numCols = Math.max(5, sheet.getLastColumn());
+        const data = sheet.getRange(2, 1, Math.min(lastRow - 1, 50), numCols).getValues();
+        for (let i = 0; i < data.length; i++) {
+          const m = String(data[i][0] || '').trim();
+          const cat = String(data[i][1] || '').trim();
+          const count = Number(data[i][2]) || 1;
+          const rawAliases = data[i].length > 4 ? String(data[i][4] || '').split(',').map(s => s.trim()).filter(Boolean) : [];
+          if (m) {
+            learnedMap.set(normaliseWhere(m), {
+              merchant: m,
+              category: cat,
+              count: count,
+              aliases: rawAliases
+            });
+          }
+        }
+      }
+    }
+
+    // 2. Incorporate aliases and category preferences from ScriptProperties
+    Object.keys(aliases).forEach(rawNorm => {
+      const item = aliases[rawNorm];
+      const canonical = typeof item === 'string' ? item : (item && (item.canonical || item.name));
+      const cat = typeof item === 'object' && item ? item.category : null;
+      if (canonical) {
+        const normC = normaliseWhere(canonical);
+        if (learnedMap.has(normC)) {
+          const record = learnedMap.get(normC);
+          if (cat && (!record.category || record.category === 'Другое')) {
+            record.category = cat;
+          }
+          if (rawNorm && rawNorm !== normC && !record.aliases.includes(rawNorm)) {
+            record.aliases.push(rawNorm);
+          }
+        } else {
+          learnedMap.set(normC, {
+            merchant: canonical,
+            category: cat || 'Другое',
+            count: 1,
+            aliases: (rawNorm && rawNorm !== normC) ? [rawNorm] : []
+          });
+        }
+      }
+    });
+
+    return Array.from(learnedMap.values());
+  } catch (e) {
+    Logger.log("Error reading Merchants context: " + e.toString());
+    return [];
+  }
+}

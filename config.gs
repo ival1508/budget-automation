@@ -1,0 +1,247 @@
+/**
+ * BUDGET 2026 AUTOMATION — STAGE 0 CONFIG & SHEET_FACTS
+ * File: config.gs
+ * 
+ * Source of truth resolving all sheet-dependent structures, naming conventions,
+ * and structural vs. transient ranges for later stages to import.
+ */
+
+// 1. MONTH TAB NAMING CONVENTION (PRD Stage 0 & Naming Rules)
+// Note: Jan–Apr are single Cyrillic letters (Я/Ф/М/А), May onward are full Russian month names.
+// Val keeps monthly tabs only up to the current month; future-month tabs are created Just-In-Time (JIT).
+// Collision note: А'26 means April, so August must be Август'26, never А'26.
+const MONTH_TABS_EXISTING = {
+  1: "Я'26",
+  2: "Ф'26",
+  3: "М'26",
+  4: "А'26",
+  5: "Май'26",
+  6: "Июнь'26",
+  7: "Июль'26",
+  8: "Август'26"
+};
+
+const MONTH_TABS_FUTURE = {
+  9: "Сентябрь'26",
+  10: "Октябрь'26",
+  11: "Ноябрь'26",
+  12: "Декабрь'26"
+};
+
+const MONTH_TAB_NAMES = Object.assign({}, MONTH_TABS_EXISTING, MONTH_TABS_FUTURE);
+
+// 2. SHEET_FACTS EXPORT
+const SHEET_FACTS = {
+  MONTH_TABS_EXISTING: MONTH_TABS_EXISTING,
+  MONTH_TABS_FUTURE: MONTH_TABS_FUTURE,
+  MONTH_TAB_NAMES: MONTH_TAB_NAMES,
+  
+  CORE_TABS: {
+    TRANSACTIONS: 'Transactions',
+    MERCHANTS: 'Merchants',
+    BUDGET_50_30_20: '50/30/20'
+  },
+  
+  USERS: {
+    VAL: { name: 'Val', chat_id: '96069960', morning_time: '08:00', active: true },
+    RITA: { name: 'Rita', chat_id: '402188776', morning_time: '08:00', active: true }
+  },
+  
+  MONTHLY_TAB_STRUCTURE: {
+    CURRENT_DAILY_BUDGET_CELL: 'D19', // Effectively SALDO_END_OF_THE_DAY divided by number of days left in the month
+    saldoCell: 'D19', // Alias for Stage 1 reader tasks
+    // Structural range: Fixed mandatory expenses template list
+    MANDATORY_EXPENSES_RANGE: 'D3:G13',
+    MANDATORY_COLS: {
+      NAME: 'D',
+      PLANNED_AMOUNT: 'E',
+      '%_OF_TOTAL_BUDGET': 'F',
+      CHECKBOX: 'G'
+    },
+    // Transient range: Daily spend & budget tracker
+    DAILY_TRACKER_RANGE: 'H2:L32',
+    DAILY_COLS: {
+      DATE: 'H',
+      SPEND: 'J',
+      BUDGET_CUMULATIVE_BEGINNING_OF_THE_DAY: 'K',
+      SALDO_END_OF_THE_DAY: 'L' // Daily-saldo cell column
+    }
+  },
+  
+  TRANSACTIONS_TAB_STRUCTURE: {
+    DATA_START_ROW: 2,
+    COLUMNS: {
+      DATE: 'A',
+      ACCOUNT: 'B',
+      TYPE: 'C',
+      AMOUNT: 'D',
+      AMOUNT_SGD: 'E',
+      ACCOUNT_VALUE_BEFORE_TRANSACTION: 'F',
+      AMOUNT_VALUE_AFTER_TRANSACTION: 'G',
+      CATEGORY: 'H',
+      WHERE: 'I',
+      NOTES: 'J',
+      '50/30/20_CATEGORY': 'K'
+    }
+  },
+  
+  BUDGET_50_30_20_TAB_STRUCTURE: {
+    TARGET_VALUES_RANGE: 'AE:AF', // Target values for the monthly spend per category
+    TARGET_COLS: {
+      COL_AE: 'AE',
+      COL_AF: 'AF'
+    }
+  },
+
+  /**
+   * Returns the correct month tab name by month number (1-12) or SGT Date object.
+   * @param {Date|number} [input] - Optional month number (1-12) or Date instance. Defaults to now in SGT.
+   * @return {string} Russian month tab name according to naming rules.
+   */
+  getMonthTabName: function(input) {
+    let monthNum;
+    if (typeof input === 'number') {
+      monthNum = input;
+    } else {
+      const date = (input instanceof Date) ? input : new Date();
+      const monthStr = Utilities.formatDate(date, 'Asia/Singapore', 'M');
+      monthNum = parseInt(monthStr, 10);
+    }
+    return this.MONTH_TAB_NAMES[monthNum] || '';
+  }
+};
+
+/**
+ * STAGE 0: One-off Discovery & Inspection Function.
+ * Inspects the live Google Sheet, verifies tab naming conventions and structures,
+ * and prints proposed values and findings for Val to confirm.
+ * 
+ * Instructions: In the Google Apps Script IDE, select runDiscovery and click Run.
+ * View the report in the Execution Log.
+ */
+function runDiscovery() {
+  Logger.log('====================================================');
+  Logger.log('   STAGE 0 — DISCOVERY & SHEET_FACTS INSPECTION');
+  Logger.log('====================================================');
+  
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    Logger.log('❌ ERROR: No active spreadsheet found.');
+    Logger.log('Please run this script bound to your Google Sheet or ensure active spreadsheet is set.');
+    return;
+  }
+  
+  Logger.log(`📗 Connected Spreadsheet: "${ss.getName()}" (ID: ${ss.getId()})\n`);
+  
+  // 1. Inspect Core Tabs
+  Logger.log('--- 1. CORE TABS VERIFICATION ---');
+  const coreTabs = Object.values(SHEET_FACTS.CORE_TABS);
+  coreTabs.forEach(tabName => {
+    const sheet = ss.getSheetByName(tabName);
+    if (sheet) {
+      const lastRow = sheet.getLastRow();
+      const lastCol = sheet.getLastColumn();
+      let headerStr = 'None';
+      if (lastRow >= 1 && lastCol >= 1) {
+        const headers = sheet.getRange(1, 1, 1, Math.min(lastCol, 10)).getDisplayValues()[0];
+        headerStr = headers.filter(String).join(' | ');
+      }
+      Logger.log(`✅ [FOUND] Core Tab "${tabName}": ${lastRow} rows, ${lastCol} cols. Headers: [${headerStr}]`);
+    } else {
+      if (tabName === 'Merchants') {
+        Logger.log(`⚠️ [MISSING/NOT INITIALIZED] Core Tab "${tabName}" (Will be autogenerated just-in-time via initializeLearningStore).`);
+      } else {
+        Logger.log(`❌ [CRITICAL MISSING] Core Tab "${tabName}" not found in spreadsheet!`);
+      }
+    }
+  });
+  
+  // 2. Inspect Existing/Past Monthly Tabs (Jan - Aug)
+  Logger.log('\n--- 2. MONTH_TABS_EXISTING VERIFICATION (Jan - Aug) ---');
+  Logger.log('Note: Jan-Apr use single Cyrillic letters (Я/Ф/М/А), May onward use full names.');
+  Object.entries(SHEET_FACTS.MONTH_TABS_EXISTING).forEach(([monthNum, tabName]) => {
+    const sheet = ss.getSheetByName(tabName);
+    if (sheet) {
+      Logger.log(`✅ [EXISTING] Month ${monthNum} ("${tabName}") verified present. Rows: ${sheet.getLastRow()}, Cols: ${sheet.getLastColumn()}`);
+    } else {
+      Logger.log(`⚠️ [NOT FOUND] Month ${monthNum} ("${tabName}") was expected in MONTH_TABS_EXISTING but is currently missing.`);
+    }
+  });
+  
+  // 3. Inspect Future Monthly Tabs (Sep - Dec)
+  Logger.log('\n--- 3. MONTH_TABS_FUTURE VERIFICATION (Sep - Dec) ---');
+  Logger.log('Note: Future tabs are typically created Just-In-Time (JIT); absence is normal and expected.');
+  Object.entries(SHEET_FACTS.MONTH_TABS_FUTURE).forEach(([monthNum, tabName]) => {
+    const sheet = ss.getSheetByName(tabName);
+    if (sheet) {
+      Logger.log(`ℹ️ [ALREADY EXISTS] Month ${monthNum} ("${tabName}") exists in spreadsheet.`);
+    } else {
+      Logger.log(`🆗 [JIT EXPECTED ABSENCE] Month ${monthNum} ("${tabName}") does not exist yet (Normal behavior; will be created in Stage 6).`);
+    }
+  });
+  
+  // 4. Inspect Monthly Tab Structure & Daily-Saldo Cell
+  Logger.log('\n--- 4. MONTHLY TAB STRUCTURAL VS. TRANSIENT INSPECTION ---');
+  const currentTabName = SHEET_FACTS.getMonthTabName();
+  const sampleSheet = ss.getSheetByName(currentTabName) || ss.getSheetByName("Август'26") || ss.getSheetByName("Июль'26");
+  
+  if (sampleSheet) {
+    Logger.log(`🔍 Inspecting monthly template structure using tab: "${sampleSheet.getName()}"`);
+    
+    // Check Mandatory Expenses (Structural Range)
+    try {
+      const mandRange = sampleSheet.getRange(SHEET_FACTS.MONTHLY_TAB_STRUCTURE.MANDATORY_EXPENSES_RANGE);
+      const mandVals = mandRange.getDisplayValues();
+      const items = mandVals.map(r => r[0]).filter(Boolean);
+      Logger.log(`📌 [STRUCTURAL] Mandatory Expenses (${SHEET_FACTS.MONTHLY_TAB_STRUCTURE.MANDATORY_EXPENSES_RANGE}): Found ${items.length} items (Sample: ${items.slice(0, 4).join(', ')}...)`);
+    } catch (e) {
+      Logger.log(`❌ [STRUCTURAL ERROR] Could not read Mandatory Expenses range ${SHEET_FACTS.MONTHLY_TAB_STRUCTURE.MANDATORY_EXPENSES_RANGE}: ${e.message}`);
+    }
+    
+    // Check Daily Tracker & Daily-Saldo Cell (Transient Range)
+    try {
+      const dailyCols = sampleSheet.getRange('H1:L2').getDisplayValues();
+      Logger.log(`📌 [TRANSIENT] Daily Tracker Headers (Rows 1-2, Cols H-L):`);
+      Logger.log(`   Col H (Date):   [Row 1: "${dailyCols[0][0]}", Row 2: "${dailyCols[1][0]}"]`);
+      Logger.log(`   Col J (Spend):  [Row 1: "${dailyCols[0][2]}", Row 2: "${dailyCols[1][2]}"]`);
+      Logger.log(`   Col K (Budget Cumulative Beginning of Day): [Row 1: "${dailyCols[0][3]}", Row 2: "${dailyCols[1][3]}"]`);
+      Logger.log(`   Col L (Saldo End of Day):                   [Row 1: "${dailyCols[0][4]}", Row 2: "${dailyCols[1][4]}"] -> Daily-Saldo column verified.`);
+    } catch (e) {
+      Logger.log(`❌ [TRANSIENT ERROR] Could not read Daily Tracker headers in H1:L2: ${e.message}`);
+    }
+    
+    // Check Current Daily Budget (Cell D19)
+    try {
+      const d19Val = sampleSheet.getRange(SHEET_FACTS.MONTHLY_TAB_STRUCTURE.CURRENT_DAILY_BUDGET_CELL).getDisplayValue();
+      const c19Val = sampleSheet.getRange('C19').getDisplayValue();
+      Logger.log(`📌 [KEY CELL] CURRENT_DAILY_BUDGET (${SHEET_FACTS.MONTHLY_TAB_STRUCTURE.CURRENT_DAILY_BUDGET_CELL}): Value = "${d19Val}" (Adjacent label C19: "${c19Val}")`);
+    } catch (e) {
+      Logger.log(`❌ [KEY CELL ERROR] Could not read CURRENT_DAILY_BUDGET cell in D19: ${e.message}`);
+    }
+  } else {
+    Logger.log(`⚠️ Could not find current or recent monthly tab to inspect structural ranges.`);
+  }
+  
+  // 5. Inspect 50/30/20 Tab Target Columns (AE & AF)
+  Logger.log('\n--- 5. 50/30/20 TAB TARGET VALUES INSPECTION (Cols AE & AF) ---');
+  const budgetSheet = ss.getSheetByName(SHEET_FACTS.CORE_TABS.BUDGET_50_30_20);
+  if (budgetSheet) {
+    try {
+      const targetHeaders = budgetSheet.getRange('AE1:AF2').getDisplayValues();
+      Logger.log(`📌 [50/30/20 TARGETS] Columns AE & AF (Target monthly spend per category):`);
+      Logger.log(`   Col AE Header: [Row 1: "${targetHeaders[0][0]}", Row 2: "${targetHeaders[1][0]}"]`);
+      Logger.log(`   Col AF Header: [Row 1: "${targetHeaders[0][1]}", Row 2: "${targetHeaders[1][1]}"]`);
+    } catch (e) {
+      Logger.log(`❌ [50/30/20 ERROR] Could not read Target Columns AE1:AF2: ${e.message}`);
+    }
+  } else {
+    Logger.log(`⚠️ Could not find "50/30/20" tab to inspect target columns.`);
+  }
+  
+  // 6. Proposed Confirmation Summary
+  Logger.log('\n====================================================');
+  Logger.log('   PROPOSED SHEET_FACTS FOR VAL TO CONFIRM');
+  Logger.log('====================================================');
+  Logger.log(JSON.stringify(SHEET_FACTS, null, 2));
+  Logger.log('\n🏁 Discovery test completed. Please confirm these proposed mappings match your sheet reality!');
+}
