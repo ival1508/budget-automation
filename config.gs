@@ -39,7 +39,8 @@ const SHEET_FACTS = {
   CORE_TABS: {
     TRANSACTIONS: 'Transactions',
     MERCHANTS: 'Merchants',
-    BUDGET_50_30_20: '50/30/20'
+    BUDGET_50_30_20: '50/30/20',
+    REFERENCE: '-'
   },
   
   USERS: {
@@ -252,4 +253,20 @@ function showMandatory() {
   const v = r.getDisplayValues(), f = r.getFormulas();
   v.forEach((row, i) => Logger.log(
     `${i+3}: D="${row[0]}" | E="${row[1]}" | G="${row[3]}" | G-formula="${f[i][3]}"`));
+}
+
+function showReferenceTab() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s = ss.getSheetByName('-') || ss.getSheetByName(' - ') || ss.getSheetByName('Reference');
+  if (!s) {
+    Logger.log('❌ Reference tab "-" not found in spreadsheet!');
+    return;
+  }
+  const lastRow = s.getLastRow();
+  const lastCol = s.getLastColumn();
+  const values = s.getRange(1, 1, Math.min(lastRow, 35), Math.min(lastCol, 6)).getDisplayValues();
+  Logger.log(`📗 Tab "${s.getName()}": ${lastRow} rows x ${lastCol} cols\n`);
+  values.forEach((row, i) => {
+    Logger.log(`Row ${i+1}: A="${row[0]}" | B="${row[1]}" | C="${row[2]}" | D="${row[3]}"`);
+  });
 }

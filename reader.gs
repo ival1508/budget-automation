@@ -951,6 +951,144 @@ function showVelocity() {
 }
 
 /**
+ * Reads the runtime Category-to-50/30/20 Bucket taxonomy from the reference tab ("-").
+ * Column B holds the Category name, and its paired adjacent column holds the Bucket.
+ * 
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
+ * @return {Object<string, string>} Mapping of category names to their respective bucket ('Needs'|'Wants'|'Savings'|'Taxes'|'-').
+ */
+function getCategoryBucketMap(ss) {
+  try {
+    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    if (!spreadsheet) {
+      Logger.log('⚠️ [WARNING] No spreadsheet found. Falling back to static CATEGORY_TO_BUCKET from constants.gs.');
+      return Object.assign({}, typeof CATEGORY_TO_BUCKET !== 'undefined' ? CATEGORY_TO_BUCKET : {});
+    }
+
+    const tabName = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.CORE_TABS && SHEET_FACTS.CORE_TABS.REFERENCE)
+      ? SHEET_FACTS.CORE_TABS.REFERENCE
+      : '-';
+
+    let sheet = spreadsheet.getSheetByName(tabName);
+    if (!sheet) {
+      sheet = spreadsheet.getSheetByName('-') || spreadsheet.getSheetByName(' - ') || spreadsheet.getSheetByName('Reference');
+    }
+
+    if (!sheet) {
+      Logger.log('⚠️ [WARNING] Reference tab "-" not found in spreadsheet. Falling back to static CATEGORY_TO_BUCKET from constants.gs.');
+      return Object.assign({}, typeof CATEGORY_TO_BUCKET !== 'undefined' ? CATEGORY_TO_BUCKET : {});
+    }
+
+    const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
+    if (lastRow < 1 || lastCol < 2) {
+      Logger.log('⚠️ [WARNING] Reference tab "-" has insufficient rows/columns. Falling back to static CATEGORY_TO_BUCKET from constants.gs.');
+      return Object.assign({}, typeof CATEGORY_TO_BUCKET !== 'undefined' ? CATEGORY_TO_BUCKET : {});
+    }
+
+    // Read Col A to Col C (Category is Col B / index 1, Bucket is Col C / index 2)
+    const numColsToFetch = Math.max(lastCol, 3);
+    const data = sheet.getRange(1, 1, lastRow, numColsToFetch).getDisplayValues();
+    const map = {};
+
+    for (let r = 0; r < data.length; r++) {
+      const row = data[r];
+      const category = String(row[1] || '').trim(); // Column B
+      if (!category) continue;
+
+      const lowerCat = category.toLowerCase();
+      if (lowerCat === 'категория' || lowerCat === 'category' || lowerCat === 'итого' || lowerCat === 'всего') {
+        continue;
+      }
+
+      // Read strictly from ONE fixed column: Column C (index 2)
+      const rawBucket = String(row[2] || '').trim();
+      const lowerBucket = rawBucket.toLowerCase();
+
+      let bucket = null;
+      if (lowerBucket === 'needs') {
+        bucket = 'Needs';
+      } else if (lowerBucket === 'wants') {
+        bucket = 'Wants';
+      } else if (lowerBucket === 'savings' || lowerBucket === 'сбережения' || category === 'Отложения (премия)') {
+        bucket = 'Savings';
+      } else if (lowerBucket === 'taxes' || lowerBucket === 'налоги') {
+        bucket = 'Taxes';
+      } else if (rawBucket === '-' || lowerBucket === 'кредитка') {
+        bucket = '-';
+      } else {
+        Logger.log(`⚠️ [LOUD WARNING] Category "${category}" in tab "-" has unrecognized/empty bucket: "${rawBucket}".`);
+        bucket = 'UNKNOWN';
+      }
+
+      map[category] = bucket;
+    }
+
+    if (Object.keys(map).length === 0) {
+      Logger.log('⚠️ [WARNING] Extracted 0 categories from tab "-". Falling back to static CATEGORY_TO_BUCKET from constants.gs.');
+      return Object.assign({}, typeof CATEGORY_TO_BUCKET !== 'undefined' ? CATEGORY_TO_BUCKET : {});
+    }
+
+    return map;
+  } catch (err) {
+    Logger.log(`⚠️ [WARNING] Error reading "-" tab: ${err.message}. Falling back to static CATEGORY_TO_BUCKET from constants.gs.`);
+    return Object.assign({}, typeof CATEGORY_TO_BUCKET !== 'undefined' ? CATEGORY_TO_BUCKET : {});
+  }
+}
+
+/**
+ * Test function for getCategoryBucketMap:
+ * Asserts 22 entries and spot-checks expected bucket assignments.
+ */
+function test_getCategoryBucketMap() {
+  Logger.log('====================================================');
+  Logger.log('      TEST: getCategoryBucketMap() EXECUTION');
+  Logger.log('====================================================\n');
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const map = getCategoryBucketMap(ss);
+  const categories = Object.keys(map);
+
+  Logger.log(`Total Categories Loaded: ${categories.length}`);
+  Logger.log('Category Bucket Map:\n' + JSON.stringify(map, null, 2));
+
+  const assertions = [
+    { cat: 'Квартира', expected: 'Needs' },
+    { cat: 'Рестораны', expected: 'Wants' },
+    { cat: 'Отложения', expected: 'Savings' },
+    { cat: 'Налоги', expected: 'Taxes' },
+    { cat: 'Кредитка', expected: '-' },
+    { cat: 'Авто', expected: 'Wants' },
+    { cat: 'Транспорт', expected: 'Needs' }
+  ];
+
+  let passed = true;
+
+  if (categories.length === 22) {
+    Logger.log('✅ PASS: Exactly 22 categories loaded.');
+  } else {
+    Logger.log(`⚠️ WARNING: Expected 22 categories, but loaded ${categories.length}.`);
+    passed = false;
+  }
+
+  Logger.log('\n--- Spot Checks ---');
+  assertions.forEach(a => {
+    const actual = map[a.cat];
+    if (actual === a.expected) {
+      Logger.log(`✅ PASS: "${a.cat}" -> "${actual}"`);
+    } else {
+      Logger.log(`❌ FAIL: "${a.cat}" (Expected: "${a.expected}", Got: "${actual}")`);
+      passed = false;
+    }
+  });
+
+  Logger.log('\n====================================================');
+  Logger.log(passed ? '🎉 ALL ASSERTIONS PASSED' : '❌ SOME ASSERTIONS FAILED');
+  Logger.log('====================================================');
+  return map;
+}
+
+/**
  * STAGE 1 CHECKPOINT & TEST RUNNER:
  * Runs each pure read function once against the live sheet and prints clean JSON for spot-checking.
  */
@@ -998,6 +1136,11 @@ function runStage1Checkpoint() {
   Logger.log('\n--- 6. getCategoryVelocity() [Volatile Discretionary Sums] ---');
   const velocity = getCategoryVelocity(ss);
   Logger.log(JSON.stringify(velocity, null, 2));
+
+  Logger.log('\n--- 7. getCategoryBucketMap() [Runtime Taxonomy from "-" Tab] ---');
+  const catBucketMap = getCategoryBucketMap(ss);
+  Logger.log(`Total Categories in Map: ${Object.keys(catBucketMap).length}`);
+  Logger.log(JSON.stringify(catBucketMap, null, 2));
 
   Logger.log('\n====================================================');
   Logger.log('   🏁 STAGE 1 CHECKPOINT COMPLETED FOR VAL TO EYEBALL');
