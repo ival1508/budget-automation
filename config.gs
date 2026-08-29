@@ -245,3 +245,11 @@ function runDiscovery() {
   Logger.log(JSON.stringify(SHEET_FACTS, null, 2));
   Logger.log('\n🏁 Discovery test completed. Please confirm these proposed mappings match your sheet reality!');
 }
+
+function showMandatory() {
+  const s = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Август'26");
+  const r = s.getRange('D3:G13');
+  const v = r.getDisplayValues(), f = r.getFormulas();
+  v.forEach((row, i) => Logger.log(
+    `${i+3}: D="${row[0]}" | E="${row[1]}" | G="${row[3]}" | G-formula="${f[i][3]}"`));
+}

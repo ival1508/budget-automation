@@ -204,11 +204,10 @@ function getLoggedMandatoryThisMonth(ss) {
       const row = rawData[r];
       const disp = dispData[r];
       const cellDate = row[0];
-      const typeColC = String(row[2] || '').trim();
-      const typeColG = String(row[6] || '').trim();
+      const typeColC = String(row[2] || '').trim().replace(/\t/g, '');
 
-      // Match Type (Column C or Column G, handling tabs)
-      const isFixedType = (typeColC === targetType || typeColG === targetType || typeColC.replace(/\t/g, '') === targetType);
+      // Match Type (Column C only)
+      const isFixedType = (typeColC === targetType);
       if (!isFixedType) continue;
 
       let dateMatch = false;
@@ -920,15 +919,18 @@ function getCategoryVelocity(ss) {
       }
 
       if (dateMatch) {
-        const amount = parseAmountNumber(row[4], disp[4]) || parseAmountNumber(row[3], disp[3]) || 0;
         const typeColC = String(row[2] || '').trim().replace(/\t/g, '');
-        const typeColG = String(row[6] || '').trim().replace(/\t/g, '');
-        const txType = typeColC || typeColG || 'Unspecified Type';
-
-        if (!velocity[category][txType]) {
-          velocity[category][txType] = 0;
+        // Strict Type Filter: count 'Расходы' ONLY (excludes Обязательные расходы, Снятие денег, and Income)
+        if (typeColC !== 'Расходы') {
+          continue;
         }
-        velocity[category][txType] = Number((velocity[category][txType] + amount).toFixed(2));
+
+        const amount = parseAmountNumber(row[4], disp[4]) || parseAmountNumber(row[3], disp[3]) || 0;
+
+        if (!velocity[category]['Расходы']) {
+          velocity[category]['Расходы'] = 0;
+        }
+        velocity[category]['Расходы'] = Number((velocity[category]['Расходы'] + amount).toFixed(2));
         velocity[category].total = Number((velocity[category].total + amount).toFixed(2));
       }
     }
@@ -938,6 +940,14 @@ function getCategoryVelocity(ss) {
     Logger.log(`Error in getCategoryVelocity: ${e.message}`);
     return velocity;
   }
+}
+
+function showVelocity() {
+  const v = getCategoryVelocity();
+  Logger.log(JSON.stringify(v, null, 2));
+  Logger.log('--- The four that matter ---');
+  ['Рестораны','Развлечения','Дом','Подарки'].forEach(c =>
+    Logger.log(c + ': S$' + (v[c] ? v[c].total : 'MISSING')));
 }
 
 /**
