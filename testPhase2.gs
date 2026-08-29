@@ -139,7 +139,8 @@ function testReconcilerDiffEngine() {
   ];
 
   // 3. Enrich mock items to generate dedupe keys
-  const enrichedMock = mockExtractedFromPdf.map(item => enrichTransaction(item));
+  const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap() : null;
+  const enrichedMock = mockExtractedFromPdf.map(item => enrichTransaction(item, categoryBucketMap));
   
   // 4. Run Diff Engine
   const missingTransactions = getMissingTransactions(enrichedMock);

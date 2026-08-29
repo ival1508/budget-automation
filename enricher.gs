@@ -230,10 +230,10 @@ function generateFuzzyDedupeKeys(date, account, amount, where) {
  * currency calculations, default inferences, and a deduplication key.
  * 
  * @param {Object} parsedRow - The raw/parsed transaction object from LLM or input parser.
+ * @param {Object<string, string>} [categoryBucketMap] - Optional pre-loaded category-to-bucket map. If omitted, loaded via getCategoryBucketMap().
  * @return {Object} The enriched transaction object ready for confirmation / writing.
- * @throws {Error} If category is invalid/unmapped (strictly no fallback guessing).
  */
-function enrichTransaction(parsedRow) {
+function enrichTransaction(parsedRow, categoryBucketMap) {
   if (!parsedRow || typeof parsedRow !== 'object') {
     throw new Error('enrichTransaction requires a valid transaction object.');
   }
@@ -259,20 +259,26 @@ function enrichTransaction(parsedRow) {
   }
 
   // 2. Deterministic 50/30/20 Bucket Assignment (§4.6, §6.3)
+  const catMap = categoryBucketMap || (typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap() : {});
   const category = parsedRow.category || (aliasMatch && typeof aliasMatch === 'object' && aliasMatch.category) || 'Другое';
-  if (!category || !(category in CATEGORY_TO_BUCKET_MAP)) {
-    throw new Error(
-      `Invalid or unmapped category: "${category}". Fallback bucket guessing is disallowed.`
-    );
+  let bucket = catMap ? catMap[category] : undefined;
+
+  let needsReview = Boolean(parsedRow.needs_review);
+  const flags = Array.isArray(parsedRow.flags) ? [...parsedRow.flags] : [];
+
+  if (!bucket || bucket === 'UNKNOWN' || !(category in catMap)) {
+    Logger.log(`⚠️ [LOUD WARNING] Unrecognized, absent, or UNKNOWN bucket for category "${category}". Flagging transaction for review.`);
+    bucket = 'UNKNOWN';
+    needsReview = true;
+    if (!flags.includes('unknown_category')) {
+      flags.push('unknown_category');
+    }
   }
-  const bucket = CATEGORY_TO_BUCKET_MAP[category];
 
   // 3. Currency & SGD Amount Calculation (§4.5, §6.2)
   const currency = (parsedRow.currency || 'SGD').toUpperCase();
   const amount = Number(parsedRow.amount) || 0;
   let amountSgd = parsedRow.amount_sgd;
-  let needsReview = Boolean(parsedRow.needs_review);
-  const flags = Array.isArray(parsedRow.flags) ? [...parsedRow.flags] : [];
 
   if (currency === 'SGD') {
     amountSgd = amount;
@@ -425,3 +431,97 @@ function getMissingTransactions(extractedTransactions, existingSheetData) {
 
   return missing;
 }
+
+/**
+ * Batch-enriches an array of parsed transactions, loading getCategoryBucketMap() once.
+ * 
+ * @param {Array<Object>} transactions - Array of raw/parsed transaction objects.
+ * @param {Object<string, string>} [categoryBucketMap] - Optional pre-loaded category-to-bucket map.
+ * @return {Array<Object>} Array of enriched transaction objects.
+ */
+function enrichTransactions(transactions, categoryBucketMap) {
+  if (!Array.isArray(transactions)) return [];
+  const map = categoryBucketMap || (typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap() : null);
+  return transactions.map(txn => enrichTransaction(txn, map));
+}
+
+/**
+ * Test function for enrichTransaction using runtime category map:
+ * Enriches three fake transactions:
+ * 1. "Рестораны" (expected: Wants, needs_review: false)
+ * 2. "Квартира" (expected: Needs, needs_review: false)
+ * 3. "НесуществующаяКатегория" (expected: UNKNOWN, needs_review: true, flagged for review)
+ */
+function test_enrichBucketFromSheet() {
+  Logger.log('====================================================');
+  Logger.log('      TEST: test_enrichBucketFromSheet() EXECUTION');
+  Logger.log('====================================================\n');
+
+  // Load category map once per batch
+  const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap() : null;
+  Logger.log(`Category map loaded with ${categoryBucketMap ? Object.keys(categoryBucketMap).length : 0} categories.\n`);
+
+  const fakeTxns = [
+    {
+      date: '30.08.2026',
+      account: 'DBS CC SGD',
+      amount: 45.50,
+      currency: 'SGD',
+      where: 'Test Restaurant',
+      category: 'Рестораны',
+      source: 'test'
+    },
+    {
+      date: '30.08.2026',
+      account: 'DBS SGD',
+      amount: 1500.00,
+      currency: 'SGD',
+      where: 'Rental Payment',
+      category: 'Квартира',
+      source: 'test'
+    },
+    {
+      date: '30.08.2026',
+      account: 'Citibank CC',
+      amount: 99.99,
+      currency: 'SGD',
+      where: 'Mystery Shop',
+      category: 'НесуществующаяКатегория',
+      source: 'test'
+    }
+  ];
+
+  const enriched = fakeTxns.map((txn, index) => {
+    Logger.log(`--- Enriching Txn ${index + 1}: Category "${txn.category}" ---`);
+    return enrichTransaction(txn, categoryBucketMap);
+  });
+
+  Logger.log('\n--- Assertion Results ---');
+
+  let allPassed = true;
+
+  // 1. Assert Рестораны -> Wants
+  const txn1 = enriched[0];
+  const pass1 = txn1.bucket === 'Wants' && txn1.needs_review === false;
+  Logger.log(`1. Рестораны: Bucket="${txn1.bucket}" (Expected: Wants), needs_review=${txn1.needs_review} (Expected: false) -> ${pass1 ? '✅ PASS' : '❌ FAIL'}`);
+  if (!pass1) allPassed = false;
+
+  // 2. Assert Квартира -> Needs
+  const txn2 = enriched[1];
+  const pass2 = txn2.bucket === 'Needs' && txn2.needs_review === false;
+  Logger.log(`2. Квартира: Bucket="${txn2.bucket}" (Expected: Needs), needs_review=${txn2.needs_review} (Expected: false) -> ${pass2 ? '✅ PASS' : '❌ FAIL'}`);
+  if (!pass2) allPassed = false;
+
+  // 3. Assert НесуществующаяКатегория -> UNKNOWN, needs_review: true (flagged for review, not defaulted to Wants)
+  const txn3 = enriched[2];
+  const pass3 = txn3.bucket === 'UNKNOWN' && txn3.needs_review === true;
+  Logger.log(`3. НесуществующаяКатегория: Bucket="${txn3.bucket}" (Expected: UNKNOWN), needs_review=${txn3.needs_review} (Expected: true) -> ${pass3 ? '✅ PASS' : '❌ FAIL'}`);
+  if (!pass3) allPassed = false;
+
+  Logger.log('\n====================================================');
+  Logger.log(allPassed ? '🎉 ALL ASSERTIONS PASSED' : '❌ SOME ASSERTIONS FAILED');
+  Logger.log('====================================================');
+
+  return enriched;
+}
+

@@ -404,6 +404,144 @@ function getDailySaldo(ss) {
 }
 
 /**
+ * STAGE 1: Reads daily pacing metrics directly from the active monthly tab without recomputing the saldo chain.
+ * Returns:
+ * - K_cumulative_today: monthly tab col K, today's row — the reality check
+ * - L_saldo_yesterday: col L, yesterday's row (0 if day 1)
+ * - D17_flat_daily: cell D17 — flat pacing
+ * - D19_realistic_daily: cell D19 — budget left ÷ days left
+ * - days_left: remaining days in the month (including today)
+ * - days_to_positive: Math.ceil(Math.abs(K)/D17) when K < 0, else 0
+ * 
+ * @param {Date} [optDate] - Optional Date instance. Defaults to current SGT date.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
+ * @return {{ K_cumulative_today: number, L_saldo_yesterday: number, D17_flat_daily: number, D19_realistic_daily: number, days_left: number, days_to_positive: number }}
+ */
+function getDailyPacing(optDate, ss) {
+  let targetDate = (optDate instanceof Date) ? optDate : null;
+  let spreadsheet = ss;
+  if (optDate && typeof optDate.getSheetByName === 'function') {
+    spreadsheet = optDate;
+    targetDate = (ss instanceof Date) ? ss : null;
+  }
+  if (!targetDate) {
+    targetDate = new Date();
+  }
+
+  // Date calculations in Asia/Singapore
+  const targetYear = parseInt(Utilities.formatDate(targetDate, 'Asia/Singapore', 'yyyy'), 10);
+  const targetMonth = parseInt(Utilities.formatDate(targetDate, 'Asia/Singapore', 'M'), 10); // 1-12
+  const targetDay = parseInt(Utilities.formatDate(targetDate, 'Asia/Singapore', 'd'), 10);   // 1-31
+  const targetFullStr = Utilities.formatDate(targetDate, 'Asia/Singapore', 'dd.MM.yyyy');
+
+  const totalDaysInMonth = new Date(targetYear, targetMonth, 0).getDate();
+  const daysLeft = Math.max(1, totalDaysInMonth - targetDay + 1);
+
+  const defaultResult = {
+    K_cumulative_today: 0,
+    L_saldo_yesterday: 0,
+    D17_flat_daily: 0,
+    D19_realistic_daily: 0,
+    days_left: daysLeft,
+    days_to_positive: 0
+  };
+
+  try {
+    const activeInfo = getActiveMonthTab(spreadsheet, targetDate);
+    if (!activeInfo || !activeInfo.exists) {
+      Logger.log(`⚠️ Warning: ${activeInfo ? activeInfo.message : 'Active month tab not found'}`);
+      return defaultResult;
+    }
+    const sheet = activeInfo.sheet;
+
+    // 1. Read Cell D17 (Flat Daily Pacing)
+    const d17CellRef = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.MONTHLY_TAB_STRUCTURE && SHEET_FACTS.MONTHLY_TAB_STRUCTURE.FLAT_DAILY_PACING_CELL) || 'D17';
+    const d17Range = sheet.getRange(d17CellRef);
+    const d17FlatDaily = parseAmountNumber(d17Range.getValue(), d17Range.getDisplayValue());
+
+    // 2. Read Cell D19 (Realistic Daily Budget = budget left ÷ days left)
+    const d19CellRef = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.MONTHLY_TAB_STRUCTURE && (SHEET_FACTS.MONTHLY_TAB_STRUCTURE.CURRENT_DAILY_BUDGET_CELL || SHEET_FACTS.MONTHLY_TAB_STRUCTURE.saldoCell)) || 'D19';
+    const d19Range = sheet.getRange(d19CellRef);
+    const d19RealisticDaily = parseAmountNumber(d19Range.getValue(), d19Range.getDisplayValue());
+
+    // 3. Read Daily Tracker Range (Cols H to L starting from Row 2)
+    // Col H (index 0): Date
+    // Col J (index 2): Spend
+    // Col K (index 3): Budget Cumulative Beginning of Day
+    // Col L (index 4): Saldo End of Day
+    const lastRow = Math.max(sheet.getLastRow(), 32);
+    const trackerRange = sheet.getRange(2, 8, lastRow - 1, 5);
+    const rawValues = trackerRange.getValues();
+    const displayValues = trackerRange.getDisplayValues();
+
+    let kCumulativeToday = 0;
+    let lSaldoYesterday = 0;
+    let todayRowFound = false;
+    let yesterdayRowFound = false;
+
+    const yesterdayDay = targetDay - 1;
+
+    for (let r = 0; r < rawValues.length; r++) {
+      const rawDateCell = rawValues[r][0];
+      const displayDateStr = String(displayValues[r][0] || '').trim();
+
+      let rowDay = null;
+      if (rawDateCell instanceof Date) {
+        if (rawDateCell.getFullYear() === targetYear && rawDateCell.getMonth() === (targetMonth - 1)) {
+          rowDay = rawDateCell.getDate();
+        }
+      } else if (typeof rawDateCell === 'number') {
+        rowDay = rawDateCell;
+      } else if (displayDateStr) {
+        if (displayDateStr === targetFullStr) {
+          rowDay = targetDay;
+        } else {
+          const match = displayDateStr.match(/^(\d{1,2})[\/\.-]?/);
+          if (match) {
+            rowDay = parseInt(match[1], 10);
+          }
+        }
+      }
+
+      // Fallback: row index correspondence (Row 2 = Day 1, etc.)
+      if (rowDay === null && r < totalDaysInMonth) {
+        rowDay = r + 1;
+      }
+
+      // Match Today
+      if (rowDay === targetDay && !todayRowFound) {
+        kCumulativeToday = parseAmountNumber(rawValues[r][3], displayValues[r][3]); // Col K
+        todayRowFound = true;
+      }
+
+      // Match Yesterday
+      if (yesterdayDay >= 1 && rowDay === yesterdayDay && !yesterdayRowFound) {
+        lSaldoYesterday = parseAmountNumber(rawValues[r][4], displayValues[r][4]); // Col L
+        yesterdayRowFound = true;
+      }
+    }
+
+    // 4. Calculate days_to_positive: Math.ceil(Math.abs(K)/D17) when K < 0, else 0
+    let daysToPositive = 0;
+    if (kCumulativeToday < 0) {
+      daysToPositive = (d17FlatDaily > 0) ? Math.ceil(Math.abs(kCumulativeToday) / d17FlatDaily) : 0;
+    }
+
+    return {
+      K_cumulative_today: kCumulativeToday,
+      L_saldo_yesterday: lSaldoYesterday,
+      D17_flat_daily: d17FlatDaily,
+      D19_realistic_daily: d19RealisticDaily,
+      days_left: daysLeft,
+      days_to_positive: daysToPositive
+    };
+  } catch (e) {
+    Logger.log(`Error in getDailyPacing: ${e.message}`);
+    return defaultResult;
+  }
+}
+
+/**
  * Reads the "50/30/20" tab to extract actual spending pacing and granular sub-category breakdowns.
  * Layout: Col A = Bucket Type, Col B = Category Name / Total. Row 1 = Month Headers "MM/YYYY".
  * Target month column holds $ actual spend, target month column + 1 holds % percentage.
@@ -1142,7 +1280,91 @@ function runStage1Checkpoint() {
   Logger.log(`Total Categories in Map: ${Object.keys(catBucketMap).length}`);
   Logger.log(JSON.stringify(catBucketMap, null, 2));
 
+  Logger.log('\n--- 8. getDailyPacing() [Direct Cell Reads from Monthly Tab] ---');
+  const dailyPacing = getDailyPacing(null, ss);
+  Logger.log(JSON.stringify(dailyPacing, null, 2));
+
   Logger.log('\n====================================================');
   Logger.log('   🏁 STAGE 1 CHECKPOINT COMPLETED FOR VAL TO EYEBALL');
   Logger.log('====================================================');
+}
+
+/**
+ * Test function for getDailyPacing():
+ * Asserts:
+ * - D17 and D19 both parse to numbers
+ * - D19_realistic_daily EXACTLY equals cell D19 read directly
+ * - days_to_positive is 0 when K >= 0; matches ceil(|K|/D17) when K < 0
+ * Prints all six values for comparison against the sheet.
+ */
+function test_getDailyPacing(optDate) {
+  Logger.log('====================================================');
+  Logger.log('      TEST: getDailyPacing() EXECUTION');
+  Logger.log('====================================================\n');
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const pacing = getDailyPacing(optDate, ss);
+
+  Logger.log('Daily Pacing Output:\n' + JSON.stringify(pacing, null, 2));
+
+  Logger.log('\n--- Individual Field Values (Compare Against Sheet) ---');
+  Logger.log(`1. K_cumulative_today:   ${pacing.K_cumulative_today}`);
+  Logger.log(`2. L_saldo_yesterday:    ${pacing.L_saldo_yesterday}`);
+  Logger.log(`3. D17_flat_daily:       ${pacing.D17_flat_daily}`);
+  Logger.log(`4. D19_realistic_daily:  ${pacing.D19_realistic_daily}`);
+  Logger.log(`5. days_left:            ${pacing.days_left}`);
+  Logger.log(`6. days_to_positive:     ${pacing.days_to_positive}`);
+
+  Logger.log('\n--- Assertion Checks ---');
+  let passed = true;
+
+  // 1. D17 and D19 both parse to numbers
+  const isD17Num = typeof pacing.D17_flat_daily === 'number' && !isNaN(pacing.D17_flat_daily);
+  const isD19Num = typeof pacing.D19_realistic_daily === 'number' && !isNaN(pacing.D19_realistic_daily);
+  if (isD17Num && isD19Num) {
+    Logger.log(`✅ PASS: D17 (${pacing.D17_flat_daily}) and D19 (${pacing.D19_realistic_daily}) parse to numbers.`);
+  } else {
+    Logger.log(`❌ FAIL: D17 (${pacing.D17_flat_daily}) or D19 (${pacing.D19_realistic_daily}) is not a number.`);
+    passed = false;
+  }
+
+  // 2. D19_realistic_daily EXACTLY equals cell D19 read directly
+  const activeTabInfo = getActiveMonthTab(ss, optDate);
+  if (activeTabInfo && activeTabInfo.exists) {
+    const d19Cell = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.MONTHLY_TAB_STRUCTURE && (SHEET_FACTS.MONTHLY_TAB_STRUCTURE.CURRENT_DAILY_BUDGET_CELL || SHEET_FACTS.MONTHLY_TAB_STRUCTURE.saldoCell)) || 'D19';
+    const r = activeTabInfo.sheet.getRange(d19Cell);
+    const directD19 = parseAmountNumber(r.getValue(), r.getDisplayValue());
+    if (pacing.D19_realistic_daily === directD19) {
+      Logger.log(`✅ PASS: D19_realistic_daily (${pacing.D19_realistic_daily}) EXACTLY equals cell D19 read directly (${directD19}).`);
+    } else {
+      Logger.log(`❌ FAIL: D19_realistic_daily (${pacing.D19_realistic_daily}) does not equal direct D19 (${directD19}).`);
+      passed = false;
+    }
+  } else {
+    Logger.log(`ℹ️ Info: Active monthly sheet not present for direct cell D19 read check.`);
+  }
+
+  // 3. days_to_positive is 0 when K >= 0; matches ceil(|K|/D17) when K < 0
+  if (pacing.K_cumulative_today >= 0) {
+    if (pacing.days_to_positive === 0) {
+      Logger.log(`✅ PASS: K_cumulative_today >= 0 (${pacing.K_cumulative_today}) -> days_to_positive is 0.`);
+    } else {
+      Logger.log(`❌ FAIL: K_cumulative_today >= 0 (${pacing.K_cumulative_today}) -> days_to_positive is ${pacing.days_to_positive} (Expected: 0).`);
+      passed = false;
+    }
+  } else {
+    const expectedDays = (pacing.D17_flat_daily > 0) ? Math.ceil(Math.abs(pacing.K_cumulative_today) / pacing.D17_flat_daily) : 0;
+    if (pacing.days_to_positive === expectedDays) {
+      Logger.log(`✅ PASS: K_cumulative_today < 0 (${pacing.K_cumulative_today}) -> days_to_positive (${pacing.days_to_positive}) matches Math.ceil(|K|/D17) = ${expectedDays}.`);
+    } else {
+      Logger.log(`❌ FAIL: K_cumulative_today < 0 (${pacing.K_cumulative_today}) -> days_to_positive is ${pacing.days_to_positive} (Expected: ${expectedDays}).`);
+      passed = false;
+    }
+  }
+
+  Logger.log('\n====================================================');
+  Logger.log(passed ? '🎉 ALL ASSERTIONS PASSED' : '❌ SOME ASSERTIONS FAILED');
+  Logger.log('====================================================');
+
+  return pacing;
 }

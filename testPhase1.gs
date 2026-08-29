@@ -49,8 +49,9 @@ function runPhase1Tests() {
 
   // Step 3: Enrich mock transactions
   Logger.log('[2/4] Enriching transactions with 50/30/20 buckets & dedupe keys...');
+  const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap() : null;
   const enrichedTransactions = mockTransactions.map((txn, index) => {
-    const enriched = enrichTransaction(txn);
+    const enriched = enrichTransaction(txn, categoryBucketMap);
     Logger.log(`  Row ${index + 1}: Category "${enriched.category}" -> Bucket "${enriched.bucket}" | Key: ${enriched.dedupe_key.substring(0, 12)}...`);
     return enriched;
   });

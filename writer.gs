@@ -71,11 +71,12 @@ function appendTransactions(transactionsArray, ss) {
   // 2. Idempotency Filtering: Filter out duplicate transactions unless force_add is set (§6.7)
   const toAppend = [];
   let skippedCount = 0;
+  const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap() : null;
 
   for (let i = 0; i < transactionsArray.length; i++) {
     const txn = transactionsArray[i];
     // Ensure transaction is enriched before checking key
-    const enriched = txn.dedupe_key ? txn : enrichTransaction(txn);
+    const enriched = txn.dedupe_key ? txn : enrichTransaction(txn, categoryBucketMap);
 
     const isForced = Array.isArray(enriched.flags) && enriched.flags.indexOf('force_add') !== -1;
 

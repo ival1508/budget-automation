@@ -49,6 +49,7 @@ const SHEET_FACTS = {
   },
   
   MONTHLY_TAB_STRUCTURE: {
+    FLAT_DAILY_PACING_CELL: 'D17',
     CURRENT_DAILY_BUDGET_CELL: 'D19', // Effectively SALDO_END_OF_THE_DAY divided by number of days left in the month
     saldoCell: 'D19', // Alias for Stage 1 reader tasks
     // Structural range: Fixed mandatory expenses template list

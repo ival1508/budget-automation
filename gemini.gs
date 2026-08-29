@@ -173,7 +173,8 @@ function extractTransactions(inputs, context) {
   }
 
   // 6. Enrich each transaction deterministically & flag duplicates against existing sheet data (§6.7)
-  let enrichedTransactions = rawParsedTransactions.map(rawTxn => enrichTransaction(rawTxn));
+  const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap() : null;
+  let enrichedTransactions = rawParsedTransactions.map(rawTxn => enrichTransaction(rawTxn, categoryBucketMap));
   if (typeof flagExistingDuplicates === 'function') {
     enrichedTransactions = flagExistingDuplicates(enrichedTransactions);
   }
