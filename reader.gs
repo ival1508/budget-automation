@@ -542,19 +542,49 @@ function getDailyPacing(optDate, ss) {
 }
 
 /**
- * Reads the "50/30/20" tab to extract actual spending pacing and granular sub-category breakdowns.
+ * Reads the "50/30/20" tab to extract actual spending pacing and targets for Needs, Wants, and Savings.
  * Layout: Col A = Bucket Type, Col B = Category Name / Total. Row 1 = Month Headers "MM/YYYY".
- * Target month column holds $ actual spend, target month column + 1 holds % percentage.
+ * Target month column holds $ actual spend, Column AE (rows 1-2) holds target header and target dollar amounts.
+ * 
+ * Returns exactly:
+ * {
+ *   needs: { actual, target },
+ *   wants: { actual, target },
+ *   savings: { actual, target },
+ *   target_header
+ * }
  * 
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
- * @return {Object} Granular pacing object { needs: { total_actual, total_percent, sub_categories }, ... }
+ * @return {{ needs: { actual: number, target: number }, wants: { actual: number, target: number }, savings: { actual: number, target: number }, target_header: string }}
  */
-function get503020Status(ss) {
+// Set to true to inspect row-by-row parsing and summary matching on the 50/30/20 tab
+const DEBUG_503020 = false;
+
+/**
+ * Reads the "50/30/20" tab to extract actual spending pacing and targets for Needs, Wants, and Savings.
+ * Layout: Col A = Bucket Type, Col B = Category Name / Total. Row 1 = Month Headers "MM/YYYY".
+ * Target month column holds $ actual spend, Column AE (rows 1-2) holds target header and target dollar amounts.
+ * 
+ * Returns exactly:
+ * {
+ *   needs: { actual, target },
+ *   wants: { actual, target },
+ *   savings: { actual, target },
+ *   target_header
+ * }
+ * 
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
+ * @param {boolean} [optDebug] - Optional debug flag override.
+ * @return {{ needs: { actual: number, target: number }, wants: { actual: number, target: number }, savings: { actual: number, target: number }, target_header: string }}
+ */
+function get503020Status(ss, optDebug) {
+  const isDebug = (typeof optDebug === 'boolean') ? optDebug : (typeof DEBUG_503020 !== 'undefined' ? Boolean(DEBUG_503020) : false);
+
   const defaultPacing = {
     needs: { actual: 0, target: 0, total_actual: 0, total_percent: '0%', sub_categories: [] },
     wants: { actual: 0, target: 0, total_actual: 0, total_percent: '0%', sub_categories: [] },
     savings: { actual: 0, target: 0, total_actual: 0, total_percent: '0%', sub_categories: [] },
-    taxes: { actual: 0, target: 0, total_actual: 0, total_percent: '0%', sub_categories: [] }
+    target_header: ''
   };
 
   try {
@@ -571,11 +601,68 @@ function get503020Status(ss) {
     const lastRow = sheet.getLastRow();
     if (lastCol === 0 || lastRow < 3) return defaultPacing;
 
-    // 1. Generate current month string in "MM/yyyy" format (e.g. "07/2026")
+    // Helper to safely extract string without ever returning literal "undefined" or "null"
+    function safeCellStr(val) {
+      if (val === null || val === undefined) return '';
+      const s = String(val).trim();
+      return (s === 'undefined' || s === 'null') ? '' : s;
+    }
+
+    // 1. Inspect Columns AC through AH (indices 29-34) at Row 1, and dynamically locate target header & target spend column
+    const colLabels = ['AC (29)', 'AD (30)', 'AE (31)', 'AF (32)', 'AG (33)', 'AH (34)'];
+    const startCol = 29;
+    const endCol = Math.min(34, lastCol);
+    const numInspectCols = Math.max(0, endCol - startCol + 1);
+
+    let targetHeader = '';
+    let targetSpendColIndex = -1; // 0-indexed column
+
+    if (numInspectCols > 0) {
+      const inspectRow1 = sheet.getRange(1, startCol, 1, numInspectCols).getDisplayValues()[0];
+      for (let c = 0; c < numInspectCols; c++) {
+        const colNum = startCol + c;
+        const colLabel = colLabels[c] || `Col ${colNum}`;
+        const r1 = safeCellStr(inspectRow1 ? inspectRow1[c] : '');
+        const lowerR1 = r1.toLowerCase();
+
+        // Match column if Row 1 contains target keyword (e.g. "Target month")
+        if (!targetHeader && (lowerR1.includes('target') || lowerR1.includes('цел') || lowerR1.includes('план'))) {
+          targetHeader = r1;
+          targetSpendColIndex = colNum - 1; // 0-indexed
+          if (isDebug) {
+            Logger.log(`  -> Matched Target Header in ${colLabel}: "${targetHeader}" (0-indexed col: ${targetSpendColIndex})`);
+          }
+        }
+      }
+    }
+
+    // Fallback: If no explicit keyword matched across AC-AH, check Column AE (col 31) Row 1 directly
+    if (!targetHeader && lastCol >= 31) {
+      const aeRow1 = sheet.getRange(1, 31).getDisplayValue();
+      const h1 = safeCellStr(aeRow1);
+      if (h1) {
+        targetHeader = h1;
+        targetSpendColIndex = 30; // index 30 = Col AE
+      }
+    }
+
+    if (targetSpendColIndex === -1) {
+      targetSpendColIndex = 30; // default to Column AE
+    }
+
+    if (!targetHeader) {
+      Logger.log('⚠️ [LOUD WARNING] Target header could not be found in Row 1 of 50/30/20 tab (checked columns AC-AH). Returning empty string.');
+      targetHeader = '';
+    }
+
+    defaultPacing.target_header = targetHeader;
+
+    // 2. Generate current month string in "MM/yyyy" format (e.g. "08/2026") and find target month column index
     const now = new Date();
     const targetMonthYearStr = Utilities.formatDate(now, 'Asia/Singapore', 'MM/yyyy');
+    const altMonthYearStr = Utilities.formatDate(now, 'Asia/Singapore', 'M/yyyy');
 
-    // 2. Read Row 1 to find the column index matching "MM/yyyy"
+    // Read Row 1 to find the column index matching "MM/yyyy"
     const headerRaw = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
     const headerDisplay = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
 
@@ -592,14 +679,15 @@ function get503020Status(ss) {
         formattedHeader = dispVal;
       }
 
-      if (formattedHeader.indexOf(targetMonthYearStr) !== -1 || dispVal.indexOf(targetMonthYearStr) !== -1) {
+      if (formattedHeader.indexOf(targetMonthYearStr) !== -1 || dispVal.indexOf(targetMonthYearStr) !== -1 ||
+          formattedHeader.indexOf(altMonthYearStr) !== -1 || dispVal.indexOf(altMonthYearStr) !== -1) {
         targetColIndex = c;
         break;
       }
     }
 
     if (targetColIndex === -1) {
-      Logger.log(`⚠️ Warning: Current month header "${targetMonthYearStr}" not found in Row 1 of "50/30/20" tab.`);
+      Logger.log(`⚠️ [LOUD WARNING] Current month header "${targetMonthYearStr}" not found in Row 1 of "50/30/20" tab. Returning zero pacing.`);
       return defaultPacing;
     }
 
@@ -613,7 +701,7 @@ function get503020Status(ss) {
       needs: { actual: 0, target: 0, total_actual: 0, total_percent: '0%', sub_categories: [] },
       wants: { actual: 0, target: 0, total_actual: 0, total_percent: '0%', sub_categories: [] },
       savings: { actual: 0, target: 0, total_actual: 0, total_percent: '0%', sub_categories: [] },
-      taxes: { actual: 0, target: 0, total_actual: 0, total_percent: '0%', sub_categories: [] }
+      target_header: targetHeader
     };
 
     let currentBucket = null;
@@ -632,45 +720,52 @@ function get503020Status(ss) {
       return '0%';
     }
 
-    // Diagnostic log to inspect sheet layout during execution
-    Logger.log('\n--- [DEBUG] 50/30/20 Tab Row Inspection (Cols A, B, Current Month, AE, AF) ---');
-    for (let d = 0; d < rowDisplayData.length; d++) {
-      const rNum = d + 3;
-      const cA = String(rowDisplayData[d][0] || '').trim();
-      const cB = String(rowDisplayData[d][1] || '').trim();
-      const cAmt = targetColIndex !== -1 ? parseAmountNumber(rowRawData[d][targetColIndex], rowDisplayData[d][targetColIndex]) : 0;
-      const cTarget = rowRawData[d].length > 30 ? parseAmountNumber(rowRawData[d][30], rowDisplayData[d][30]) : 0;
-      if (cA || cB || cAmt || cTarget) {
-        Logger.log(`[Row ${rNum}] Col A: "${cA}" | Col B: "${cB}" | Current Month Amt: ${cAmt} | Col AE Target: ${cTarget}`);
+    // Optional diagnostic log to inspect sheet layout during execution
+    if (isDebug) {
+      Logger.log('\n--- [DEBUG] 50/30/20 Tab Row Inspection (Cols A, B, Current Month, Target Cols) ---');
+      for (let d = 0; d < rowDisplayData.length; d++) {
+        const rNum = d + 3;
+        const cA = String(rowDisplayData[d][0] || '').trim();
+        const cB = String(rowDisplayData[d][1] || '').trim();
+        const cAmt = targetColIndex !== -1 ? parseAmountNumber(rowRawData[d][targetColIndex], rowDisplayData[d][targetColIndex]) : 0;
+        const cTarget = (rowRawData[d].length > targetSpendColIndex && targetSpendColIndex !== -1)
+          ? parseAmountNumber(rowRawData[d][targetSpendColIndex], rowDisplayData[d][targetSpendColIndex])
+          : (rowRawData[d].length > 30 ? parseAmountNumber(rowRawData[d][30], rowDisplayData[d][30]) : 0);
+        if (cA || cB || cAmt || cTarget) {
+          Logger.log(`[Row ${rNum}] Col A: "${cA}" | Col B: "${cB}" | Current Month Amt: ${cAmt} | Target Spend: ${cTarget}`);
+        }
       }
+      Logger.log('---------------------------------------------------------------------------\n');
     }
-    Logger.log('---------------------------------------------------------------------------\n');
 
     // 4. Iterate through rows
     for (let r = 0; r < rowDisplayData.length; r++) {
       const colA = String(rowDisplayData[r][0] || '').trim();
       const colB = String(rowDisplayData[r][1] || '').trim();
 
-      // Determine active bucket from Column A
+      // Determine active bucket from Column A (Needs, Wants, Savings - strictly NO Taxes)
       const lowerA = colA.toLowerCase();
       if (lowerA.includes('needs') || lowerA.includes('потребности') || lowerA.includes('нужды')) {
         currentBucket = 'needs';
       } else if (lowerA.includes('wants') || lowerA.includes('желания') || lowerA.includes('хотелки')) {
         currentBucket = 'wants';
-      } else if (lowerA.includes('taxes') || lowerA.includes('налог')) {
-        currentBucket = 'taxes';
       } else if (lowerA.includes('savings') || lowerA.includes('сбережения') || lowerA.includes('отложения') || lowerA.includes('инвестиции')) {
         currentBucket = 'savings';
       }
 
       if (!currentBucket || (!colA && !colB)) continue;
 
-      const colAmount = parseAmountNumber(rowRawData[r][targetColIndex], rowDisplayData[r][targetColIndex]);
-      const colPercent = parsePercentString(rowRawData[r][targetColIndex + 1], rowDisplayData[r][targetColIndex + 1]);
+      const colAmount = targetColIndex !== -1 ? parseAmountNumber(rowRawData[r][targetColIndex], rowDisplayData[r][targetColIndex]) : 0;
+      const colPercent = (targetColIndex !== -1 && rowRawData[r].length > targetColIndex + 1)
+        ? parsePercentString(rowRawData[r][targetColIndex + 1], rowDisplayData[r][targetColIndex + 1])
+        : '0%';
 
-      // Target dollar value specifically from Column AE (index 30), Target % from Column AF (index 31)
-      const targetSpend = rowRawData[r].length > 30 ? parseAmountNumber(rowRawData[r][30], rowDisplayData[r][30]) : 0;
-      const targetPercent = rowRawData[r].length > 31 ? parsePercentString(rowRawData[r][31], rowDisplayData[r][31]) : '0%';
+      // Target dollar value from dynamically matched target column or Column AE (index 30)
+      const targetSpend = (rowRawData[r].length > targetSpendColIndex && targetSpendColIndex !== -1)
+        ? parseAmountNumber(rowRawData[r][targetSpendColIndex], rowDisplayData[r][targetSpendColIndex])
+        : (rowRawData[r].length > 30 ? parseAmountNumber(rowRawData[r][30], rowDisplayData[r][30]) : 0);
+      const targetPercentCol = targetSpendColIndex !== -1 ? targetSpendColIndex + 1 : 31;
+      const targetPercent = rowRawData[r].length > targetPercentCol ? parsePercentString(rowRawData[r][targetPercentCol], rowDisplayData[r][targetPercentCol]) : '0%';
 
       const lowerB = colB.toLowerCase();
 
@@ -679,19 +774,26 @@ function get503020Status(ss) {
         continue;
       }
 
-      // Do NOT treat (colA !== '' && !colB) as a total row; that is typically a section header
+      // Check if this row is a spreadsheet summary / non-category row (Total, Total income, Difference, etc.)
+      const isExcludedSummaryRow = lowerB === 'total' || lowerB === 'total income' || lowerB === 'difference' ||
+                                  lowerB === 'итого' || lowerB === 'всего' || lowerB === 'разница' ||
+                                  lowerB === 'всего доход' || lowerB === 'итого доход' || lowerB === 'доход' ||
+                                  lowerB.includes('difference') || lowerB.includes('разница') ||
+                                  (lowerB.startsWith('total') && !lowerB.includes('needs') && !lowerB.includes('wants') && !lowerB.includes('savings'));
+
+      // Identify bucket summary/total row
       const isTotalRow = lowerB.includes('total') || lowerB.includes('итого') || lowerB.includes('всего') ||
                          lowerA.includes('total') || lowerA.includes('итого') || lowerA.includes('всего') ||
                          (colA !== '' && colB !== '' && lowerB === lowerA) ||
                          (currentBucket === 'needs' && (lowerB === 'needs' || lowerB === 'потребности' || lowerB === 'нужды')) ||
                          (currentBucket === 'wants' && (lowerB === 'wants' || lowerB === 'желания' || lowerB === 'хотелки')) ||
-                         (currentBucket === 'savings' && (lowerB === 'savings' || lowerB === 'сбережения' || lowerB === 'отложения')) ||
-                         (currentBucket === 'taxes' && (lowerB === 'taxes' || lowerB === 'налог' || lowerB === 'налоги'));
+                         (currentBucket === 'savings' && (lowerB === 'savings' || lowerB === 'сбережения' || lowerB === 'отложения'));
 
       if (isTotalRow) {
-        // Prevent subsequent Grand Total rows at the bottom of the table from overwriting already matched category summaries
         if (!result[currentBucket].found_summary) {
-          Logger.log(`📌 Matched summary for [${currentBucket}] at Row ${r + 3}: Actual=${colAmount}, Target=${targetSpend}`);
+          if (isDebug) {
+            Logger.log(`📌 Matched summary for [${currentBucket}] at Row ${r + 3}: Actual=${colAmount}, Target=${targetSpend}`);
+          }
           result[currentBucket].total_actual = colAmount;
           result[currentBucket].actual = colAmount;
           result[currentBucket].total_percent = colPercent;
@@ -699,24 +801,23 @@ function get503020Status(ss) {
           result[currentBucket].target_percent = targetPercent;
           result[currentBucket].found_summary = true;
         }
-      } else {
-        // Do not add section headers (where colB is empty and colA is the bucket name) to subcategories
-        if (colB) {
-          result[currentBucket].sub_categories.push({
-            name: colB || colA,
-            actual: colAmount,
-            percent: colPercent,
-            target: targetSpend
-          });
-        }
+      } else if (!isExcludedSummaryRow && colB) {
+        result[currentBucket].sub_categories.push({
+          name: colB || colA,
+          actual: colAmount,
+          percent: colPercent,
+          target: targetSpend
+        });
       }
     }
 
-    // Only fallback to summing sub-categories if NO summary row was encountered for a bucket
-    Object.keys(result).forEach(k => {
+    // Fallback: sum sub-categories if no summary row was encountered for a bucket
+    ['needs', 'wants', 'savings'].forEach(k => {
       const bucket = result[k];
       if (!bucket.found_summary && bucket.sub_categories.length > 0) {
-        Logger.log(`⚠️ No summary row found for [${k}]; falling back to sum of ${bucket.sub_categories.length} subcategories.`);
+        if (isDebug) {
+          Logger.log(`⚠️ No summary row found for [${k}]; falling back to sum of ${bucket.sub_categories.length} subcategories.`);
+        }
         bucket.actual = Number(bucket.sub_categories.reduce((sum, sub) => sum + sub.actual, 0).toFixed(2));
         bucket.total_actual = bucket.actual;
         bucket.target = Number(bucket.sub_categories.reduce((sum, sub) => sum + sub.target, 0).toFixed(2));
@@ -724,7 +825,12 @@ function get503020Status(ss) {
       delete bucket.found_summary;
     });
 
-    return result;
+    return {
+      needs: { actual: result.needs.actual, target: result.needs.target, total_actual: result.needs.total_actual, total_percent: result.needs.total_percent, sub_categories: result.needs.sub_categories },
+      wants: { actual: result.wants.actual, target: result.wants.target, total_actual: result.wants.total_actual, total_percent: result.wants.total_percent, sub_categories: result.wants.sub_categories },
+      savings: { actual: result.savings.actual, target: result.savings.target, total_actual: result.savings.total_actual, total_percent: result.savings.total_percent, sub_categories: result.savings.sub_categories },
+      target_header: result.target_header
+    };
   } catch (e) {
     Logger.log(`Error in get503020Status: ${e.message}`);
     return defaultPacing;
@@ -1261,15 +1367,9 @@ function runStage1Checkpoint() {
   const dailySaldo = getDailySaldo(ss);
   Logger.log(JSON.stringify(dailySaldo, null, 2));
 
-  Logger.log('\n--- 5. get503020Status() [Needs/Wants/Savings/Taxes vs Target] ---');
+  Logger.log('\n--- 5. get503020Status() [Needs/Wants/Savings vs Target] ---');
   const pacing503020 = get503020Status(ss);
-  const pacingSummary = {
-    needs: { actual: pacing503020.needs.actual, target: pacing503020.needs.target, total_percent: pacing503020.needs.total_percent },
-    wants: { actual: pacing503020.wants.actual, target: pacing503020.wants.target, total_percent: pacing503020.wants.total_percent },
-    savings: { actual: pacing503020.savings.actual, target: pacing503020.savings.target, total_percent: pacing503020.savings.total_percent },
-    taxes: { actual: pacing503020.taxes.actual, target: pacing503020.taxes.target, total_percent: pacing503020.taxes.total_percent }
-  };
-  Logger.log(JSON.stringify(pacingSummary, null, 2));
+  Logger.log(JSON.stringify(pacing503020, null, 2));
 
   Logger.log('\n--- 6. getCategoryVelocity() [Volatile Discretionary Sums] ---');
   const velocity = getCategoryVelocity(ss);
@@ -1368,3 +1468,77 @@ function test_getDailyPacing(optDate) {
 
   return pacing;
 }
+
+/**
+ * Test function for get503020Status():
+ * Asserts:
+ * - Exactly three buckets (needs, wants, savings) and NO taxes bucket
+ * - All three buckets have actual AND target populated as numbers
+ * - target_header is a non-empty string
+ * Prints the entire result.
+ */
+function test_get503020Status() {
+  Logger.log('====================================================');
+  Logger.log('      TEST: get503020Status() EXECUTION');
+  Logger.log('====================================================\n');
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const pacing = get503020Status(ss);
+
+  Logger.log('50/30/20 Pacing Result:\n' + JSON.stringify(pacing, null, 2));
+
+  Logger.log('\n--- Individual Bucket Values ---');
+  Logger.log(`Target Header: "${pacing.target_header}"`);
+  Logger.log(`Needs:   Actual=${pacing.needs ? pacing.needs.actual : 'undefined'}, Target=${pacing.needs ? pacing.needs.target : 'undefined'}`);
+  Logger.log(`Wants:   Actual=${pacing.wants ? pacing.wants.actual : 'undefined'}, Target=${pacing.wants ? pacing.wants.target : 'undefined'}`);
+  Logger.log(`Savings: Actual=${pacing.savings ? pacing.savings.actual : 'undefined'}, Target=${pacing.savings ? pacing.savings.target : 'undefined'}`);
+
+  Logger.log('\n--- Assertion Checks ---');
+  let passed = true;
+
+  // 1. Assert three buckets exist and taxes bucket is absent
+  const hasNeeds = Boolean(pacing.needs);
+  const hasWants = Boolean(pacing.wants);
+  const hasSavings = Boolean(pacing.savings);
+  const hasNoTaxes = (pacing.taxes === undefined);
+
+  if (hasNeeds && hasWants && hasSavings && hasNoTaxes) {
+    Logger.log('✅ PASS: Exactly 3 buckets present (needs, wants, savings) and taxes bucket is absent.');
+  } else {
+    Logger.log(`❌ FAIL: Bucket structure incorrect. Needs: ${hasNeeds}, Wants: ${hasWants}, Savings: ${hasSavings}, NoTaxes: ${hasNoTaxes}`);
+    passed = false;
+  }
+
+  // 2. Assert all three buckets have actual AND target populated as valid numbers
+  const needsValid = typeof pacing.needs.actual === 'number' && !isNaN(pacing.needs.actual) &&
+                     typeof pacing.needs.target === 'number' && !isNaN(pacing.needs.target);
+  const wantsValid = typeof pacing.wants.actual === 'number' && !isNaN(pacing.wants.actual) &&
+                     typeof pacing.wants.target === 'number' && !isNaN(pacing.wants.target);
+  const savingsValid = typeof pacing.savings.actual === 'number' && !isNaN(pacing.savings.actual) &&
+                       typeof pacing.savings.target === 'number' && !isNaN(pacing.savings.target);
+
+  if (needsValid && wantsValid && savingsValid) {
+    Logger.log('✅ PASS: All 3 buckets have populated numeric actual & target values.');
+    Logger.log(`   - Needs:   Actual=${pacing.needs.actual}, Target=${pacing.needs.target}`);
+    Logger.log(`   - Wants:   Actual=${pacing.wants.actual}, Target=${pacing.wants.target}`);
+    Logger.log(`   - Savings: Actual=${pacing.savings.actual}, Target=${pacing.savings.target}`);
+  } else {
+    Logger.log('❌ FAIL: One or more buckets have invalid actual/target values.');
+    passed = false;
+  }
+
+  // 3. Assert non-empty and valid target_header (not empty, not literal "undefined")
+  if (typeof pacing.target_header === 'string' && pacing.target_header.trim().length > 0 && pacing.target_header !== 'undefined') {
+    Logger.log(`✅ PASS: target_header is valid and non-empty -> "${pacing.target_header}"`);
+  } else {
+    Logger.log(`❌ FAIL: target_header is missing, empty, or literal "undefined" -> "${pacing.target_header}"`);
+    passed = false;
+  }
+
+  Logger.log('\n====================================================');
+  Logger.log(passed ? '🎉 ALL ASSERTIONS PASSED' : '❌ SOME ASSERTIONS FAILED');
+  Logger.log('====================================================');
+
+  return pacing;
+}
+
