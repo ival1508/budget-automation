@@ -63,14 +63,14 @@ function buildCoachPayload(period, optSs) {
     ...((pacing.savings && pacing.savings.sub_categories) || [])
   ];
 
-  // 1. Filter for categories over target (target > 0 && actual > target)
+  // 1. Filter for categories over target with S$100 materiality floor (target > 0 && actual - target >= 100)
   // 2. Compute the split between discretionary (Расходы) and committed (Обязательные расходы)
-  // 3. Keep categories where discretionary_spend > 0, rank by discretionary_spend descending, cap at 3
+  // 3. Keep categories where discretionary_spend > 0, rank by discretionary_spend descending, cap at 5
   const categoriesOverTarget = allSubCategories
     .filter(sub => {
       const act = Number(sub.actual || 0);
       const tgt = Number(sub.target || 0);
-      return tgt > 0 && act > tgt;
+      return tgt > 0 && (act - tgt) >= 100;
     })
     .map(sub => {
       const catName = String(sub.name || '').trim();
@@ -97,6 +97,9 @@ function buildCoachPayload(period, optSs) {
     .sort((a, b) => b.discretionary_spend - a.discretionary_spend)
     .slice(0, 5);
 
+  const isOverBudget = realisticDaily < 0;
+  const overBudgetBy = isOverBudget ? Number(Math.abs(realisticDaily).toFixed(2)) : 0;
+
   return {
     period: p,
     cumulative_today: cumulativeToday,
@@ -105,6 +108,8 @@ function buildCoachPayload(period, optSs) {
     days_left_in_month: daysLeftInMonth,
     days_to_positive: daysToPositive,
     spend_today: spendToday,
+    over_budget: isOverBudget,
+    over_budget_by: overBudgetBy,
     buckets: buckets,
     target_header: String(pacing.target_header || ''),
     categories_over_target: categoriesOverTarget,
@@ -127,13 +132,17 @@ function getCurrentMonthCategorySplits(ss) {
     if (!sheet) return splits;
 
     const lastRow = sheet.getLastRow();
-    const startRow = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.TRANSACTIONS_TAB_STRUCTURE) ? SHEET_FACTS.TRANSACTIONS_TAB_STRUCTURE.DATA_START_ROW : 2;
-    if (lastRow < startRow) return splits;
+    if (lastRow <= 1) return splits;
 
+    const tz = ss.getSpreadsheetTimeZone() || 'Asia/Singapore';
     const now = new Date();
-    const currentMonthYearStr = Utilities.formatDate(now, 'Asia/Singapore', 'MM.yyyy');
+    const currentMonthYearStr = Utilities.formatDate(now, tz, 'MM.yyyy');
 
     const numCols = sheet.getLastColumn();
+    const startRow = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.TRANSACTIONS_TAB_STRUCTURE)
+      ? SHEET_FACTS.TRANSACTIONS_TAB_STRUCTURE.DATA_START_ROW
+      : 2;
+
     const rawData = sheet.getRange(startRow, 1, lastRow - startRow + 1, numCols).getValues();
     const dispData = sheet.getRange(startRow, 1, lastRow - startRow + 1, numCols).getDisplayValues();
 
@@ -141,14 +150,13 @@ function getCurrentMonthCategorySplits(ss) {
       const row = rawData[r];
       const disp = dispData[r];
       const cellDate = row[0];
-      const typeColC = String(row[2] || '').trim().replace(/\t/g, '');
       const category = String(row[7] || '').trim(); // Col H
 
       if (!category) continue;
 
       let dateMatch = false;
       if (cellDate instanceof Date) {
-        const rowMonthYearStr = Utilities.formatDate(cellDate, 'Asia/Singapore', 'MM.yyyy');
+        const rowMonthYearStr = Utilities.formatDate(cellDate, tz, 'MM.yyyy');
         dateMatch = (rowMonthYearStr === currentMonthYearStr);
       } else if (typeof cellDate === 'string' && cellDate.trim()) {
         const parts = cellDate.trim().split('.');
@@ -160,6 +168,7 @@ function getCurrentMonthCategorySplits(ss) {
 
       if (!dateMatch) continue;
 
+      const typeColC = String(row[2] || '').trim().replace(/\t/g, '');
       const catKey = category.toLowerCase();
       if (!splits[catKey]) {
         splits[catKey] = { discretionary: 0, committed: 0 };
@@ -167,7 +176,7 @@ function getCurrentMonthCategorySplits(ss) {
 
       const amount = (typeof parseAmountNumber === 'function')
         ? (parseAmountNumber(row[4], disp[4]) || parseAmountNumber(row[3], disp[3]) || 0)
-        : (typeof row[4] === 'number' ? row[4] : parseFloat(String(disp[4] || '0').replace(/[^0-9.-]+/g, '')) || 0);
+        : (parseFloat(row[4]) || parseFloat(row[3]) || 0);
 
       if (typeColC === 'Расходы') {
         splits[catKey].discretionary += amount;
@@ -176,7 +185,7 @@ function getCurrentMonthCategorySplits(ss) {
       }
     }
   } catch (e) {
-    Logger.log(`Error reading category splits from Transactions: ${e.message}`);
+    Logger.log(`Error in getCurrentMonthCategorySplits: ${e.message}`);
   }
   return splits;
 }
@@ -195,28 +204,30 @@ function generateCoachBrief(payload) {
     throw new Error('GEMINI_API_KEY property is missing in Script Properties.');
   }
 
-  const systemInstruction = `You are a sharp, warm financial coach for a Singapore family. From this JSON write a Telegram brief of at most 4 short sentences. Speak naturally and conversationally, like a trusted human financial advisor giving a quick morning check-in.
+  const systemInstruction = `You are a sharp, warm financial coach for a Singapore family. From this JSON write a concise Telegram brief formatted as clean bullet points. At most 3 short sentences total.
 
-Structure:
-1. Lead with the reality check on pace (from cumulative_today):
-   - If negative, say plainly how far behind pace they are and how to recover (e.g. "You're S$88 behind pace, but one zero-spend day clears it." or "You're S$87.81 behind pace, which one zero-spend day clears.").
-   - NEVER use a minus sign in prose (write "You're S$88 behind pace" or "S$87.81 behind pace", NEVER "-S$87.81" or "behind pace at -87.81").
-   - If positive, state that they are ahead of pace (e.g. "You're in great shape at S$120 ahead of pace.").
-2. State what is realistically spendable per day for the remaining days (from realistic_daily and days_left_in_month, e.g. "That leaves S$110.63 a day for the last 2 days.").
-3. Give natural category context or guidance:
-   - Name every category in categories_over_target, most actionable first. Keep each to a short clause.
-   - For each category, if committed_spend is greater than 0, name the discretionary portion and say the rest is committed — e.g. 'Транспорт is over target, though S$2,707 of it is the car loan; S$786 was discretionary.' If committed_spend is 0, quote actual vs target directly (e.g. 'Развлечения is at S$1,892 against a S$450 target.').
-   - Never imply the user can cut a committed cost.
+Structure as bullet points:
+• <b>Pace:</b> State the reality check on pace and allowance:
+  - If realistic_daily is negative (or over_budget is true): do NOT state a daily allowance. Say the month's budget is already spent and name the overspend amount from over_budget_by, e.g. "You're <b>S$104</b> past the month's budget with 2 days left." NEVER present a negative number as a daily allowance or a "daily deficit".
+  - If realistic_daily is positive:
+    * If cumulative_today is negative: state plainly how far behind pace they are and how to clear it (e.g. "You're <b>S$88</b> behind pace (one zero-spend day clears it), leaving <b>S$110.63</b>/day for the last 2 days.").
+    * NEVER use a minus sign in prose (write "S$88 behind pace", NEVER "-S$88" or "behind pace at -87.81").
+    * If cumulative_today is positive: state that they are ahead of pace (e.g. "You're <b>S$120</b> ahead of pace with <b>S$150</b>/day spendable for the last 3 days.").
+• <b>Watch:</b> Name at most 2 categories from categories_over_target — the largest discretionary overspend first. Do not list every category.
+  - If committed_spend > 0: quote the discretionary portion and note the rest is committed (e.g. "<i>Транспорт</i> is over target, though S$2,707 is the car loan; S$786 was discretionary.").
+  - If committed_spend == 0: quote actual vs target (e.g. "<i>Развлечения</i> is at S$1,892 vs a S$450 target.").
+  - Never imply the user can cut a committed cost. If categories_over_target is empty, omit this bullet or state categories are within target.
+• <b>Action:</b> End with one concrete instruction, never a motivational sign-off (e.g. "Zero out discretionary spending for the next 2 days to stop the deficit." or "Cap dining out at S$50 today to preserve your daily allowance."). NEVER end with motivational sign-offs like "finish the month strong", "keep up the great work", or "you've got this".
 
 Rules:
-- USE ONLY numbers present in the JSON. Never compute, infer, extrapolate or invent figures. Every number you mention must appear in the JSON.
-- Every money amount MUST be formatted with the "S$" currency symbol and 2 decimal places or rounded integers (e.g. S$88, S$110.63, S$1,892, S$3,304.80). NEVER print bare numbers like "87.81", "110.63" or "3304.8" without S$.
-- NEVER use a minus sign when describing being behind pace. The words "behind pace" already indicate the deficit.
-- Never describe a trend direction (rising, falling, clawed back, improving) unless the JSON explicitly states it. You have no history — do not imply any.
-- Always end with an instruction or category watchpoint, never a bare summary of numbers.
+- USE ONLY numbers present in the JSON. Never compute, infer, extrapolate or invent figures.
+- Every money amount MUST be formatted with the "S$" currency symbol and 2 decimal places or rounded integers (e.g. S$88, S$104, S$110.63, S$1,892, S$3,304.80). NEVER print bare numbers without S$.
+- NEVER use a minus sign or negative amount in prose (e.g. no -S$104, no "-103.92/day", no "daily deficit of S$103.92").
+- Never describe trend directions (rising, falling, clawed back) not in the JSON.
+- Structure strictly as bullet points starting with "• ". Do not output a single long paragraph.
+- Keep total length to at most 3 short sentences.
 - Telegram HTML only: <b>bold</b>, <i>italic</i>. Never markdown (**bold**).
-- No tables, no headers, no bullet lists. Short conversational sentences (at most 4 short sentences).
-- Warm, direct, natural — never preachy, robotic, or moralising. Never shame the user for spending.`;
+- Direct, natural, actionable — never preachy, robotic, or moralising.`;
 
   const apiPayload = {
     systemInstruction: {
@@ -228,7 +239,7 @@ Rules:
       }
     ],
     generationConfig: {
-      temperature: 0.4
+      temperature: 0.3
     }
   };
 
@@ -272,14 +283,16 @@ function generateDailyCoachBrief(contextJSON) {
  * Generates dynamic, strictly grounded messages without hallucinations.
  * 
  * @param {Object} payload - Budget coach payload object.
- * @return {string} Short, dynamic fallback brief in Telegram HTML.
+ * @return {string} Short, dynamic fallback brief in Telegram HTML with bullet points.
  */
 function buildFallbackCoachBrief(payload) {
   const cumulativeToday = Number(Number(payload.cumulative_today || 0).toFixed(2));
   const realisticDaily = Number(Number(payload.realistic_daily || 0).toFixed(2));
   const daysLeft = payload.days_left_in_month || 1;
   const daysToPositive = payload.days_to_positive || 0;
-  const categoriesOver = payload.categories_over_target || [];
+  const isOverBudget = Boolean(payload.over_budget || realisticDaily < 0);
+  const overBudgetBy = Number(Number(payload.over_budget_by || Math.abs(realisticDaily)).toFixed(2));
+  const categoriesOver = (payload.categories_over_target || []).slice(0, 2);
 
   const formatSgd = (val, roundInt = false) => {
     const num = Math.abs(Number(val) || 0);
@@ -289,40 +302,46 @@ function buildFallbackCoachBrief(payload) {
     return 'S$' + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   };
 
-  // 1. Reality check on pace
-  let sentence1 = '';
-  if (cumulativeToday < 0) {
+  const daysText = daysLeft === 1 ? 'the final day' : `${daysLeft} days`;
+
+  // Bullet 1: Pace & Runway
+  let bullet1 = '';
+  if (isOverBudget) {
+    bullet1 = `• <b>Pace:</b> You're <b>${formatSgd(overBudgetBy, true)}</b> past the month's budget with ${daysText} left.`;
+  } else if (cumulativeToday < 0) {
     const behindFormatted = formatSgd(cumulativeToday, true);
     const dayText = daysToPositive === 1 ? 'one zero-spend day clears it' : `${daysToPositive} zero-spend days clear it`;
-    sentence1 = `You're <b>${behindFormatted}</b> behind pace, but ${dayText}.`;
+    bullet1 = `• <b>Pace:</b> You're <b>${behindFormatted}</b> behind pace (${dayText}), leaving <b>${formatSgd(realisticDaily)}</b>/day for the last ${daysText}.`;
   } else if (cumulativeToday > 0) {
-    sentence1 = `You're in great shape at <b>${formatSgd(cumulativeToday)}</b> ahead of pace.`;
+    bullet1 = `• <b>Pace:</b> You're <b>${formatSgd(cumulativeToday)}</b> ahead of pace, with <b>${formatSgd(realisticDaily)}</b>/day spendable for the last ${daysText}.`;
   } else {
-    sentence1 = `You are tracking right on budget pace.`;
+    bullet1 = `• <b>Pace:</b> Right on budget pace with <b>${formatSgd(realisticDaily)}</b>/day spendable for the last ${daysText}.`;
   }
 
-  // 2. Realistic spendable per day
-  const daysText = daysLeft === 1 ? 'the final day' : `the last ${daysLeft} days`;
-  const sentence2 = `That leaves <b>${formatSgd(realisticDaily)}</b> a day for ${daysText}.`;
-
-  // 3. Category context covering every category in categories_over_target
-  let sentence3 = '';
+  // Bullet 2: Category Watch (at most 2 categories)
+  let bullet2 = '';
   if (categoriesOver.length > 0) {
     const catClauses = categoriesOver.map(cat => {
       if (cat.committed_spend > 0) {
-        return `<i>${cat.name}</i> is over target, though <b>${formatSgd(cat.committed_spend, true)}</b> is committed; <b>${formatSgd(cat.discretionary_spend, true)}</b> was discretionary`;
+        return `<i>${cat.name}</i> is over target (<b>${formatSgd(cat.committed_spend, true)}</b> committed, <b>${formatSgd(cat.discretionary_spend, true)}</b> discretionary)`;
       } else {
-        return `<i>${cat.name}</i> is at <b>${formatSgd(cat.actual, true)}</b> vs a <b>${formatSgd(cat.target, true)}</b> target`;
+        return `<i>${cat.name}</i> is at <b>${formatSgd(cat.actual, true)}</b> vs <b>${formatSgd(cat.target, true)}</b> target`;
       }
     });
-    sentence3 = `${catClauses.join('; ')}.`;
-  } else if (cumulativeToday < 0) {
-    sentence3 = `Keep discretionary spending minimal today to protect your buffer.`;
-  } else {
-    sentence3 = `You have room for normal everyday expenses today while protecting your buffer.`;
+    bullet2 = `• <b>Watch:</b> ${catClauses.join('; ')}.`;
   }
 
-  return `${sentence1} ${sentence2} ${sentence3}`;
+  // Bullet 3: Action
+  let bullet3 = '';
+  if (isOverBudget) {
+    bullet3 = `• <b>Action:</b> Zero out discretionary spending for the remaining ${daysText} to prevent further overspend.`;
+  } else if (cumulativeToday < 0) {
+    bullet3 = `• <b>Action:</b> Cap discretionary purchases today to protect your <b>${formatSgd(realisticDaily)}</b>/day allowance.`;
+  } else {
+    bullet3 = `• <b>Action:</b> Stick to your <b>${formatSgd(realisticDaily)}</b> daily limit to protect your buffer.`;
+  }
+
+  return [bullet1, bullet2, bullet3].filter(Boolean).join('\n');
 }
 
 /**
@@ -396,6 +415,26 @@ function testCoachBriefScenarios() {
         buckets: basePacing,
         target_header: 'Target month',
         categories_over_target: [],
+        mandatory_warnings: []
+      }
+    },
+    {
+      name: 'Scenario 4: Over Budget (Negative Realistic Daily Allowance)',
+      payload: {
+        period: 'daily',
+        cumulative_today: -103.92,
+        realistic_daily: -103.92,
+        flat_daily: 125.00,
+        days_left_in_month: 2,
+        days_to_positive: 1,
+        spend_today: 429.00,
+        over_budget: true,
+        over_budget_by: 103.92,
+        buckets: basePacing,
+        target_header: 'Target month',
+        categories_over_target: [
+          { name: 'Развлечения', actual: 1892.22, target: 450, over_by: 1442.22, discretionary_spend: 1892.22, committed_spend: 0, actionable: true }
+        ],
         mandatory_warnings: []
       }
     }
