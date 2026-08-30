@@ -931,6 +931,86 @@ function getTodaysTransactions(ss, optTargetDate) {
 }
 
 /**
+ * STAGE 1: getTodaySpend(optDate) → Sum of column E (Сумма в SGD) in Transactions
+ * where Column C (Тип) equals "Расходы" and Column A (Дата) matches the target date.
+ * Strictly EXCLUDES "Обязательные расходы", "Снятие денег", and all income types.
+ * Pure read: no writes, no Telegram triggers, no side-effects.
+ * 
+ * @param {Date|string} [optDate] - Optional target date (Date object or 'DD.MM.YYYY' / 'YYYY-MM-DD'). Defaults to today in SGT.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSs] - Optional Spreadsheet instance.
+ * @return {number} Total SGD spend on the target date.
+ */
+function getTodaySpend(optDate, optSs) {
+  try {
+    const spreadsheet = optSs || SpreadsheetApp.getActiveSpreadsheet();
+    if (!spreadsheet) return 0;
+
+    const sheet = spreadsheet.getSheetByName('Transactions');
+    if (!sheet) {
+      Logger.log('⚠️ Warning: Sheet "Transactions" not found.');
+      return 0;
+    }
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return 0;
+
+    const tz = spreadsheet.getSpreadsheetTimeZone() || 'Asia/Singapore';
+    const now = new Date();
+
+    // Determine canonical target date string in DD.MM.YYYY format
+    let targetDateStr = '';
+    if (optDate) {
+      if (optDate instanceof Date) {
+        targetDateStr = Utilities.formatDate(optDate, tz, 'dd.MM.yyyy');
+      } else {
+        targetDateStr = typeof normalizeDateString === 'function' ? normalizeDateString(optDate) : String(optDate).trim();
+      }
+    } else {
+      targetDateStr = Utilities.formatDate(now, tz, 'dd.MM.yyyy');
+    }
+
+    // Read range A2:E (Col A: Date, Col B: Account, Col C: Type, Col D: Amount, Col E: Amount in SGD)
+    const rawValues = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+    const displayValues = sheet.getRange(2, 1, lastRow - 1, 5).getDisplayValues();
+
+    let totalSpend = 0;
+
+    for (let r = 0; r < rawValues.length; r++) {
+      // 1. Strict Type Filter: Column C (index 2) MUST equal "Расходы"
+      const rawType = String(rawValues[r][2] || displayValues[r][2] || '').trim();
+      if (rawType !== 'Расходы') {
+        continue;
+      }
+
+      // 2. Strict Exact Date Match against targetDateStr (DD.MM.YYYY)
+      const rawDateCell = rawValues[r][0]; // Col A (index 0)
+      const displayDateStr = String(displayValues[r][0] || '').trim();
+      let rowDateStr = '';
+
+      if (rawDateCell instanceof Date) {
+        try {
+          rowDateStr = Utilities.formatDate(rawDateCell, tz, 'dd.MM.yyyy');
+        } catch (e) {
+          rowDateStr = typeof normalizeDateString === 'function' ? normalizeDateString(rawDateCell) : '';
+        }
+      } else if (displayDateStr || rawDateCell) {
+        rowDateStr = typeof normalizeDateString === 'function' ? normalizeDateString(displayDateStr || rawDateCell) : String(displayDateStr || rawDateCell).trim();
+      }
+
+      if (rowDateStr === targetDateStr) {
+        const amountSgd = parseAmountNumber(rawValues[r][4], displayValues[r][4]); // Col E (index 4)
+        totalSpend += amountSgd;
+      }
+    }
+
+    return Number(totalSpend.toFixed(2));
+  } catch (e) {
+    Logger.log(`Error in getTodaySpend: ${e.message}`);
+    return 0;
+  }
+}
+
+/**
  * Scans Column H (Dates) in the active month's tab up to today's date to extract recent daily budget trends.
  * Pre-computes how many days spend exceeded daily baseline budget.
  * 
@@ -1384,6 +1464,10 @@ function runStage1Checkpoint() {
   const dailyPacing = getDailyPacing(null, ss);
   Logger.log(JSON.stringify(dailyPacing, null, 2));
 
+  Logger.log('\n--- 9. getTodaySpend() [Direct Transactions Sum (Тип == "Расходы")] ---');
+  const todaySpend = getTodaySpend(null, ss);
+  Logger.log(`Today's Discretionary Spend: S$${todaySpend}`);
+
   Logger.log('\n====================================================');
   Logger.log('   🏁 STAGE 1 CHECKPOINT COMPLETED FOR VAL TO EYEBALL');
   Logger.log('====================================================');
@@ -1541,4 +1625,187 @@ function test_get503020Status() {
 
   return pacing;
 }
+
+/**
+ * Helper to read Column J (Траты) for a specified date from its corresponding monthly tab.
+ * Resolves the monthly tab strictly from the passed date (not today's date).
+ * Logs the selected tab, row number, and cell values for full visibility.
+ * 
+ * @param {Date|string} optDate - Target date.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSs] - Optional Spreadsheet instance.
+ * @return {number|null} Parsed amount from Col J (Траты), or null if not found.
+ */
+function getMonthlyTabDaySpend(optDate, optSs) {
+  try {
+    const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+    if (!ss) return null;
+
+    const tz = ss.getSpreadsheetTimeZone() || 'Asia/Singapore';
+    let targetDay = 0;
+    let targetMonth = 0; // 1-12
+    let targetYear = 0;
+
+    if (optDate instanceof Date) {
+      const dateStr = Utilities.formatDate(optDate, tz, 'dd.MM.yyyy');
+      const p = dateStr.split('.');
+      targetDay = parseInt(p[0], 10);
+      targetMonth = parseInt(p[1], 10);
+      targetYear = parseInt(p[2], 10);
+    } else if (typeof optDate === 'string' && optDate.trim()) {
+      const norm = typeof normalizeDateString === 'function' ? normalizeDateString(optDate) : optDate.trim();
+      const p = norm.split('.');
+      if (p.length === 3) {
+        targetDay = parseInt(p[0], 10);
+        targetMonth = parseInt(p[1], 10);
+        targetYear = parseInt(p[2], 10);
+      }
+    }
+
+    if (!targetMonth) {
+      const now = new Date();
+      const dateStr = Utilities.formatDate(now, tz, 'dd.MM.yyyy');
+      const p = dateStr.split('.');
+      targetDay = parseInt(p[0], 10);
+      targetMonth = parseInt(p[1], 10);
+      targetYear = parseInt(p[2], 10);
+    }
+
+    const monthTabMap = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.MONTH_TAB_NAMES) || {
+      1: "Я'26", 2: "Ф'26", 3: "М'26", 4: "А'26",
+      5: "Май'26", 6: "Июнь'26", 7: "Июль'26", 8: "Август'26",
+      9: "Сентябрь'26", 10: "Октябрь'26", 11: "Ноябрь'26", 12: "Декабрь'26"
+    };
+
+    const tabName = monthTabMap[targetMonth] || '';
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      Logger.log(`⚠️ Monthly sheet "${tabName}" for month ${targetMonth} (date: ${optDate}) not found.`);
+      return null;
+    }
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return null;
+
+    // Read Col H to Col J (Col 8 to Col 10: H=Date, I=DayName, J=Траты)
+    const rawValues = sheet.getRange(1, 8, lastRow, 3).getValues();
+    const displayValues = sheet.getRange(1, 8, lastRow, 3).getDisplayValues();
+
+    const targetFormatted = `${String(targetDay).padStart(2, '0')}.${String(targetMonth).padStart(2, '0')}.${targetYear}`;
+    Logger.log(`\n🔍 [LOOKUP] Searching Tab "${tabName}" for Date ${targetFormatted} (Day ${targetDay})...`);
+
+    for (let r = 0; r < rawValues.length; r++) {
+      const rowNum = r + 1; // 1-indexed sheet row
+      const rawDate = rawValues[r][0]; // Col H
+      const dispDate = String(displayValues[r][0] || '').trim();
+      let match = false;
+
+      if (rawDate instanceof Date) {
+        const d = parseInt(Utilities.formatDate(rawDate, tz, 'd'), 10);
+        const m = parseInt(Utilities.formatDate(rawDate, tz, 'M'), 10);
+        const y = parseInt(Utilities.formatDate(rawDate, tz, 'yyyy'), 10);
+        if (d === targetDay && m === targetMonth && y === targetYear) {
+          match = true;
+        }
+      } else if (typeof rawDate === 'number' && !isNaN(rawDate)) {
+        if (rawDate === targetDay) {
+          match = true;
+        }
+      } else if (dispDate) {
+        const dayMatch = dispDate.match(/^(\d{1,2})(?:[\/\.-]|$)/);
+        if (dayMatch && parseInt(dayMatch[1], 10) === targetDay) {
+          const fullMatch = dispDate.match(/^(\d{1,2})[\/\.-](\d{1,2})[\/\.-](\d{2,4})$/);
+          if (fullMatch) {
+            if (parseInt(fullMatch[1], 10) === targetDay && parseInt(fullMatch[2], 10) === targetMonth) {
+              match = true;
+            }
+          } else {
+            match = true;
+          }
+        }
+      }
+
+      if (match) {
+        const rawCellSpend = rawValues[r][2];
+        const dispCellSpend = displayValues[r][2];
+        const parsedSpend = parseAmountNumber(rawCellSpend, dispCellSpend);
+        Logger.log(`📌 [FOUND] Tab: "${tabName}", Row: ${rowNum}, Col H Date: "${dispDate}" (raw: ${rawDate}), Col J Raw: "${dispCellSpend}" -> Parsed: S$${parsedSpend}`);
+        return parsedSpend;
+      }
+    }
+
+    Logger.log(`⚠️ [NOT FOUND] Day ${targetDay} row not found in Tab "${tabName}".`);
+    return null;
+  } catch (e) {
+    Logger.log(`Error in getMonthlyTabDaySpend: ${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * Test function for getTodaySpend():
+ * Cross-checks getTodaySpend(date) against the monthly tab's Column J (Траты) for the same date.
+ * Asserts they are exactly equal.
+ * Tests:
+ * 1. Today's date (or active day)
+ * 2. A date with known mixed transaction types: "01.07.2026" (where Траты = 279.66, excluding mortgage 7592 and cash withdrawal 372)
+ */
+function test_getTodaySpend() {
+  Logger.log('====================================================');
+  Logger.log('      TEST: getTodaySpend() EXECUTION & CROSS-CHECK');
+  Logger.log('====================================================\n');
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let allPassed = true;
+
+  // Test Case 1: Today's date
+  const now = new Date();
+  const todayStr = Utilities.formatDate(now, ss ? ss.getSpreadsheetTimeZone() || 'Asia/Singapore' : 'Asia/Singapore', 'dd.MM.yyyy');
+  Logger.log(`--- Test Case 1: Today (${todayStr}) ---`);
+  const todayTxnSpend = getTodaySpend(now, ss);
+  const todayMonthlyColJ = getMonthlyTabDaySpend(now, ss);
+
+  Logger.log(`Transactions sum (Тип == 'Расходы'): S$${todayTxnSpend}`);
+  Logger.log(`Monthly tab Col J (Траты):           ${todayMonthlyColJ !== null ? `S$${todayMonthlyColJ}` : 'Row not found or empty'}`);
+
+  if (todayMonthlyColJ !== null) {
+    if (Math.abs(todayTxnSpend - todayMonthlyColJ) < 0.001) {
+      Logger.log(`✅ PASS: Transactions sum matches Monthly tab Col J exactly (${todayTxnSpend} === ${todayMonthlyColJ}).`);
+    } else {
+      Logger.log(`❌ FAIL: Mismatch for today! Transactions=${todayTxnSpend} vs Monthly tab Col J=${todayMonthlyColJ}`);
+      allPassed = false;
+    }
+  } else {
+    Logger.log(`ℹ️ Info: Today's date row not populated in monthly tab.`);
+  }
+
+  // Test Case 2: Known mixed-type date "01.07.2026"
+  const mixedDateStr = '01.07.2026';
+  Logger.log(`\n--- Test Case 2: Known Mixed-Type Date (${mixedDateStr}) ---`);
+  const mixedTxnSpend = getTodaySpend(mixedDateStr, ss);
+  const mixedMonthlyColJ = getMonthlyTabDaySpend(mixedDateStr, ss);
+
+  Logger.log(`Transactions sum (Тип == 'Расходы'): S$${mixedTxnSpend}`);
+  Logger.log(`Monthly tab Col J (Траты):           ${mixedMonthlyColJ !== null ? `S$${mixedMonthlyColJ}` : 'Row not found or empty'}`);
+
+  if (mixedMonthlyColJ !== null) {
+    if (Math.abs(mixedTxnSpend - mixedMonthlyColJ) < 0.001) {
+      Logger.log(`✅ PASS: Transactions sum matches Monthly tab Col J for ${mixedDateStr} (${mixedTxnSpend} === ${mixedMonthlyColJ}).`);
+    } else {
+      Logger.log(`❌ FAIL: Mismatch for ${mixedDateStr}! Transactions=${mixedTxnSpend} vs Monthly tab Col J=${mixedMonthlyColJ}`);
+      allPassed = false;
+    }
+  } else {
+    Logger.log(`ℹ️ Info: Date ${mixedDateStr} row not found in July tab ("Июль'26").`);
+  }
+
+  Logger.log('\n====================================================');
+  Logger.log(allPassed ? '🎉 ALL CROSS-CHECKS PASSED' : '❌ ONE OR MORE CROSS-CHECKS FAILED');
+  Logger.log('====================================================');
+
+  return {
+    today: { date: todayStr, transactions_spend: todayTxnSpend, monthly_col_j: todayMonthlyColJ },
+    mixed_date: { date: mixedDateStr, transactions_spend: mixedTxnSpend, monthly_col_j: mixedMonthlyColJ }
+  };
+}
+
 
