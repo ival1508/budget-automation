@@ -185,35 +185,69 @@ function generateDailyTransactionsRecap(optSs, optDate) {
     : todaysTxns.reduce((sum, t) => sum + Number(t.amount || 0), 0);
 
   const totalSpend = Number(Number(todaySpend || 0).toFixed(2));
-  const spendablePerDay = Number(Number(pacing.D19_realistic_daily || 0).toFixed(2));
+  const realisticDaily = Number(Number(pacing.D19_realistic_daily || 0).toFixed(2));
   const cumulativePosition = Number(Number(pacing.K_cumulative_today || 0).toFixed(2));
+  const daysLeft = pacing.days_left || 1;
+  const isLastDay = (daysLeft <= 1);
   const daysToPositive = pacing.days_to_positive || 0;
 
-  let positionLine = '';
-  if (cumulativePosition < 0) {
-    const behindAmount = Math.abs(Math.round(cumulativePosition));
-    const dayText = daysToPositive === 1 ? 'one zero-spend day clears it' : `${daysToPositive} zero-spend days clear it`;
-    positionLine = `• 📊 <b>Cumulative position:</b> You're S$${behindAmount} behind pace — ${dayText}.`;
-  } else if (cumulativePosition > 0) {
-    positionLine = `• 📊 <b>Cumulative position:</b> S$${cumulativePosition.toFixed(2)} ahead of pace.`;
+  // 1. Allowance / Over-budget logic (shared with Morning Coach Brief)
+  const isOverBudget = realisticDaily < 0;
+  const overBudgetBy = isOverBudget ? Math.abs(realisticDaily) : 0;
+
+  let allowanceLine = '';
+  if (isOverBudget) {
+    allowanceLine = `• 🎯 <b>Budget status:</b> You're S$${overBudgetBy.toFixed(2)} past the month's budget.`;
   } else {
-    positionLine = `• 📊 <b>Cumulative position:</b> Exactly on pace.`;
+    allowanceLine = `• 🎯 <b>Spendable per day:</b> S$${realisticDaily.toFixed(2)}/day`;
   }
+
+  // 2. Cumulative position framing (month-end close vs mid-month runway)
+  let positionLine = '';
+  if (isLastDay) {
+    if (cumulativePosition < 0) {
+      const behindAmount = Math.abs(Math.round(cumulativePosition));
+      positionLine = `• 📊 <b>Cumulative position:</b> You're S$${behindAmount} behind pace at month-end.`;
+    } else if (cumulativePosition > 0) {
+      positionLine = `• 📊 <b>Cumulative position:</b> S$${cumulativePosition.toFixed(2)} ahead of pace at month-end.`;
+    } else {
+      positionLine = `• 📊 <b>Cumulative position:</b> Exactly on pace at month-end.`;
+    }
+  } else {
+    if (cumulativePosition < 0) {
+      const behindAmount = Math.abs(Math.round(cumulativePosition));
+      const dayText = daysToPositive === 1 ? 'one zero-spend day clears it' : `${daysToPositive} zero-spend days clear it`;
+      positionLine = `• 📊 <b>Cumulative position:</b> You're S$${behindAmount} behind pace — ${dayText}.`;
+    } else if (cumulativePosition > 0) {
+      positionLine = `• 📊 <b>Cumulative position:</b> S$${cumulativePosition.toFixed(2)} ahead of pace.`;
+    } else {
+      positionLine = `• 📊 <b>Cumulative position:</b> Exactly on pace.`;
+    }
+  }
+
+  // 3. Sign-off message
+  let zeroSpendSignoff = isLastDay
+    ? `✨ <i>Great job closing out the month with a zero-spend day! Rest up for the new month ahead.</i>`
+    : `✨ <i>Great job! Zero-spend days protect your runway and boost your pacing for the rest of the month.</i>`;
+
+  let activeSpendSignoff = isLastDay
+    ? `\n✨ <i>Logged & tracked in Budget 2026 for month-end close. Rest up!</i>`
+    : `\n✨ <i>Logged & tracked in Budget 2026. Rest up!</i>`;
 
   if (todaysTxns.length === 0) {
     return [
       `🌙 <b>Daily Recap — ${dateStr}</b>\n`,
       `😴 <b>Zero Spend Day!</b> No transactions were logged for today.\n`,
-      `• 🎯 <b>Spendable per day:</b> S$${spendablePerDay.toFixed(2)}/day`,
+      allowanceLine,
       positionLine + `\n`,
-      `✨ <i>Great job! Zero-spend days protect your runway and boost your pacing for the rest of the month.</i>`
+      zeroSpendSignoff
     ].join('\n');
   }
 
   const lines = [
     `🌙 <b>Daily Spending Recap — ${dateStr}</b>\n`,
     `• 💰 <b>Total Spend Today:</b> <b>S$${totalSpend.toFixed(2)}</b>`,
-    `• 🎯 <b>Spendable per day:</b> S$${spendablePerDay.toFixed(2)}/day`,
+    allowanceLine,
     positionLine + `\n`,
     `<b>Logged Transactions (${todaysTxns.length}):</b>`
   ];
@@ -227,7 +261,7 @@ function generateDailyTransactionsRecap(optSs, optDate) {
     lines.push(`• <b>${desc}</b>: S$${amt}${cat}${acc}${flagStr}`);
   });
 
-  lines.push(`\n✨ <i>Logged & tracked in Budget 2026. Rest up!</i>`);
+  lines.push(activeSpendSignoff);
   return lines.join('\n');
 }
 
