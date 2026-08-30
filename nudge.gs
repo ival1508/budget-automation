@@ -171,26 +171,50 @@ function generateDailyTransactionsRecap(optSs, optDate) {
   }
 
   const todaysTxns = typeof getTodaysTransactions === 'function' ? getTodaysTransactions(ss, optDate) : [];
-  const dailyStatus = typeof getDailyBudgetStatus === 'function' ? getDailyBudgetStatus(ss) : { daily_spend: 0, daily_budget: 0, daily_saldo: 0 };
+  const pacing = typeof getDailyPacing === 'function' ? getDailyPacing(optDate, ss) : {
+    K_cumulative_today: 0,
+    L_saldo_yesterday: 0,
+    D17_flat_daily: 0,
+    D19_realistic_daily: 0,
+    days_left: 1,
+    days_to_positive: 0
+  };
 
-  const totalSpend = todaysTxns.reduce((sum, t) => sum + Number(t.amount || 0), 0);
-  const budget = Number(dailyStatus.daily_budget || 0);
-  const saldo = Number(dailyStatus.daily_saldo || 0);
+  const todaySpend = typeof getTodaySpend === 'function' 
+    ? getTodaySpend(optDate, ss) 
+    : todaysTxns.reduce((sum, t) => sum + Number(t.amount || 0), 0);
+
+  const totalSpend = Number(Number(todaySpend || 0).toFixed(2));
+  const spendablePerDay = Number(Number(pacing.D19_realistic_daily || 0).toFixed(2));
+  const cumulativePosition = Number(Number(pacing.K_cumulative_today || 0).toFixed(2));
+  const daysToPositive = pacing.days_to_positive || 0;
+
+  let positionLine = '';
+  if (cumulativePosition < 0) {
+    const behindAmount = Math.abs(Math.round(cumulativePosition));
+    const dayText = daysToPositive === 1 ? 'one zero-spend day clears it' : `${daysToPositive} zero-spend days clear it`;
+    positionLine = `• 📊 <b>Cumulative position:</b> You're S$${behindAmount} behind pace — ${dayText}.`;
+  } else if (cumulativePosition > 0) {
+    positionLine = `• 📊 <b>Cumulative position:</b> S$${cumulativePosition.toFixed(2)} ahead of pace.`;
+  } else {
+    positionLine = `• 📊 <b>Cumulative position:</b> Exactly on pace.`;
+  }
 
   if (todaysTxns.length === 0) {
     return [
       `🌙 <b>Daily Recap — ${dateStr}</b>\n`,
       `😴 <b>Zero Spend Day!</b> No transactions were logged for today.\n`,
-      `• 🎯 <b>Daily Allowance:</b> S$${budget.toFixed(2)}`,
-      `• 📈 <b>Daily Buffer:</b> S$${saldo.toFixed(2)}\n`,
-      `✨ <i>Great job! Your unspent daily allowance rolls over to give your buffer a nice boost for tomorrow.</i>`
+      `• 🎯 <b>Spendable per day:</b> S$${spendablePerDay.toFixed(2)}/day`,
+      positionLine + `\n`,
+      `✨ <i>Great job! Zero-spend days protect your runway and boost your pacing for the rest of the month.</i>`
     ].join('\n');
   }
 
   const lines = [
     `🌙 <b>Daily Spending Recap — ${dateStr}</b>\n`,
     `• 💰 <b>Total Spend Today:</b> <b>S$${totalSpend.toFixed(2)}</b>`,
-    `• 🎯 <b>Daily Budget:</b> S$${budget.toFixed(2)} | <b>Saldo:</b> S$${saldo.toFixed(2)}\n`,
+    `• 🎯 <b>Spendable per day:</b> S$${spendablePerDay.toFixed(2)}/day`,
+    positionLine + `\n`,
     `<b>Logged Transactions (${todaysTxns.length}):</b>`
   ];
 

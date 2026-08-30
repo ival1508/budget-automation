@@ -11,6 +11,12 @@
  * Assembles clean JSON from reader.gs for AI coaching (daily or monthly views).
  * 
  * @param {string} [period] - 'daily' or 'monthly' (defaults to 'daily').
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSs] - Optional Spreadsheet instance/**
+ * Assembles the structured JSON payload for the Gemini Coach API.
+ * Step 8 payload: contains only the required grounding numbers, strictly rounded to 2dp.
+ * Trend narratives and multi-day historical trend dumps are omitted to prevent LLM hallucinations.
+ * 
+ * @param {string} [period='daily'] - Period type ('daily' or 'monthly').
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSs] - Optional Spreadsheet instance.
  * @return {Object} Structured JSON payload for Gemini coach model.
  */
@@ -18,142 +24,31 @@ function buildCoachPayload(period, optSs) {
   const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
   const p = period || 'daily';
   
-  const saldoData = typeof getDailySaldo === 'function' ? getDailySaldo(ss) : { saldo: 0, currentDailyBudget: 0, daysLeftInMonth: 1 };
+  // Single source for all daily budget & pacing metrics
+  const pacingData = typeof getDailyPacing === 'function' ? getDailyPacing(null, ss) : {
+    K_cumulative_today: 0,
+    L_saldo_yesterday: 0,
+    D17_flat_daily: 0,
+    D19_realistic_daily: 0,
+    days_left: 1,
+    days_to_positive: 0
+  };
+
   const pacing = typeof get503020Status === 'function' ? get503020Status(ss) : {};
   const catVelocity = typeof getCategoryVelocity === 'function' ? getCategoryVelocity(ss) : {};
-  const trendsData = typeof getRecentDailyTrends === 'function' ? getRecentDailyTrends(ss) : { trends: [] };
 
-  const currentDailyBudget = Number(saldoData.currentDailyBudget || 0);
-  const dailySaldo = Number(saldoData.saldo || 0);
-  const daysLeftInMonth = Number(saldoData.daysLeftInMonth || 1);
+  const currentDailyBudget = Number(Number(pacingData.D19_realistic_daily || 0).toFixed(2)); // Spendable per day (D19)
+  const spendablePerDay = currentDailyBudget;
+  const cumulativePosition = Number(Number(pacingData.K_cumulative_today || 0).toFixed(2)); // Cumulative position (Col K)
+  const dailySaldo = Number(Number(pacingData.L_saldo_yesterday || 0).toFixed(2)); // Yesterday's saldo (Col L)
+  const flatDailyBudget = Number(Number(pacingData.D17_flat_daily || 0).toFixed(2)); // Flat pacing (D17)
+  const daysLeftInMonth = pacingData.days_left || 1;
+  const daysToPositive = pacingData.days_to_positive || 0;
 
-  // Parse chronological daily trends and isolate completed days prior to today
-  const trends = trendsData.trends || [];
+  // Compute yesterday's spend directly from Transactions (Тип == "Расходы")
   const now = new Date();
-  const todayDay = parseInt(Utilities.formatDate(now, 'Asia/Singapore', 'd'), 10);
-  const getDayNumber = (dateStr) => {
-    const str = String(dateStr || '').trim();
-    const match = str.match(/^(?:Day\s*)?(\d{1,2})(?:[\/\.-].*)?$/i);
-    return match ? parseInt(match[1], 10) : -1;
-  };
-
-  // Filter for completed days prior to today
-  let completedDays = trends.filter(item => {
-    const dNum = getDayNumber(item.date);
-    return dNum > 0 && dNum < todayDay;
-  });
-
-  if (completedDays.length === 0 && trends.length > 1) {
-    completedDays = trends.slice(0, trends.length - 1);
-  } else if (completedDays.length === 0 && trends.length === 1) {
-    completedDays = trends;
-  }
-
-  // Identify yesterday, day before yesterday, and 3-days-ago data points
-  const yesterdayItem = completedDays.length > 0 ? completedDays[completedDays.length - 1] : null;
-  const dayBeforeItem = completedDays.length > 1 ? completedDays[completedDays.length - 2] : null;
-  const threeDaysAgoItem = completedDays.length > 2 ? completedDays[completedDays.length - 3] : null;
-
-  const yesterdaySpend = yesterdayItem ? Number(yesterdayItem.spend || 0) : 0;
-  const yesterdayBudget = yesterdayItem ? Number(yesterdayItem.budget || 0) : currentDailyBudget;
-  const yesterdaySaldo = yesterdayItem ? Number(yesterdayItem.saldo || 0) : dailySaldo;
-  const yesterdayDate = yesterdayItem ? String(yesterdayItem.date || '') : (todayDay === 1 ? 'Start of Month' : '');
-
-  // 1. Spend Dynamics Calculation (multi-day trajectory)
-  const last3Completed = completedDays.slice(-3);
-  const avgSpend3Day = last3Completed.length > 0 
-    ? (last3Completed.reduce((sum, d) => sum + Number(d.spend || 0), 0) / last3Completed.length)
-    : yesterdaySpend;
-  const last7Completed = completedDays.slice(-7);
-  const avgSpend7Day = last7Completed.length > 0 
-    ? (last7Completed.reduce((sum, d) => sum + Number(d.spend || 0), 0) / last7Completed.length)
-    : avgSpend3Day;
-
-  let spendTrajectory = 'steady';
-  if (yesterdayItem && Number(yesterdayItem.spend || 0) === 0) {
-    spendTrajectory = 'zero_spend_reset';
-  } else if (last3Completed.length >= 2 && last3Completed.every(d => Number(d.spend || 0) > Number(d.budget || 0))) {
-    spendTrajectory = 'elevated';
-  } else if (dayBeforeItem && yesterdaySpend < (Number(dayBeforeItem.spend || 0) * 0.6) && yesterdaySpend <= yesterdayBudget) {
-    spendTrajectory = 'cooling_down';
-  } else if (yesterdaySpend > (avgSpend7Day * 1.35) && yesterdaySpend > yesterdayBudget) {
-    spendTrajectory = 'surging';
-  } else if (last3Completed.length >= 2 && last3Completed.every(d => Number(d.spend || 0) <= Number(d.budget || 0))) {
-    spendTrajectory = 'disciplined';
-  }
-
-  // 2. Daily Budget Dynamics Calculation (increasing / decreasing / digging down)
-  const dayOverDayBudgetChange = Number((currentDailyBudget - yesterdayBudget).toFixed(2));
-  const baselineItem = threeDaysAgoItem || dayBeforeItem || yesterdayItem;
-  const baselineBudget = baselineItem ? Number(baselineItem.budget || currentDailyBudget) : currentDailyBudget;
-  const multiDayBudgetChange = Number((currentDailyBudget - baselineBudget).toFixed(2));
-
-  let consecutiveOverspendDays = 0;
-  let consecutiveUnderspendDays = 0;
-  for (let i = completedDays.length - 1; i >= 0; i--) {
-    const item = completedDays[i];
-    const s = Number(item.spend || 0);
-    const b = Number(item.budget || 0);
-    if (s > b) {
-      if (consecutiveUnderspendDays === 0) {
-        consecutiveOverspendDays++;
-      } else {
-        break;
-      }
-    } else {
-      if (consecutiveOverspendDays === 0) {
-        consecutiveUnderspendDays++;
-      } else {
-        break;
-      }
-    }
-  }
-
-  let budgetDirection = 'steady';
-  let isDiggingDown = false;
-  let paceVerdict = '';
-
-  if (consecutiveOverspendDays >= 2 || (multiDayBudgetChange <= -15 && currentDailyBudget < baselineBudget)) {
-    budgetDirection = 'digging_down';
-    isDiggingDown = true;
-    paceVerdict = `Digging down: Consecutive high-spend days have shrunk your remaining daily allowance from ~S$${baselineBudget.toFixed(0)} to ~S$${currentDailyBudget.toFixed(0)}/day (${multiDayBudgetChange < 0 ? '-' : ''}S$${Math.abs(multiDayBudgetChange).toFixed(2)}/day).`;
-  } else if (dayOverDayBudgetChange <= -3) {
-    budgetDirection = 'decreasing';
-    paceVerdict = `Decreasing: Yesterday's spend trimmed today's available daily allowance by S$${Math.abs(dayOverDayBudgetChange).toFixed(2)} (now S$${currentDailyBudget.toFixed(2)}/day).`;
-  } else if (dayOverDayBudgetChange >= 3 || (consecutiveUnderspendDays >= 2 && dayOverDayBudgetChange >= 0)) {
-    budgetDirection = 'increasing';
-    paceVerdict = `Increasing: Mindful spending boosted your daily allowance up by +S$${dayOverDayBudgetChange.toFixed(2)} to S$${currentDailyBudget.toFixed(2)}/day!`;
-  } else {
-    budgetDirection = 'steady';
-    paceVerdict = `Steady: Daily allowance is holding stable at ~S$${currentDailyBudget.toFixed(2)}/day.`;
-  }
-
-  const budgetTrend = {
-    direction: budgetDirection,
-    is_digging_down: isDiggingDown,
-    today_daily_budget: currentDailyBudget,
-    yesterday_budget: yesterdayBudget,
-    day_over_day_change: dayOverDayBudgetChange,
-    multi_day_change: multiDayBudgetChange,
-    consecutive_overspend_days: consecutiveOverspendDays,
-    consecutive_underspend_days: consecutiveUnderspendDays,
-    verdict: paceVerdict
-  };
-
-  const spendTrend = {
-    yesterday_spend: yesterdaySpend,
-    yesterday_date: yesterdayDate,
-    avg_spend_3_day: Number(avgSpend3Day.toFixed(2)),
-    avg_spend_7_day: Number(avgSpend7Day.toFixed(2)),
-    trajectory: spendTrajectory,
-    recent_completed_days: completedDays.slice(-5).map(d => ({
-      date: d.date,
-      spend: Number(d.spend || 0),
-      budget: Number(d.budget || 0),
-      saldo: Number(d.saldo || 0),
-      is_over_budget: Number(d.spend || 0) > Number(d.budget || 0)
-    }))
-  };
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const yesterdaySpend = typeof getTodaySpend === 'function' ? getTodaySpend(yesterday, ss) : 0;
 
   // Combine actuals and targets for BOTH Needs and Wants subcategories.
   // CRITICAL RULE: Only transactions of type "Расходы" contribute against the daily budget.
@@ -176,9 +71,9 @@ function buildCoachPayload(period, optSs) {
           });
 
           categoryPacing[bucketKey][catName] = {
-            target_monthly: Number(sub.target || 0),
-            actual_monthly_total: Number(sub.actual || 0),
-            daily_budget_contributing_spend: rashodySpend
+            target_monthly: Number(Number(sub.target || 0).toFixed(2)),
+            actual_monthly_total: Number(Number(sub.actual || 0).toFixed(2)),
+            daily_budget_contributing_spend: Number(Number(rashodySpend || 0).toFixed(2))
           };
         }
       });
@@ -200,54 +95,47 @@ function buildCoachPayload(period, optSs) {
     if (rashodySpend > 0 && !categoryPacing.needs[cat] && !categoryPacing.wants[cat]) {
       categoryPacing.wants[cat] = {
         target_monthly: 0,
-        daily_budget_contributing_spend: rashodySpend
+        daily_budget_contributing_spend: Number(Number(rashodySpend || 0).toFixed(2))
       };
     }
   });
 
   const buckets = {
     needs: {
-      actual: Number((pacing.needs && pacing.needs.actual) || 0),
-      target: Number((pacing.needs && pacing.needs.target) || 0)
+      actual: Number(Number((pacing.needs && pacing.needs.actual) || 0).toFixed(2)),
+      target: Number(Number((pacing.needs && pacing.needs.target) || 0).toFixed(2))
     },
     wants: {
-      actual: Number((pacing.wants && pacing.wants.actual) || 0),
-      target: Number((pacing.wants && pacing.wants.target) || 0)
+      actual: Number(Number((pacing.wants && pacing.wants.actual) || 0).toFixed(2)),
+      target: Number(Number((pacing.wants && pacing.wants.target) || 0).toFixed(2))
     },
     savings: {
-      actual: Number((pacing.savings && pacing.savings.actual) || 0),
-      target: Number((pacing.savings && pacing.savings.target) || 0)
-    },
-    taxes: {
-      actual: Number((pacing.taxes && pacing.taxes.actual) || 0),
-      target: Number((pacing.taxes && pacing.taxes.target) || 0)
+      actual: Number(Number((pacing.savings && pacing.savings.actual) || 0).toFixed(2)),
+      target: Number(Number((pacing.savings && pacing.savings.target) || 0).toFixed(2))
     }
   };
 
   return {
     period: p,
-    daily_saldo: dailySaldo,
+    spendable_per_day: spendablePerDay,
     current_daily_budget: currentDailyBudget,
+    cumulative_position: cumulativePosition,
+    flat_daily_budget: flatDailyBudget,
+    daily_saldo: dailySaldo,
     days_left_in_month: daysLeftInMonth,
-    yesterday_spend: yesterdaySpend,
-    yesterday_budget: yesterdayBudget,
-    yesterday_date: yesterdayDate,
-    budget_trend: budgetTrend,
-    spend_trend: spendTrend,
-    pace_verdict: paceVerdict,
+    days_to_positive: daysToPositive,
+    yesterday_spend: Number(Number(yesterdaySpend || 0).toFixed(2)),
     buckets: buckets,
-    category_pacing: categoryPacing,
-    recent_daily_trends: trends.slice(-7),
-    mandatory_warnings: []
+    category_pacing: categoryPacing
   };
 }
 
 /**
  * STAGE 2 — Reusable Coach Brief Generator using gemini-3.5-flash-lite.
- * Evaluates budget payload and produces a dynamic, 2-4 sentence conversational brief.
+ * Evaluates budget payload and produces a concise, strictly grounded conversational brief.
  * 
  * @param {Object} [payload] - Structured budget payload (from buildCoachPayload).
- * @return {string} Concise Telegram-native financial coach message.
+ * @return {string} Concise Telegram-native HTML financial coach message.
  */
 function generateCoachBrief(payload) {
   const ctx = payload || buildCoachPayload('daily');
@@ -256,32 +144,25 @@ function generateCoachBrief(payload) {
     throw new Error('GEMINI_API_KEY property is missing in Script Properties.');
   }
 
-  const systemInstruction = `You are a smart, attentive personal financial coach for a user in Singapore. Your job is to deliver a fresh, sharp, and encouraging morning coach update for Telegram based on the provided budget JSON.
+  const systemInstruction = `You are a smart, attentive personal financial coach for a user in Singapore. Your job is to deliver a fresh, sharp, and encouraging morning coach update for Telegram based strictly on the provided budget JSON.
 
-### CRITICAL ANTI-REPETITION RULES (DO NOT VIOLATE):
-1. NO FORMULAIC ROBOTIC GREETINGS: Do NOT begin messages with repetitive boilerplate like "Good morning! You have about S$X available to spend today, compared to your target daily goal of S$Y." Vary your opening naturally every day.
-2. NO CANNED CLICHÉ ADVICE: NEVER use canned suggestions like "a cozy home-cooked meal instead of dining out", "a relaxing walk in the park", or generic "taking it easy to reset". If you suggest an adjustment, make it specific to recent category activity or simply focus on the financial momentum.
-3. NO REPETITIVE MOTIVATIONAL SIGN-OFFS: NEVER end with formulaic cheerleading phrases like "You've got this! 🌟", "setting up peace of mind and incredible financial success for tomorrow", or robotic slogans. Keep the ending crisp, purposeful, and fresh.
-4. VARY YOUR FOCUS & STRUCTURE: Base today's core message around what actually changed in the numbers over the last 2-4 days.
+### CRITICAL ANTI-HALLUCINATION & ANTI-REPETITION RULES (ZERO TOLERANCE):
+1. USE ONLY NUMBERS PRESENT IN THE JSON: Never compute, infer, extrapolate, or invent figures. Every single number you mention MUST exist verbatim in the JSON payload.
+2. NO UNGROUNDED TREND CLAIMS: Never describe a trend direction (e.g. claiming an allowance increased or decreased or that money was clawed back) unless the JSON explicitly states it.
+3. NO FORMULAIC ROBOTIC GREETINGS: Do NOT begin messages with repetitive boilerplate like "Good morning! You have about S$X available to spend today, compared to your target daily goal of S$Y." Vary your opening naturally.
+4. NO CANNED CLICHÉ ADVICE: NEVER use canned suggestions like "a cozy home-cooked meal instead of dining out", "a relaxing walk in the park", or generic "taking it easy to reset".
+5. NO REPETITIVE MOTIVATIONAL SIGN-OFFS: NEVER end with formulaic cheerleading phrases like "You've got this! 🌟", "setting up peace of mind and incredible financial success for tomorrow", or robotic slogans.
 
 ### CORE CONTENT REQUIREMENTS (2 to 4 CONCISE SENTENCES):
-1. Current Financial Grounding: State the current remaining daily allowance (from \`current_daily_budget\`, e.g., **S$115/day**) and available room today (from \`daily_saldo\`, e.g., **S$140** available today).
-2. Spend Trajectory & Changes: Explicitly address how spending has been moving over recent days (using \`spend_trend\` and \`yesterday_spend\`):
-   - Did spending cool down yesterday after a spike?
-   - Has spending been elevated for consecutive days?
-   - Was yesterday a zero-spend day that provided a clean reset?
-   - Is spending holding steady and disciplined?
-3. Daily Budget Direction & Hole Detection: Explicitly address whether the daily budget allowance is increasing, decreasing, or being dug further down:
-   - DIGGING DOWN (\`budget_trend.is_digging_down\` = true or consecutive overspend): Be honest and direct. Point out that consecutive overspending is eroding the daily allowance day-by-day (e.g. daily allowance has compressed from **S$145** down to **S$110/day**), and emphasize the need to stop the slide before the buffer shrinks further.
-   - DECREASING: Note that yesterday's spend caused a minor dip in the available daily allowance for the rest of the month.
-   - INCREASING: Celebrate that mindful or under-budget spending boosted the daily allowance (+**S$X/day**), expanding breathing room for upcoming days.
-   - STEADY: Confirm that the daily budget is holding steady.
-4. Category Context: If a specific subcategory in \`category_pacing\` has high "Расходы" spend, you may reference it naturally without lecturing.
+1. State the spendable amount per day (from \`spendable_per_day\`, e.g. <b>S$110.63</b>/day).
+2. State the cumulative position (from \`cumulative_position\`, e.g. if negative, explain that they are S$X behind pace, and use \`days_to_positive\` to state how many zero-spend days clear it). NEVER describe cumulative position as a negative daily allowance.
+3. If yesterday's spend is present (\`yesterday_spend\`), mention it concisely.
 
-### OUTPUT RULES:
-- Format: Plain, direct Telegram text. Use **bold** on all monetary figures (e.g., **S$124.50**, **S$85.00/day**).
-- Length: 2 to 4 sentences maximum.
-- Accuracy: NEVER invent or hallucinate financial amounts not present in the JSON payload.`;
+### FORMATTING & SYNTAX RULES:
+- Output MUST be formatted in Telegram HTML (use <b>bold</b> and <i>italic</i> tags only).
+- NEVER use Markdown syntax (do NOT use **bold** or *italic* or # headings).
+- Use <b>S$XX.XX</b> for currency figures.
+- Length: 2 to 4 sentences maximum.`;
 
   const apiPayload = {
     systemInstruction: {
@@ -293,7 +174,7 @@ function generateCoachBrief(payload) {
       }
     ],
     generationConfig: {
-      temperature: 0.5
+      temperature: 0.4
     }
   };
 
@@ -312,7 +193,10 @@ function generateCoachBrief(payload) {
       responseJson.candidates[0].content.parts[0].text;
 
     if (textOutput && textOutput.trim()) {
-      return textOutput.trim();
+      let cleaned = textOutput.trim();
+      // Ensure any markdown **bold** is converted to <b>bold</b> for Telegram HTML
+      cleaned = cleaned.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+      return cleaned;
     }
     Logger.log('Empty response from Gemini, using fallback brief.');
     return buildFallbackCoachBrief(ctx);
@@ -331,44 +215,36 @@ function generateDailyCoachBrief(contextJSON) {
 
 /**
  * Fallback generator for coach brief if Gemini API call fails or capacity exceeds.
- * Generates dynamic, trend-aware messages reflecting budget trajectory and spend changes.
+ * Generates dynamic, strictly grounded messages without hallucinations.
  * 
  * @param {Object} payload - Budget coach payload object.
- * @return {string} Short, dynamic fallback brief.
+ * @return {string} Short, dynamic fallback brief in Telegram HTML.
  */
 function buildFallbackCoachBrief(payload) {
-  const availableToday = Number(payload.daily_saldo || 0).toFixed(2);
-  const targetGoal = Number(payload.current_daily_budget || 0).toFixed(2);
-  const ySpend = Number(payload.yesterday_spend || 0).toFixed(2);
-  const bTrend = payload.budget_trend || {};
-  const sTrend = payload.spend_trend || {};
-  const isDigging = bTrend.is_digging_down;
-  const direction = bTrend.direction || 'steady';
-  const trajectory = sTrend.trajectory || 'steady';
+  const spendablePerDay = Number(Number(payload.spendable_per_day || payload.current_daily_budget || 0).toFixed(2));
+  const cumulativePosition = Number(Number(payload.cumulative_position || 0).toFixed(2));
+  const daysToPositive = payload.days_to_positive || 0;
+  const ySpend = Number(Number(payload.yesterday_spend || 0).toFixed(2));
 
-  let msg = '';
-
-  if (isDigging || direction === 'digging_down') {
-    const dropAmount = Math.abs(Number(bTrend.multi_day_change || bTrend.day_over_day_change || 0)).toFixed(2);
-    msg = `You have <b>S$${availableToday}</b> available today, with your daily allowance sitting at <b>S$${targetGoal}</b>/day.\n\n` +
-      `Recent high-spend days have continued to dig into your daily budget, eroding your baseline allowance by <b>S$${dropAmount}</b> over the past few days. ` +
-      `Yesterday came in at <b>S$${ySpend}</b>. Keeping discretionary spending minimal today will help halt the slide and protect your remaining buffer for the month.`;
-  } else if (direction === 'increasing' || trajectory === 'zero_spend_reset') {
-    const boostAmount = Number(bTrend.day_over_day_change || 0).toFixed(2);
-    msg = `Great momentum! Yesterday's light spending (<b>S$${ySpend}</b>) boosted your daily allowance up to <b>S$${targetGoal}</b>/day (+<b>S$${boostAmount}</b>).\n\n` +
-      `You have <b>S$${availableToday}</b> available to spend today with extra breathing room for the rest of the week.`;
-  } else if (trajectory === 'cooling_down') {
-    msg = `Spending cooled off nicely yesterday to <b>S$${ySpend}</b> after earlier high activity.\n\n` +
-      `Your daily target is steady at <b>S$${targetGoal}</b>/day with <b>S$${availableToday}</b> available today. Maintaining this disciplined pace keeps your monthly pacing in great shape.`;
-  } else if (direction === 'decreasing') {
-    const dipAmount = Math.abs(Number(bTrend.day_over_day_change || 0)).toFixed(2);
-    msg = `Yesterday's spending of <b>S$${ySpend}</b> trimmed your daily allowance slightly by <b>S$${dipAmount}</b> down to <b>S$${targetGoal}</b>/day.\n\n` +
-      `You have <b>S$${availableToday}</b> available today—a steady day today will keep your baseline comfortable.`;
+  let paceContext = '';
+  if (cumulativePosition < 0) {
+    const behindAmt = Math.abs(Math.round(cumulativePosition));
+    const dayText = daysToPositive === 1 ? 'one zero-spend day clears it' : `${daysToPositive} zero-spend days clear it`;
+    paceContext = `You're S$${behindAmt} behind pace — ${dayText}.`;
+  } else if (cumulativePosition > 0) {
+    paceContext = `You're S$${Math.round(cumulativePosition)} ahead of pace.`;
   } else {
-    msg = `Your daily allowance is holding steady at <b>S$${targetGoal}</b>/day with <b>S$${availableToday}</b> available today.\n\n` +
-      `Yesterday logged <b>S$${ySpend}</b> in daily expenses, keeping your monthly plan right on track.`;
+    paceContext = `You're right on pace.`;
   }
 
+  let yesterdayContext = '';
+  if (ySpend > 0) {
+    yesterdayContext = ` Yesterday logged <b>S$${ySpend.toFixed(2)}</b> in discretionary expenses.`;
+  } else {
+    yesterdayContext = ` Yesterday was a clean zero-spend day.`;
+  }
+
+  const msg = `Your spendable allowance sits at <b>S$${spendablePerDay.toFixed(2)}</b>/day. ${paceContext}${yesterdayContext}`;
   return msg.trim();
 }
 
@@ -392,44 +268,22 @@ function testCoachBriefScenarios() {
   const basePacing = {
     needs: { actual: 1200, target: 2000, sub_categories: [{ name: 'Продукты', actual: 400, target: 600 }] },
     wants: { actual: 800, target: 1200, sub_categories: [{ name: 'Рестораны', actual: 350, target: 400 }] },
-    savings: { actual: 1000, target: 1000 },
-    taxes: { actual: 0, target: 0 }
+    savings: { actual: 1000, target: 1000 }
   };
 
   const scenarios = [
     {
-      name: 'Scenario 1: Digging Down (3 consecutive overspend days)',
+      name: 'Scenario 1: Behind Pace (Negative Cumulative Position)',
       payload: {
         period: 'daily',
+        spendable_per_day: 110.63,
+        current_daily_budget: 110.63,
+        cumulative_position: -87.81,
+        flat_daily_budget: 125.00,
         daily_saldo: 85.00,
-        current_daily_budget: 95.00,
-        days_left_in_month: 16,
+        days_left_in_month: 2,
+        days_to_positive: 1,
         yesterday_spend: 210.00,
-        yesterday_budget: 115.00,
-        yesterday_date: '14.08',
-        budget_trend: {
-          direction: 'digging_down',
-          is_digging_down: true,
-          today_daily_budget: 95.00,
-          yesterday_budget: 115.00,
-          day_over_day_change: -20.00,
-          multi_day_change: -45.00,
-          consecutive_overspend_days: 3,
-          consecutive_underspend_days: 0,
-          verdict: 'Digging down: Consecutive high-spend days have shrunk your remaining daily allowance from ~S$140 to ~S$95/day (-S$45.00/day).'
-        },
-        spend_trend: {
-          yesterday_spend: 210.00,
-          yesterday_date: '14.08',
-          avg_spend_3_day: 195.00,
-          avg_spend_7_day: 130.00,
-          trajectory: 'elevated',
-          recent_completed_days: [
-            { date: '12.08', spend: 180.00, budget: 140.00, is_over_budget: true },
-            { date: '13.08', spend: 195.00, budget: 125.00, is_over_budget: true },
-            { date: '14.08', spend: 210.00, budget: 115.00, is_over_budget: true }
-          ]
-        },
         buckets: basePacing,
         category_pacing: {
           needs: { 'Продукты': { target_monthly: 600, actual_monthly_total: 400, daily_budget_contributing_spend: 120 } },
@@ -438,38 +292,17 @@ function testCoachBriefScenarios() {
       }
     },
     {
-      name: 'Scenario 2: Increasing / Recovering (Zero spend reset + allowance gain)',
+      name: 'Scenario 2: Ahead of Pace (Positive Cumulative Position)',
       payload: {
         period: 'daily',
-        daily_saldo: 165.00,
+        spendable_per_day: 135.00,
         current_daily_budget: 135.00,
-        days_left_in_month: 16,
+        cumulative_position: 120.50,
+        flat_daily_budget: 125.00,
+        daily_saldo: 165.00,
+        days_left_in_month: 10,
+        days_to_positive: 0,
         yesterday_spend: 0.00,
-        yesterday_budget: 120.00,
-        yesterday_date: '14.08',
-        budget_trend: {
-          direction: 'increasing',
-          is_digging_down: false,
-          today_daily_budget: 135.00,
-          yesterday_budget: 120.00,
-          day_over_day_change: 15.00,
-          multi_day_change: 15.00,
-          consecutive_overspend_days: 0,
-          consecutive_underspend_days: 1,
-          verdict: 'Increasing: Mindful spending boosted your daily allowance up by +S$15.00 to S$135.00/day!'
-        },
-        spend_trend: {
-          yesterday_spend: 0.00,
-          yesterday_date: '14.08',
-          avg_spend_3_day: 45.00,
-          avg_spend_7_day: 80.00,
-          trajectory: 'zero_spend_reset',
-          recent_completed_days: [
-            { date: '12.08', spend: 85.00, budget: 120.00, is_over_budget: false },
-            { date: '13.08', spend: 50.00, budget: 120.00, is_over_budget: false },
-            { date: '14.08', spend: 0.00, budget: 120.00, is_over_budget: false }
-          ]
-        },
         buckets: basePacing,
         category_pacing: {
           needs: { 'Продукты': { target_monthly: 600, actual_monthly_total: 400, daily_budget_contributing_spend: 0 } },
@@ -478,38 +311,17 @@ function testCoachBriefScenarios() {
       }
     },
     {
-      name: 'Scenario 3: Cooling Down (Light spend following heavy day)',
+      name: 'Scenario 3: Disciplined / Steady Spending',
       payload: {
         period: 'daily',
-        daily_saldo: 120.00,
+        spendable_per_day: 118.00,
         current_daily_budget: 118.00,
+        cumulative_position: 15.00,
+        flat_daily_budget: 120.00,
+        daily_saldo: 120.00,
         days_left_in_month: 16,
+        days_to_positive: 0,
         yesterday_spend: 25.00,
-        yesterday_budget: 115.00,
-        yesterday_date: '14.08',
-        budget_trend: {
-          direction: 'steady',
-          is_digging_down: false,
-          today_daily_budget: 118.00,
-          yesterday_budget: 115.00,
-          day_over_day_change: 3.00,
-          multi_day_change: -10.00,
-          consecutive_overspend_days: 0,
-          consecutive_underspend_days: 1,
-          verdict: 'Steady: Daily allowance is holding stable at ~S$118.00/day.'
-        },
-        spend_trend: {
-          yesterday_spend: 25.00,
-          yesterday_date: '14.08',
-          avg_spend_3_day: 110.00,
-          avg_spend_7_day: 105.00,
-          trajectory: 'cooling_down',
-          recent_completed_days: [
-            { date: '12.08', spend: 80.00, budget: 125.00, is_over_budget: false },
-            { date: '13.08', spend: 225.00, budget: 125.00, is_over_budget: true },
-            { date: '14.08', spend: 25.00, budget: 115.00, is_over_budget: false }
-          ]
-        },
         buckets: basePacing,
         category_pacing: {
           needs: { 'Продукты': { target_monthly: 600, actual_monthly_total: 400, daily_budget_contributing_spend: 25 } },

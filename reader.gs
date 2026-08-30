@@ -262,144 +262,48 @@ function getLoggedMandatoryExpenses(ss) {
  * Scans Column H (Dates / Дата) in the active month's tab starting from row 2 to find today's date,
  * and extracts daily budget metrics from Column J (daily_spend), Column K (daily_budget), and Column L (daily_saldo).
  * 
+/**
+ * STAGE 1: getDailyBudgetStatus() → Thin wrapper delegating to getDailyPacing() and getTodaySpend().
+ * Maintained for backwards compatibility with legacy callers.
+ * 
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
- * @return {Object} Status object with daily_spend, daily_budget, and daily_saldo parsed as numbers.
+ * @return {{ daily_spend: number, cumulative_position: number, daily_saldo: number }}
  */
 function getDailyBudgetStatus(ss) {
-  const defaultStatus = { daily_spend: 0, daily_budget: 0, daily_saldo: 0 };
-
   try {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
-    if (!spreadsheet) return defaultStatus;
+    const pacing = typeof getDailyPacing === 'function' ? getDailyPacing(null, ss) : { K_cumulative_today: 0, L_saldo_yesterday: 0 };
+    const todaySpend = typeof getTodaySpend === 'function' ? getTodaySpend(null, ss) : 0;
 
-    const tabName = getCurrentMonthTabName();
-    const sheet = spreadsheet.getSheetByName(tabName);
-
-    if (!sheet) {
-      Logger.log(`⚠️ Warning: Sheet "${tabName}" not found for daily budget status.`);
-      return defaultStatus;
-    }
-
-    const lastRow = sheet.getLastRow();
-    if (lastRow < 2) return defaultStatus;
-
-    // Determine target SGT date parts
-    const now = new Date();
-    const targetYear = parseInt(Utilities.formatDate(now, 'Asia/Singapore', 'yyyy'), 10);
-    const targetMonth = parseInt(Utilities.formatDate(now, 'Asia/Singapore', 'M'), 10) - 1; // 0-indexed (0-11)
-    const targetDay = parseInt(Utilities.formatDate(now, 'Asia/Singapore', 'd'), 10);
-    const targetFullStr = Utilities.formatDate(now, 'Asia/Singapore', 'dd.MM.yyyy');
-
-    // Read Range H2:L (Col H: Date, Col J: daily_spend, Col K: daily_budget, Col L: daily_saldo)
-    // Range starts at Row 2, Col 8 (H), numCols 5 (H, I, J, K, L)
-    const rawValues = sheet.getRange(2, 8, lastRow - 1, 5).getValues();
-    const displayValues = sheet.getRange(2, 8, lastRow - 1, 5).getDisplayValues();
-
-    let bestMatch = null;
-
-    for (let r = 0; r < rawValues.length; r++) {
-      const rawDateCell = rawValues[r][0]; // Col H (index 0 in range)
-      const displayDateStr = String(displayValues[r][0] || '').trim();
-      let matchesToday = false;
-
-      // 1. Date object comparison (exact year, month, date matching)
-      if (rawDateCell instanceof Date) {
-        matchesToday = (
-          rawDateCell.getDate() === targetDay &&
-          rawDateCell.getMonth() === targetMonth &&
-          rawDateCell.getFullYear() === targetYear
-        );
-      }
-
-      // 2. Display value comparison (fallback for formatted date strings like "26", "26.07", "26.07.2026")
-      if (!matchesToday && displayDateStr) {
-        if (displayDateStr === targetFullStr || displayDateStr === String(targetDay)) {
-          matchesToday = true;
-        } else {
-          // Check if displayed string starts with today's day number (e.g., "26", "26.07")
-          const dayMatch = displayDateStr.match(/^(\d{1,2})[\/\.-]?/);
-          if (dayMatch && parseInt(dayMatch[1], 10) === targetDay) {
-            matchesToday = true;
-          }
-        }
-      }
-
-      // 3. Raw number comparison (fallback for day number cells)
-      if (!matchesToday && typeof rawDateCell === 'number') {
-        matchesToday = (rawDateCell === targetDay);
-      }
-
-      if (matchesToday) {
-        // Relative to Col H (index 0): Col J = index 2 (Траты), Col K = index 3 (Бюджет), Col L = index 4 (Сальдо)
-        const dailySpend = parseAmountNumber(rawValues[r][2], displayValues[r][2]);
-        const dailyBudget = parseAmountNumber(rawValues[r][3], displayValues[r][3]);
-        const dailySaldo = parseAmountNumber(rawValues[r][4], displayValues[r][4]);
-
-        const candidate = {
-          daily_spend: dailySpend,
-          daily_budget: dailyBudget,
-          daily_saldo: dailySaldo
-        };
-
-        if (!bestMatch) {
-          bestMatch = candidate;
-        } else if (candidate.daily_budget > 0 || candidate.daily_spend > 0) {
-          bestMatch = candidate;
-        }
-      }
-    }
-
-    if (bestMatch) {
-      return bestMatch;
-    }
-
-    Logger.log(`Info: Today's date (${targetFullStr}) row not found in Column H of ${tabName}. Returning defaults.`);
-    return defaultStatus;
+    return {
+      daily_spend: Number(Number(todaySpend || 0).toFixed(2)),
+      cumulative_position: Number(Number(pacing.K_cumulative_today || 0).toFixed(2)),
+      daily_saldo: Number(Number(pacing.L_saldo_yesterday || 0).toFixed(2))
+    };
   } catch (e) {
     Logger.log(`Error in getDailyBudgetStatus: ${e.message}`);
-    return defaultStatus;
+    return { daily_spend: 0, cumulative_position: 0, daily_saldo: 0 };
   }
 }
 
 /**
- * STAGE 1: getDailySaldo() → {saldo, daysLeftInMonth} from SHEET_FACTS.saldoCell (D19 & Daily Tracker).
- * Also includes currentDailyBudget from cell D19 for downstream calculations.
+ * STAGE 1: getDailySaldo() → Thin wrapper delegating to getDailyPacing().
+ * Returns { saldo, daysLeftInMonth, currentDailyBudget } sourced from getDailyPacing().
+ * Maintained for backwards compatibility with legacy callers.
+ * 
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
+ * @return {{ saldo: number, daysLeftInMonth: number, currentDailyBudget: number }}
  */
 function getDailySaldo(ss) {
   try {
-    const activeInfo = getActiveMonthTab(ss);
-    if (!activeInfo || !activeInfo.exists) {
-      return { saldo: 0, currentDailyBudget: 0, daysLeftInMonth: 1, status: activeInfo ? activeInfo.status : 'MISSING' };
-    }
-    const sheet = activeInfo.sheet;
-
-    const now = new Date();
-    const year = parseInt(Utilities.formatDate(now, 'Asia/Singapore', 'yyyy'), 10);
-    const month = parseInt(Utilities.formatDate(now, 'Asia/Singapore', 'M'), 10);
-    const day = parseInt(Utilities.formatDate(now, 'Asia/Singapore', 'd'), 10);
-    const totalDays = new Date(year, month, 0).getDate();
-    const daysLeftInMonth = Math.max(1, totalDays - day + 1);
-
-    const cellRef = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.MONTHLY_TAB_STRUCTURE && (SHEET_FACTS.MONTHLY_TAB_STRUCTURE.saldoCell || SHEET_FACTS.MONTHLY_TAB_STRUCTURE.CURRENT_DAILY_BUDGET_CELL)) || 'D19';
-    const d19Raw = sheet.getRange(cellRef).getValue();
-    const d19Disp = sheet.getRange(cellRef).getDisplayValue();
-    const currentDailyBudget = parseAmountNumber(d19Raw, d19Disp);
-
-    const dailyStatus = getDailyBudgetStatus(sheet.getParent());
-    let saldo = dailyStatus.daily_saldo;
-
-    if (!saldo && currentDailyBudget > 0) {
-      saldo = Number((currentDailyBudget * daysLeftInMonth).toFixed(2));
-    }
-
+    const pacing = typeof getDailyPacing === 'function' ? getDailyPacing(null, ss) : { L_saldo_yesterday: 0, days_left: 1, D19_realistic_daily: 0 };
     return {
-      saldo: saldo,
-      daysLeftInMonth: daysLeftInMonth,
-      currentDailyBudget: currentDailyBudget
+      saldo: Number(Number(pacing.L_saldo_yesterday || 0).toFixed(2)),
+      daysLeftInMonth: pacing.days_left || 1,
+      currentDailyBudget: Number(Number(pacing.D19_realistic_daily || 0).toFixed(2))
     };
   } catch (e) {
     Logger.log(`Error in getDailySaldo: ${e.message}`);
-    return { saldo: 0, currentDailyBudget: 0, daysLeftInMonth: 1, error: e.message };
+    return { saldo: 0, daysLeftInMonth: 1, currentDailyBudget: 0 };
   }
 }
 
@@ -1807,5 +1711,132 @@ function test_getTodaySpend() {
     mixed_date: { date: mixedDateStr, transactions_spend: mixedTxnSpend, monthly_col_j: mixedMonthlyColJ }
   };
 }
+
+/**
+ * Test function: Asserts consistency across all daily budget readers.
+ * - Asserts getDailyPacing() is the single source for K, L, D17, D19.
+ * - Asserts buildCoachPayload() and Evening Recap use getDailyPacing directly.
+ * - Asserts Col K and Cell D19 are labelled differently ("Cumulative position" vs "Spendable per day").
+ * - Asserts negative cumulative positions are rendered in plain language using days_to_positive.
+ * - Asserts all money values are rounded to 2 decimal places with no float tails.
+ * - Prints side-by-side what Evening Recap and Morning Coach say today.
+ */
+function test_dailyBudgetConsistency() {
+  Logger.log('====================================================');
+  Logger.log('   TEST: DAILY BUDGET READS & LABELS CONSISTENCY');
+  Logger.log('====================================================\n');
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const pacing = getDailyPacing(null, ss);
+
+  Logger.log('--- 1. Canonical getDailyPacing() Data ---');
+  Logger.log(JSON.stringify(pacing, null, 2));
+
+  // 1. Coach Payload Verification
+  const coachPayload = typeof buildCoachPayload === 'function' ? buildCoachPayload('daily', ss) : {};
+  Logger.log('\n--- 2. Coach Payload Daily Budget Fields ---');
+  Logger.log(`Spendable per day (D19): S$${coachPayload.spendable_per_day || coachPayload.current_daily_budget}`);
+  Logger.log(`Cumulative Position (K): S$${coachPayload.cumulative_position}`);
+  Logger.log(`Daily Saldo (L):        S$${coachPayload.daily_saldo}`);
+  Logger.log(`Days left in month:     ${coachPayload.days_left_in_month}`);
+  Logger.log(`Days to positive:       ${coachPayload.days_to_positive}`);
+
+  // 2. Thin Wrapper Checks
+  const dailySaldoWrapper = getDailySaldo(ss);
+  const dailyBudgetStatusWrapper = getDailyBudgetStatus(ss);
+  Logger.log('\n--- 3. Thin Wrapper Checks ---');
+  Logger.log(`getDailySaldo():        ${JSON.stringify(dailySaldoWrapper)}`);
+  Logger.log(`getDailyBudgetStatus(): ${JSON.stringify(dailyBudgetStatusWrapper)}`);
+
+  // 3. Generate messages for today
+  const eveningRecap = typeof generateDailyTransactionsRecap === 'function' ? generateDailyTransactionsRecap(ss) : '';
+  const morningBrief = typeof generateCoachBrief === 'function' ? generateCoachBrief(coachPayload) : (typeof buildFallbackCoachBrief === 'function' ? buildFallbackCoachBrief(coachPayload) : '');
+
+  Logger.log('\n--- 4. Side-by-Side Message Previews for Today ---');
+  Logger.log('══════════════ MORNING COACH BRIEF ══════════════');
+  Logger.log(morningBrief);
+  Logger.log('═════════════════════════════════════════════════\n');
+  Logger.log('══════════════ EVENING RECAP MESSAGE ════════════');
+  Logger.log(eveningRecap);
+  Logger.log('═════════════════════════════════════════════════\n');
+
+  Logger.log('--- 5. Assertion Checks ---');
+  let passed = true;
+
+  // Assert A: Coach payload uses D19 as spendable_per_day / current_daily_budget
+  const expectedD19 = Number(Number(pacing.D19_realistic_daily || 0).toFixed(2));
+  if (coachPayload.spendable_per_day === expectedD19 && coachPayload.current_daily_budget === expectedD19) {
+    Logger.log(`✅ PASS: Coach payload spendable_per_day (${coachPayload.spendable_per_day}) matches D19 (${expectedD19}).`);
+  } else {
+    Logger.log(`❌ FAIL: Coach payload spendable_per_day (${coachPayload.spendable_per_day}) does not match D19 (${expectedD19}).`);
+    passed = false;
+  }
+
+  // Assert B: Evening recap does NOT label Column K as "Daily Budget"
+  if (!eveningRecap.includes('Daily Budget:')) {
+    Logger.log(`✅ PASS: Evening recap does NOT label Column K as "Daily Budget".`);
+  } else {
+    Logger.log(`❌ FAIL: Evening recap still contains "Daily Budget:" label!`);
+    passed = false;
+  }
+
+  // Assert C: Evening recap uses "Spendable per day" for D19
+  if (eveningRecap.includes('Spendable per day:')) {
+    Logger.log(`✅ PASS: Evening recap correctly labels D19 as "Spendable per day:".`);
+  } else {
+    Logger.log(`❌ FAIL: Evening recap missing "Spendable per day:" label!`);
+    passed = false;
+  }
+
+  // Assert D: Cumulative position uses plain language for negative values
+  if (pacing.K_cumulative_today < 0) {
+    if (eveningRecap.includes('behind pace')) {
+      Logger.log(`✅ PASS: Negative cumulative position (K = ${pacing.K_cumulative_today.toFixed(2)}) is described in plain language ("behind pace").`);
+    } else {
+      Logger.log(`❌ FAIL: Negative cumulative position not rendered in plain language!`);
+      passed = false;
+    }
+  } else {
+    Logger.log(`ℹ️ Info: Cumulative position is positive or zero (${pacing.K_cumulative_today.toFixed(2)}).`);
+  }
+
+  // Assert E: No float tails (> 2 decimal places) on money values in Evening Recap or Morning Coach
+  const eveningFloatTail = eveningRecap.match(/S\$-?\d+\.\d{3,}/);
+  if (!eveningFloatTail) {
+    Logger.log(`✅ PASS: All currency values in Evening Recap are cleanly rounded (no float tails).`);
+  } else {
+    Logger.log(`❌ FAIL: Unrounded float tail detected in Evening Recap: "${eveningFloatTail[0]}"`);
+    passed = false;
+  }
+
+  const morningFloatTail = morningBrief.match(/S\$-?\d+\.\d{3,}/);
+  if (!morningFloatTail) {
+    Logger.log(`✅ PASS: All currency values in Morning Coach Brief are cleanly rounded (no float tails).`);
+  } else {
+    Logger.log(`❌ FAIL: Unrounded float tail detected in Morning Coach Brief: "${morningFloatTail[0]}"`);
+    passed = false;
+  }
+
+  // Assert F: getDailyBudgetStatus() returns cumulative_position, NOT daily_budget
+  if (dailyBudgetStatusWrapper.cumulative_position !== undefined && dailyBudgetStatusWrapper.daily_budget === undefined) {
+    Logger.log(`✅ PASS: getDailyBudgetStatus() uses unambiguous key "cumulative_position" and eliminated "daily_budget".`);
+  } else {
+    Logger.log(`❌ FAIL: getDailyBudgetStatus() still contains ambiguous "daily_budget" key or is missing "cumulative_position"!`);
+    passed = false;
+  }
+
+  Logger.log('\n====================================================');
+  Logger.log(passed ? '🎉 ALL CONSISTENCY ASSERTIONS PASSED' : '❌ ONE OR MORE ASSERTIONS FAILED');
+  Logger.log('====================================================');
+
+  return {
+    pacing: pacing,
+    coach_payload: coachPayload,
+    morning_brief: morningBrief,
+    evening_recap: eveningRecap,
+    passed: passed
+  };
+}
+
 
 
