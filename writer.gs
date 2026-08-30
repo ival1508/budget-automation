@@ -32,9 +32,10 @@ function formatSheetDate(cellValue) {
  * 
  * @param {Array<Object>} transactionsArray - Array of enriched transaction objects.
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
- * @return {Object} Result summary { writtenCount, skippedCount, writtenRows }.
+ * @param {boolean} [optDryRun] - Optional override for DRY_RUN mode.
+ * @return {Object} Result summary { writtenCount, skippedCount, writtenRows, dryRun }.
  */
-function appendTransactions(transactionsArray, ss) {
+function appendTransactions(transactionsArray, ss, optDryRun) {
   if (!Array.isArray(transactionsArray) || transactionsArray.length === 0) {
     return { writtenCount: 0, skippedCount: 0, writtenRows: [] };
   }
@@ -129,6 +130,24 @@ function appendTransactions(transactionsArray, ss) {
       notesText,                  // J: Notes & Tracking Flags
       txn.bucket || 'Wants'       // K: 50/30/20 Category
     ]);
+  }
+
+  // 4. DRY_RUN Check: If DRY_RUN is active, log exact rows without touching sheet (§6.6, PRD Stage 3)
+  const isDryRun = (typeof optDryRun === 'boolean')
+    ? optDryRun
+    : (typeof SHEET_FACTS !== 'undefined' && Boolean(SHEET_FACTS.DRY_RUN));
+
+  if (isDryRun) {
+    Logger.log(`[DRY_RUN] DRY_RUN is active. Would append ${rows2D.length} rows to "${sheet.getName()}" (starting row ${startRow}):`);
+    rows2D.forEach((r, idx) => {
+      Logger.log(`  [DRY_RUN Row ${idx + 1}] Date: ${r[0]} | Account: ${r[1]} | Type: ${r[2]} | Amount: ${r[3]} | SGD: ${r[4]} | Category: ${r[7]} | Where: ${r[8]} | Notes: ${r[9]} | Bucket: ${r[10]}`);
+    });
+    return {
+      writtenCount: toAppend.length,
+      skippedCount: skippedCount,
+      writtenRows: toAppend,
+      dryRun: true
+    };
   }
 
   // 4. Batch Write Input Columns A-K in a single operation (§6.6)

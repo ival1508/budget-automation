@@ -32,6 +32,10 @@ const MONTH_TAB_NAMES = Object.assign({}, MONTH_TABS_EXISTING, MONTH_TABS_FUTURE
 
 // 2. SHEET_FACTS EXPORT
 const SHEET_FACTS = {
+  // Stage 3 Environment & Safety Flags
+  DRY_RUN: true, // Default true for all Stage 3 sub-stages until 3F
+  TEST_SPREADSHEET_ID: '1SgV3M1RWtEKvqWEazv-3slduXPCEi7x2gJFElWbFA70', // Sandbox spreadsheet ID (to be filled by user)
+
   MONTH_TABS_EXISTING: MONTH_TABS_EXISTING,
   MONTH_TABS_FUTURE: MONTH_TABS_FUTURE,
   MONTH_TAB_NAMES: MONTH_TAB_NAMES,
@@ -40,7 +44,8 @@ const SHEET_FACTS = {
     TRANSACTIONS: 'Transactions',
     MERCHANTS: 'Merchants',
     BUDGET_50_30_20: '50/30/20',
-    REFERENCE: '-'
+    REFERENCE: '-',
+    TEST_FIXTURES: '_TestFixtures'
   },
   
   USERS: {
@@ -270,4 +275,30 @@ function showReferenceTab() {
   values.forEach((row, i) => {
     Logger.log(`Row ${i+1}: A="${row[0]}" | B="${row[1]}" | C="${row[2]}" | D="${row[3]}"`);
   });
+}
+
+/**
+ * Returns the target Google Spreadsheet instance.
+ * When useTest is true, opens and returns the sandbox spreadsheet defined by
+ * SHEET_FACTS.TEST_SPREADSHEET_ID. Otherwise returns the active spreadsheet.
+ * 
+ * @param {boolean} [useTest=false] - If true, returns the test sandbox spreadsheet.
+ * @return {GoogleAppsScript.Spreadsheet.Spreadsheet} Target spreadsheet instance.
+ */
+function getTargetSpreadsheet(useTest) {
+  if (useTest) {
+    const testId = typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.TEST_SPREADSHEET_ID
+      ? String(SHEET_FACTS.TEST_SPREADSHEET_ID).trim()
+      : '';
+    if (testId) {
+      try {
+        return SpreadsheetApp.openById(testId);
+      } catch (err) {
+        Logger.log(`⚠️ Failed to open TEST_SPREADSHEET_ID ("${testId}"): ${err.message}. Falling back to active spreadsheet.`);
+      }
+    } else {
+      Logger.log('ℹ️ SHEET_FACTS.TEST_SPREADSHEET_ID is empty. Using active spreadsheet for test target.');
+    }
+  }
+  return SpreadsheetApp.getActiveSpreadsheet();
 }
