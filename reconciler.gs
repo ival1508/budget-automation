@@ -783,3 +783,190 @@ function extractFileBlobDetails(fileBlob) {
 
   return { text, bytes, mimeType, name };
 }
+
+// ============================================================================
+// 4. STAGE 3B: ROW NORMALIZATION
+// ============================================================================
+
+/**
+ * STAGE 3B: Normalizes raw or parsed statement rows into standardized reconciler records.
+ * 
+ * Standardizes:
+ * - Dates -> DD.MM.YYYY (reusing normalizeDateString from enricher.gs)
+ * - Amounts -> Numbers (handles "S$1 234,56", space thousands, comma decimals, negative numbers)
+ * - Merchant strings -> Normalised with normaliseWhere() from enricher.gs (shared with Phase 1)
+ * - Sign/direction -> Standardized across banks (Purchases > 0 / 'Расходы', Inflows/Refunds < 0 / 'Получение денег')
+ * 
+ * @param {Array<Object|Array>} rows - Array of statement row objects or raw arrays.
+ * @return {Array<Object>} Array of standardized normalized row objects.
+ */
+function normalizeRows(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return [];
+  }
+
+  const normalizedRows = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) continue;
+
+    // Handle both object format and raw array format
+    let rawDate = '';
+    let rawAmount = null;
+    let rawMerchant = '';
+    let rawType = null;
+    let account = 'DBS CC SGD';
+    let cardNum = '';
+    let currency = 'SGD';
+
+    if (Array.isArray(row)) {
+      if (row.length < 3) continue;
+      rawDate = row[0];
+      rawMerchant = row[1];
+      rawAmount = row[2];
+      if (row.length > 3) cardNum = String(row[3]);
+    } else if (typeof row === 'object') {
+      rawDate = row.date || row.raw_date || '';
+      rawAmount = (row.amount !== undefined && row.amount !== null) ? row.amount : row.raw_amount;
+      rawMerchant = row.merchant || row.description || row.where || row.raw_merchant || '';
+      rawType = row.type || null;
+      account = row.account || 'DBS CC SGD';
+      cardNum = row.card_number || '';
+      currency = row.currency || 'SGD';
+    }
+
+    // 1. Date Normalization -> DD.MM.YYYY
+    let normDate = '';
+    if (typeof normalizeDateString === 'function') {
+      normDate = normalizeDateString(rawDate);
+    }
+    if (!normDate && typeof parseStatementDate === 'function') {
+      normDate = parseStatementDate(rawDate);
+    }
+    if (!normDate) {
+      normDate = String(rawDate || '').trim();
+    }
+
+    // 2. Amount Normalization -> Number (handles comma decimals, S$1 234,56, etc.)
+    const numAmount = normalizeAmountValue(rawAmount);
+
+    // Filter out completely empty rows (no date, no merchant, 0 amount)
+    if (!normDate && !rawMerchant && numAmount === 0) {
+      continue;
+    }
+
+    // 3. Merchant Normalization -> Reusing normaliseWhere() from Phase 1 enricher
+    const cleanRawMerchant = String(rawMerchant || '').replace(/^['"\s]+|['"\s]+$/g, '').trim();
+    let normMerchant = '';
+    if (typeof normaliseWhere === 'function') {
+      normMerchant = normaliseWhere(cleanRawMerchant);
+    } else {
+      normMerchant = cleanRawMerchant.toLowerCase().trim().replace(/\s+/g, ' ');
+    }
+
+    // 4. Sign and Transaction Type Resolution
+    let type = rawType;
+    let finalAmount = numAmount;
+
+    const merchantUpper = cleanRawMerchant.toUpperCase();
+    const isPaymentOrCredit = (
+      merchantUpper.includes('BILL PAYMENT') ||
+      merchantUpper.includes('PAYMENT RECEIVED') ||
+      merchantUpper.includes('AUTOPAY') ||
+      merchantUpper.includes('LATE FEE REVERSAL') ||
+      merchantUpper.includes('MONEYSEND') ||
+      merchantUpper.includes('REFUND') ||
+      merchantUpper.includes('CASHBACK')
+    );
+
+    if (rawType) {
+      // If type is already explicitly provided
+      if (rawType === 'Получение денег' || rawType === 'INCOME' || isPaymentOrCredit) {
+        type = 'Получение денег';
+        finalAmount = -Math.abs(numAmount);
+      } else {
+        type = 'Расходы';
+        finalAmount = Math.abs(numAmount);
+      }
+    } else {
+      if (numAmount < 0 || isPaymentOrCredit) {
+        type = 'Получение денег';
+        finalAmount = -Math.abs(numAmount);
+      } else {
+        type = 'Расходы';
+        finalAmount = Math.abs(numAmount);
+      }
+    }
+
+    normalizedRows.push({
+      date: normDate,
+      amount: finalAmount,
+      merchant: normMerchant,
+      raw_merchant: cleanRawMerchant,
+      type: type,
+      account: account,
+      card_number: cardNum ? String(cardNum).replace(/^['"\s]+|['"\s]+$/g, '') : '',
+      currency: currency,
+      raw_row: row
+    });
+  }
+
+  return normalizedRows;
+}
+
+/**
+ * Robust numeric parser for statement amount values.
+ * Handles space thousands separators and comma decimals (e.g. "S$1 234,56", "207,32", "-12,969.24").
+ * 
+ * @param {number|string} val - Raw amount value.
+ * @return {number} Parsed float number.
+ */
+function normalizeAmountValue(val) {
+  if (val === undefined || val === null) return 0;
+  if (typeof val === 'number') {
+    return isNaN(val) ? 0 : Math.round(val * 100) / 100;
+  }
+
+  let s = String(val).trim();
+  if (!s) return 0;
+
+  // Strip currency prefixes: "S$", "SGD", "$", "USD", "EUR"
+  s = s.replace(/^(S\$|SGD|\$|USD|EUR)\s*/i, '').trim();
+
+  let isNegative = false;
+  if (s.startsWith('-')) {
+    isNegative = true;
+    s = s.substring(1).trim();
+  } else if (s.endsWith('-')) {
+    isNegative = true;
+    s = s.substring(0, s.length - 1).trim();
+  } else if (/CR$/i.test(s)) {
+    isNegative = true;
+    s = s.replace(/CR$/i, '').trim();
+  } else if (/DR$/i.test(s)) {
+    s = s.replace(/DR$/i, '').trim();
+  }
+
+  // Remove spaces (used as thousands separator, e.g. "1 234,56")
+  s = s.replace(/\s+/g, '');
+
+  if (s.indexOf(',') !== -1 && s.indexOf('.') === -1) {
+    // Comma is decimal separator (e.g., "1234,56" or "207,32")
+    s = s.replace(',', '.');
+  } else if (s.indexOf(',') !== -1 && s.indexOf('.') !== -1) {
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) {
+      // European format: 1.234,56 -> 1234.56
+      s = s.replace(/\./g, '').replace(',', '.');
+    } else {
+      // Standard US/SG format: 1,234.56 -> 1234.56
+      s = s.replace(/,/g, '');
+    }
+  }
+
+  const num = parseFloat(s);
+  if (isNaN(num)) return 0;
+
+  const result = isNegative ? -Math.abs(num) : num;
+  return Math.round(result * 100) / 100;
+}

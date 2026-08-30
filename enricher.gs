@@ -4,8 +4,10 @@
  */
 
 /**
- * Normalises a merchant/location string for consistent deduplication.
- * Converts string to lowercase, trims leading/trailing whitespace, and collapses multiple spaces.
+ * Normalises a merchant/location string for consistent deduplication and reconciler matching.
+ * Converts string to lowercase, strips terminal/bank prefixes, normalizes Grab transaction IDs,
+ * strips trailing location/country markers, and collapses whitespace.
+ * Shared directly across Phase 1 enricher and Stage 3 reconciler.
  * 
  * @param {string} where - Raw or extracted merchant/location string.
  * @return {string} Normalised merchant string.
@@ -14,10 +16,26 @@ function normaliseWhere(where) {
   if (!where || typeof where !== 'string') {
     return '';
   }
-  return where
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, ' ');
+  let s = where.toLowerCase().trim().replace(/\s+/g, ' ');
+
+  // Strip leading/trailing quotes or apostrophes
+  s = s.replace(/^['"\s]+|['"\s]+$/g, '');
+
+  // Strip common bank/card/POS terminal prefixes (e.g., "NETS*", "VISA*", "SQ*")
+  s = s.replace(/^(nets|visa|mastercard|sq)\s*[*:-]\s*/i, '');
+
+  // Normalize Grab variants (e.g., "GRAB* A-1234567890", "GRAB* A-9876543210", "GRAB* RIDE", "GRAB* FOOD", "GRAB TAXI") -> "grab"
+  if (/^grab(\*.*|\s+.*)?$/i.test(s)) {
+    return 'grab';
+  }
+
+  // Strip trailing transaction/order noise (e.g., "*12345678" or trailing "*1234")
+  s = s.replace(/\*[a-z0-9\-]+$/i, '').trim();
+
+  // Strip common location suffixes like "SINGAPORE SGP", "SINGAPORE", "SGP"
+  s = s.replace(/\s+(singapore\s+sgp|singapore|sgp)$/i, '').trim();
+
+  return s;
 }
 
 /**

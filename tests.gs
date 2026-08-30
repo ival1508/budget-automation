@@ -486,3 +486,139 @@ function test_parseStatement_full() {
 
   Logger.log('\n=== test_parseStatement_full() Execution Finished ===');
 }
+
+// ============================================================================
+// 4. STAGE 3B TESTS
+// ============================================================================
+
+/**
+ * STAGE 3B TEST: Row Normalization Verification.
+ * 
+ * Asserts:
+ * 1. Dates normalize to canonical DD.MM.YYYY.
+ * 2. Amounts normalize to float numbers (handling "S$1 234,56", comma decimals, spaces).
+ * 3. Real merchant strings normalize using the shared normaliseWhere() function from Phase 1 enricher.
+ * 4. CRITICAL: Two different Grab transactions with different transaction IDs normalize to the SAME merchant string ("grab").
+ * 5. Sign/direction resolved consistently across banks:
+ *    - Purchases (DBS & Citibank) -> positive amounts, type = 'Расходы'.
+ *    - Inflows / Refunds / Payments -> negative amounts, type = 'Получение денег'.
+ * 6. Edge cases: European comma decimals, negative amounts, zero amount, empty rows.
+ */
+function test_normalizeRows() {
+  Logger.log('====================================================');
+  Logger.log('       TEST: test_normalizeRows() EXECUTION');
+  Logger.log('====================================================\n');
+
+  // Input dataset with real merchant strings, different formats, and edge cases
+  const inputRows = [
+    // 1. Real DBS Purchase
+    { date: '11/08/2026', amount: '30.00', merchant: 'SIMPLYGO APP SINGAPORE SGP', type: 'Расходы', account: 'DBS CC SGD' },
+    // 2. Real DBS Payment (Credit column)
+    { date: '11.08.2026', amount: '-12,969.24', merchant: 'BILL PAYMENT - DBS INTERNET/WIRELESS', type: 'Получение денег', account: 'DBS CC SGD' },
+    // 3. Real Citibank Purchase
+    { date: '26/08/2026', amount: '207.32', merchant: 'SHELL TELOK BLANGAH', type: 'Расходы', account: 'Citibank CC' },
+    // 4. Real Citibank Fee Reversal (Inflow)
+    { date: '26.08.2026', amount: '-100.00', merchant: 'AUTO LATE FEE REVERSAL', type: 'Получение денег', account: 'Citibank CC' },
+    // 5. Real Citibank Fee (Expense)
+    { date: '26.08.2026', amount: '100.00', merchant: 'LATE CHARGE FEE', type: 'Расходы', account: 'Citibank CC' },
+    // 6. Real Citibank MoneySend Inflow
+    { date: '26.08.2026', amount: '-483.23', merchant: 'MONEYSEND VALERIY IVANOV', type: 'Получение денег', account: 'Citibank CC' },
+    // 7. CRITICAL: Grab Transaction 1 with transaction ID
+    { date: '15/08/2026', amount: '14.20', merchant: 'GRAB* A-1234567890', account: 'DBS CC SGD' },
+    // 8. CRITICAL: Grab Transaction 2 with DIFFERENT transaction ID
+    { date: '16/08/2026', amount: '22.40', merchant: 'GRAB* A-9876543210', account: 'DBS CC SGD' },
+    // 9. Edge Case: European comma decimal with space thousands separator ("S$1 234,56") and NETS prefix
+    { date: '2026-08-20', amount: 'S$1 234,56', merchant: 'NETS*FAIRPRICE', account: 'DBS CC SGD' },
+    // 10. Edge Case: Zero amount row
+    { date: '22.08.2026', amount: '0.00', merchant: 'PENDING AUTHORIZATION', account: 'Citibank CC' },
+    // 11. Edge Case: Empty row (must be skipped)
+    {},
+    null
+  ];
+
+  const normalized = normalizeRows(inputRows);
+  Logger.log(`Normalized rows count: ${normalized.length} (out of ${inputRows.length} input rows)`);
+
+  // Assert empty rows filtered out (10 valid rows out of 12 items)
+  assertEq(normalized.length, 10, 'Empty and null rows are properly filtered out');
+
+  // --- 1. Real DBS Purchase Assertions ---
+  Logger.log('\n--- 1. DBS Purchase Normalization ---');
+  const dbsPurchase = normalized[0];
+  assertEq(dbsPurchase.date, '11.08.2026', 'DBS purchase date normalized to DD.MM.YYYY (11.08.2026)');
+  assertClose(dbsPurchase.amount, 30.00, 0.001, 'DBS purchase amount is +30.00');
+  assertEq(dbsPurchase.merchant, 'simplygo app', 'DBS merchant normalized (country suffix stripped)');
+  assertEq(dbsPurchase.type, 'Расходы', 'DBS purchase type is "Расходы"');
+
+  // --- 2. Real DBS Payment Assertions ---
+  Logger.log('\n--- 2. DBS Payment Normalization ---');
+  const dbsPayment = normalized[1];
+  assertClose(dbsPayment.amount, -12969.24, 0.01, 'DBS payment amount is -12969.24');
+  assertEq(dbsPayment.type, 'Получение денег', 'DBS payment type is "Получение денег"');
+
+  // --- 3. Real Citibank Purchase Assertions ---
+  Logger.log('\n--- 3. Citibank Purchase Normalization ---');
+  const citiPurchase = normalized[2];
+  assertEq(citiPurchase.date, '26.08.2026', 'Citibank purchase date normalized to DD.MM.YYYY (26.08.2026)');
+  assertClose(citiPurchase.amount, 207.32, 0.001, 'Citibank purchase amount is +207.32');
+  assertEq(citiPurchase.merchant, 'shell telok blangah', 'Citibank merchant normalized');
+  assertEq(citiPurchase.type, 'Расходы', 'Citibank purchase type is "Расходы"');
+
+  // --- 4. Real Citibank Fee Reversal Assertions ---
+  Logger.log('\n--- 4. Citibank Inflow Normalization ---');
+  const citiReversal = normalized[3];
+  assertClose(citiReversal.amount, -100.00, 0.001, 'Citibank reversal amount is -100.00');
+  assertEq(citiReversal.type, 'Получение денег', 'Citibank reversal type is "Получение денег"');
+
+  // --- 5. CRITICAL: Grab Merchant Normalization Consistency ---
+  Logger.log('\n--- 5. CRITICAL: Grab Transaction Normalization Consistency ---');
+  const grabRow1 = normalized[6]; // GRAB* A-1234567890
+  const grabRow2 = normalized[7]; // GRAB* A-9876543210
+
+  Logger.log(`Grab Row 1: raw="${grabRow1.raw_merchant}" -> norm="${grabRow1.merchant}"`);
+  Logger.log(`Grab Row 2: raw="${grabRow2.raw_merchant}" -> norm="${grabRow2.merchant}"`);
+
+  assertEq(
+    grabRow1.merchant === grabRow2.merchant,
+    true,
+    'CRITICAL: Two different Grab transactions with different transaction IDs normalize to the EXACT SAME merchant string'
+  );
+  assertEq(grabRow1.merchant, 'grab', 'Grab normalized merchant string is "grab"');
+
+  // Check ledger merchant equivalence
+  const ledgerGrabWhere = normaliseWhere('Grab');
+  assertEq(
+    grabRow1.merchant === ledgerGrabWhere,
+    true,
+    'CRITICAL: Statement Grab merchant matches ledger merchant ("Grab" -> "grab")'
+  );
+
+  // --- 6. Edge Case: European Comma Decimal & NETS Prefix ---
+  Logger.log('\n--- 6. Edge Case: European Comma Decimal & Prefix Stripping ---');
+  const euRow = normalized[8]; // S$1 234,56 | NETS*FAIRPRICE | 2026-08-20
+  assertEq(euRow.date, '20.08.2026', 'ISO date "2026-08-20" normalized to "20.08.2026"');
+  assertClose(euRow.amount, 1234.56, 0.01, 'Amount "S$1 234,56" normalized to 1234.56');
+  assertEq(euRow.merchant, 'fairprice', 'Merchant "NETS*FAIRPRICE" prefix stripped to "fairprice"');
+  assertEq(euRow.type, 'Расходы', 'European expense row type is "Расходы"');
+
+  // --- 7. Edge Case: Zero Amount ---
+  Logger.log('\n--- 7. Edge Case: Zero Amount ---');
+  const zeroRow = normalized[9];
+  assertClose(zeroRow.amount, 0.00, 0.001, 'Zero amount row normalized to 0.00');
+
+  // --- 8. Cross-Bank Positive Sign Invariant ---
+  Logger.log('\n--- 8. Cross-Bank Positive Sign Invariant ---');
+  assertEq(
+    (dbsPurchase.amount > 0) && (citiPurchase.amount > 0),
+    true,
+    'CRITICAL: DBS purchase (+30.00) and Citibank purchase (+207.32) both normalize to POSITIVE amounts'
+  );
+
+  assertEq(
+    (dbsPayment.amount < 0) && (citiReversal.amount < 0),
+    true,
+    'CRITICAL: DBS payment (-12969.24) and Citibank reversal (-100.00) both normalize to NEGATIVE amounts'
+  );
+
+  Logger.log('\n=== test_normalizeRows() Execution Finished ===');
+}
