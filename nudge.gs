@@ -254,75 +254,179 @@ function sendMonthlyCoach() {
 }
 
 /**
- * Sets up all automated time-driven triggers for Budget 2026:
- * 1. sendMorningCoach: Daily at 08:00 SGT
- * 2. sendDailyNudge: Daily at 21:00 SGT (9 PM)
- * 3. sendDailyEveningRecap: Daily at 22:00 SGT (10 PM)
- * 4. sendWeeklyMandatoryAudit: Weekly on Mondays at 09:00 SGT
- * 5. sendMonthlyCoach: Monthly on 1st at 09:00 SGT
+ * Master dispatcher for all scheduled events in Budget 2026.
+ * Executed every 15 minutes by a single project trigger.
+ * Fast early-exit prevents unnecessary quota and execution usage.
  */
-function setupAllTriggers() {
-  const existingTriggers = ScriptApp.getProjectTriggers();
-  let deletedCount = 0;
+function dispatch() {
+  const now = new Date();
+  const tz = 'Asia/Singapore';
+  const todayStr = Utilities.formatDate(now, tz, 'yyyy-MM-dd');
+  const currentHour = parseInt(Utilities.formatDate(now, tz, 'H'), 10);
+  const currentMinute = parseInt(Utilities.formatDate(now, tz, 'm'), 10);
+  const currentTotalMins = currentHour * 60 + currentMinute;
+  const dayOfWeek = Utilities.formatDate(now, tz, 'E'); // 'Mon', 'Tue', etc.
+  const dayOfMonth = parseInt(Utilities.formatDate(now, tz, 'd'), 10);
 
-  for (let i = 0; i < existingTriggers.length; i++) {
-    const fn = existingTriggers[i].getHandlerFunction();
-    if (fn === 'sendDailyNudge' || fn === 'sendDailyEveningRecap' || fn === 'sendMorningCoach' || fn === 'sendWeeklyMandatoryAudit' || fn === 'sendMonthlyCoach') {
-      ScriptApp.deleteTrigger(existingTriggers[i]);
-      deletedCount++;
+  // Month-rollover detection: check if tomorrow is in a different month
+  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const tomorrowMonth = parseInt(Utilities.formatDate(tomorrow, tz, 'M'), 10);
+  const currentMonth = parseInt(Utilities.formatDate(now, tz, 'M'), 10);
+  const isLastDayOfMonth = (tomorrowMonth !== currentMonth);
+
+  const props = PropertiesService.getScriptProperties();
+
+  // Helper: checks if target HH:mm falls within the current 15-minute window (exact 15m, no overlap)
+  function isTimeInWindow(targetTimeStr) {
+    if (!targetTimeStr || !targetTimeStr.includes(':')) return false;
+    const parts = targetTimeStr.split(':');
+    const targetH = parseInt(parts[0], 10);
+    const targetM = parseInt(parts[1], 10);
+    const targetTotalMins = targetH * 60 + targetM;
+    
+    // Window: exactly 15 minutes without overlap: diff >= 0 && diff < 15
+    const diff = currentTotalMins - targetTotalMins;
+    return diff >= 0 && diff < 15;
+  }
+
+  // Helper: once-per-day guard
+  function hasSentToday(key) {
+    return props.getProperty(`sent_${key}`) === todayStr;
+  }
+
+  function markSentToday(key) {
+    props.setProperty(`sent_${key}`, todayStr);
+  }
+
+  function clearSentToday(key) {
+    props.deleteProperty(`sent_${key}`);
+  }
+
+  // 1. Per-User Morning Coach Briefs at each user's morning_time (SHEET_FACTS.USERS)
+  const users = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.USERS) ? SHEET_FACTS.USERS : {
+    VAL: { name: 'Val', chat_id: '96069960', morning_time: '08:00', active: true },
+    RITA: { name: 'Rita', chat_id: '402188776', morning_time: '08:00', active: true }
+  };
+
+  let morningPayload = null;
+  let morningBriefText = null;
+
+  Object.values(users).forEach(user => {
+    if (!user || !user.active || !user.chat_id) return;
+    const targetTime = user.morning_time || '08:00';
+    const userKey = `morning_coach_${user.chat_id}`;
+
+    if (isTimeInWindow(targetTime) && !hasSentToday(userKey)) {
+      Logger.log(`[DISPATCH] Claiming slot & firing Morning Coach for ${user.name} (${user.chat_id}) for scheduled window ${targetTime}`);
+      markSentToday(userKey); // Claim slot BEFORE async/LLM work to prevent double-firing
+      try {
+        if (!morningBriefText) {
+          morningPayload = typeof buildCoachPayload === 'function' ? buildCoachPayload('daily') : getBudgetCoachContext();
+          morningBriefText = typeof generateCoachBrief === 'function' ? generateCoachBrief(morningPayload) : generateDailyCoachBrief(morningPayload);
+        }
+        sendTelegramMessage(morningBriefText, user.chat_id);
+        Logger.log(`✅ [DISPATCH] Morning Coach sent to ${user.name}`);
+      } catch (err) {
+        clearSentToday(userKey); // Clear slot on error so next tick can retry
+        Logger.log(`❌ [DISPATCH] Error delivering Morning Coach to ${user.name} (slot cleared for retry): ${err.message}`);
+      }
+    }
+  });
+
+  // 2. Daily Evening Nudge at 21:00 SGT
+  if (isTimeInWindow('21:00') && !hasSentToday('daily_nudge')) {
+    Logger.log('[DISPATCH] Claiming slot & firing Daily Evening Nudge (21:00 SGT)');
+    markSentToday('daily_nudge');
+    try {
+      sendDailyNudge();
+      Logger.log('✅ [DISPATCH] Daily Evening Nudge sent.');
+    } catch (err) {
+      clearSentToday('daily_nudge');
+      Logger.log(`❌ [DISPATCH] Error in sendDailyNudge (slot cleared for retry): ${err.message}`);
     }
   }
 
-  if (deletedCount > 0) {
-    Logger.log(`Cleaned up ${deletedCount} existing trigger(s).`);
+  // 3. Daily Evening Transactions Recap at 22:00 SGT
+  if (isTimeInWindow('22:00') && !hasSentToday('daily_evening_recap')) {
+    Logger.log('[DISPATCH] Claiming slot & firing Daily Evening Transactions Recap (22:00 SGT)');
+    markSentToday('daily_evening_recap');
+    try {
+      sendDailyEveningRecap();
+      Logger.log('✅ [DISPATCH] Daily Evening Recap sent.');
+    } catch (err) {
+      clearSentToday('daily_evening_recap');
+      Logger.log(`❌ [DISPATCH] Error in sendDailyEveningRecap (slot cleared for retry): ${err.message}`);
+    }
   }
 
-  // 1. Morning Coach Daily at 08:00 SGT
-  ScriptApp.newTrigger('sendMorningCoach')
+  // 4. Weekly Mandatory Expenses Audit on Mondays at 09:00 SGT
+  if (dayOfWeek === 'Mon' && isTimeInWindow('09:00') && !hasSentToday('weekly_mandatory_audit')) {
+    Logger.log('[DISPATCH] Claiming slot & firing Weekly Mandatory Expenses Audit (Monday 09:00 SGT)');
+    markSentToday('weekly_mandatory_audit');
+    try {
+      sendWeeklyMandatoryAudit();
+      Logger.log('✅ [DISPATCH] Weekly Mandatory Audit sent.');
+    } catch (err) {
+      clearSentToday('weekly_mandatory_audit');
+      Logger.log(`❌ [DISPATCH] Error in sendWeeklyMandatoryAudit (slot cleared for retry): ${err.message}`);
+    }
+  }
+
+  // 5. Monthly Retrospective Coach Brief on 1st of every month at 09:00 SGT
+  if (dayOfMonth === 1 && isTimeInWindow('09:00') && !hasSentToday('monthly_coach_retrospective')) {
+    Logger.log('[DISPATCH] Claiming slot & firing Monthly Retrospective Coach Brief (1st of month 09:00 SGT)');
+    markSentToday('monthly_coach_retrospective');
+    try {
+      sendMonthlyCoach();
+      Logger.log('✅ [DISPATCH] Monthly Retrospective Coach sent.');
+    } catch (err) {
+      clearSentToday('monthly_coach_retrospective');
+      Logger.log(`❌ [DISPATCH] Error in sendMonthlyCoach (slot cleared for retry): ${err.message}`);
+    }
+  }
+
+  // 6. Month-Rollover Jobs (Last day of month at 23:30 SGT) - placeholder for Stages 3/5/6
+  if (isLastDayOfMonth && isTimeInWindow('23:30')) {
+    Logger.log('⏭️ [DISPATCH] Month-rollover jobs not yet implemented (Stages 3/5/6). Skipping.');
+  }
+}
+
+/**
+ * Sets up the single 15-minute master trigger for dispatch().
+ * Deletes all existing project triggers to eliminate multiple uncoordinated .atHour() triggers.
+ */
+function setupTriggers() {
+  Logger.log('=== Running setupTriggers() ===');
+  const existingTriggers = ScriptApp.getProjectTriggers();
+  Logger.log(`Found ${existingTriggers.length} existing project trigger(s). Deleting...`);
+
+  existingTriggers.forEach(trigger => {
+    try {
+      ScriptApp.deleteTrigger(trigger);
+    } catch (e) {
+      Logger.log(`Warning deleting trigger: ${e.message}`);
+    }
+  });
+
+  // Create single 15-minute heartbeat trigger
+  const newTrigger = ScriptApp.newTrigger('dispatch')
     .timeBased()
-    .everyDays(1)
-    .atHour(8)
-    .inTimezone('Asia/Singapore')
+    .everyMinutes(15)
     .create();
 
-  // 2. Evening Nudge Daily at 21:00 SGT (9 PM)
-  ScriptApp.newTrigger('sendDailyNudge')
-    .timeBased()
-    .everyDays(1)
-    .atHour(21)
-    .inTimezone('Asia/Singapore')
-    .create();
+  Logger.log(`✅ Successfully installed single 15-minute master trigger for dispatch() (Trigger ID: ${newTrigger.getUniqueId()})`);
+}
 
-  // 3. Evening Transactions Recap Daily at 22:00 SGT (10 PM)
-  ScriptApp.newTrigger('sendDailyEveningRecap')
-    .timeBased()
-    .everyDays(1)
-    .atHour(22)
-    .inTimezone('Asia/Singapore')
-    .create();
-
-  // 4. Weekly Mandatory Audit on Monday at 09:00 SGT
-  ScriptApp.newTrigger('sendWeeklyMandatoryAudit')
-    .timeBased()
-    .onWeekDay(ScriptApp.WeekDay.MONDAY)
-    .atHour(9)
-    .inTimezone('Asia/Singapore')
-    .create();
-
-  // 5. Monthly Retrospective Coach on 1st of every month at 09:00 SGT
-  ScriptApp.newTrigger('sendMonthlyCoach')
-    .timeBased()
-    .onMonthDay(1)
-    .atHour(9)
-    .inTimezone('Asia/Singapore')
-    .create();
-
-  Logger.log('✅ All 5 time-driven triggers scheduled successfully!');
+/**
+ * Backwards compatible alias for setupTriggers.
+ */
+function setupAllTriggers() {
+  setupTriggers();
 }
 
 /**
  * Backwards compatible alias for setupDailyTrigger.
  */
 function setupDailyTrigger() {
-  setupAllTriggers();
+  setupTriggers();
 }

@@ -7,14 +7,8 @@
  */
 
 /**
- * STAGE 2 — UC-3 Reusable Coach Engine Payload Assembly.
- * Assembles clean JSON from reader.gs for AI coaching (daily or monthly views).
- * 
- * @param {string} [period] - 'daily' or 'monthly' (defaults to 'daily').
- * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSs] - Optional Spreadsheet instance/**
  * Assembles the structured JSON payload for the Gemini Coach API.
- * Step 8 payload: contains only the required grounding numbers, strictly rounded to 2dp.
- * Trend narratives and multi-day historical trend dumps are omitted to prevent LLM hallucinations.
+ * Stage 2 schema: contains only the required grounding numbers, strictly rounded to 2dp.
  * 
  * @param {string} [period='daily'] - Period type ('daily' or 'monthly').
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSs] - Optional Spreadsheet instance.
@@ -35,70 +29,14 @@ function buildCoachPayload(period, optSs) {
   };
 
   const pacing = typeof get503020Status === 'function' ? get503020Status(ss) : {};
-  const catVelocity = typeof getCategoryVelocity === 'function' ? getCategoryVelocity(ss) : {};
+  const todaySpend = typeof getTodaySpend === 'function' ? getTodaySpend(null, ss) : 0;
 
-  const currentDailyBudget = Number(Number(pacingData.D19_realistic_daily || 0).toFixed(2)); // Spendable per day (D19)
-  const spendablePerDay = currentDailyBudget;
-  const cumulativePosition = Number(Number(pacingData.K_cumulative_today || 0).toFixed(2)); // Cumulative position (Col K)
-  const dailySaldo = Number(Number(pacingData.L_saldo_yesterday || 0).toFixed(2)); // Yesterday's saldo (Col L)
-  const flatDailyBudget = Number(Number(pacingData.D17_flat_daily || 0).toFixed(2)); // Flat pacing (D17)
+  const cumulativeToday = Number(Number(pacingData.K_cumulative_today || 0).toFixed(2));
+  const realisticDaily = Number(Number(pacingData.D19_realistic_daily || 0).toFixed(2));
+  const flatDaily = Number(Number(pacingData.D17_flat_daily || 0).toFixed(2));
   const daysLeftInMonth = pacingData.days_left || 1;
   const daysToPositive = pacingData.days_to_positive || 0;
-
-  // Compute yesterday's spend directly from Transactions (Тип == "Расходы")
-  const now = new Date();
-  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const yesterdaySpend = typeof getTodaySpend === 'function' ? getTodaySpend(yesterday, ss) : 0;
-
-  // Combine actuals and targets for BOTH Needs and Wants subcategories.
-  // CRITICAL RULE: Only transactions of type "Расходы" contribute against the daily budget.
-  const categoryPacing = {
-    needs: {},
-    wants: {}
-  };
-
-  const processSubCategories = (subCategories, bucketKey) => {
-    if (Array.isArray(subCategories)) {
-      subCategories.forEach(sub => {
-        if (sub && sub.name) {
-          const catName = sub.name;
-          const vel = catVelocity[catName] || {};
-          let rashodySpend = 0;
-          Object.keys(vel).forEach(txType => {
-            if (txType !== 'total' && txType.toLowerCase().trim() === 'расходы') {
-              rashodySpend += Number(vel[txType] || 0);
-            }
-          });
-
-          categoryPacing[bucketKey][catName] = {
-            target_monthly: Number(Number(sub.target || 0).toFixed(2)),
-            actual_monthly_total: Number(Number(sub.actual || 0).toFixed(2)),
-            daily_budget_contributing_spend: Number(Number(rashodySpend || 0).toFixed(2))
-          };
-        }
-      });
-    }
-  };
-
-  processSubCategories(pacing.needs && pacing.needs.sub_categories, 'needs');
-  processSubCategories(pacing.wants && pacing.wants.sub_categories, 'wants');
-
-  // Include any other categories present in catVelocity that have "Расходы" spend
-  Object.keys(catVelocity).forEach(cat => {
-    if (cat === 'total') return;
-    let rashodySpend = 0;
-    Object.keys(catVelocity[cat]).forEach(txType => {
-      if (txType !== 'total' && txType.toLowerCase().trim() === 'расходы') {
-        rashodySpend += Number(catVelocity[cat][txType] || 0);
-      }
-    });
-    if (rashodySpend > 0 && !categoryPacing.needs[cat] && !categoryPacing.wants[cat]) {
-      categoryPacing.wants[cat] = {
-        target_monthly: 0,
-        daily_budget_contributing_spend: Number(Number(rashodySpend || 0).toFixed(2))
-      };
-    }
-  });
+  const spendToday = Number(Number(todaySpend || 0).toFixed(2));
 
   const buckets = {
     needs: {
@@ -115,23 +53,136 @@ function buildCoachPayload(period, optSs) {
     }
   };
 
+  // Compute current-month category spend splits from Transactions (discretionary vs committed)
+  const splits = getCurrentMonthCategorySplits(ss);
+
+  // Pool ALL sub_categories across ALL buckets from get503020Status
+  const allSubCategories = [
+    ...((pacing.needs && pacing.needs.sub_categories) || []),
+    ...((pacing.wants && pacing.wants.sub_categories) || []),
+    ...((pacing.savings && pacing.savings.sub_categories) || [])
+  ];
+
+  // 1. Filter for categories over target (target > 0 && actual > target)
+  // 2. Compute the split between discretionary (Расходы) and committed (Обязательные расходы)
+  // 3. Keep categories where discretionary_spend > 0, rank by discretionary_spend descending, cap at 3
+  const categoriesOverTarget = allSubCategories
+    .filter(sub => {
+      const act = Number(sub.actual || 0);
+      const tgt = Number(sub.target || 0);
+      return tgt > 0 && act > tgt;
+    })
+    .map(sub => {
+      const catName = String(sub.name || '').trim();
+      const catKey = catName.toLowerCase();
+      const split = splits[catKey] || { discretionary: 0, committed: 0 };
+
+      const act = Number(Number(sub.actual || 0).toFixed(2));
+      const tgt = Number(Number(sub.target || 0).toFixed(2));
+      const overBy = Number((act - tgt).toFixed(2));
+      const discretionarySpend = Number(Number(split.discretionary || 0).toFixed(2));
+      const committedSpend = Number(Number(split.committed || 0).toFixed(2));
+
+      return {
+        name: catName,
+        actual: act,
+        target: tgt,
+        over_by: overBy,
+        discretionary_spend: discretionarySpend,
+        committed_spend: committedSpend,
+        actionable: discretionarySpend > 0
+      };
+    })
+    .filter(item => item.discretionary_spend > 0)
+    .sort((a, b) => b.discretionary_spend - a.discretionary_spend)
+    .slice(0, 5);
+
   return {
     period: p,
-    spendable_per_day: spendablePerDay,
-    current_daily_budget: currentDailyBudget,
-    cumulative_position: cumulativePosition,
-    flat_daily_budget: flatDailyBudget,
-    daily_saldo: dailySaldo,
+    cumulative_today: cumulativeToday,
+    realistic_daily: realisticDaily,
+    flat_daily: flatDaily,
     days_left_in_month: daysLeftInMonth,
     days_to_positive: daysToPositive,
-    yesterday_spend: Number(Number(yesterdaySpend || 0).toFixed(2)),
+    spend_today: spendToday,
     buckets: buckets,
-    category_pacing: categoryPacing
+    target_header: String(pacing.target_header || ''),
+    categories_over_target: categoriesOverTarget,
+    mandatory_warnings: []
   };
 }
 
 /**
- * STAGE 2 — Reusable Coach Brief Generator using gemini-3.5-flash-lite.
+ * Helper to compute category spend breakdown (discretionary vs committed) from Transactions for current month.
+ * Excludes Снятие денег and all income types.
+ * 
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
+ * @return {Object<string, { discretionary: number, committed: number }>}
+ */
+function getCurrentMonthCategorySplits(ss) {
+  const splits = {};
+  try {
+    const transTabName = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.CORE_TABS) ? SHEET_FACTS.CORE_TABS.TRANSACTIONS : 'Transactions';
+    const sheet = ss.getSheetByName(transTabName);
+    if (!sheet) return splits;
+
+    const lastRow = sheet.getLastRow();
+    const startRow = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.TRANSACTIONS_TAB_STRUCTURE) ? SHEET_FACTS.TRANSACTIONS_TAB_STRUCTURE.DATA_START_ROW : 2;
+    if (lastRow < startRow) return splits;
+
+    const now = new Date();
+    const currentMonthYearStr = Utilities.formatDate(now, 'Asia/Singapore', 'MM.yyyy');
+
+    const numCols = sheet.getLastColumn();
+    const rawData = sheet.getRange(startRow, 1, lastRow - startRow + 1, numCols).getValues();
+    const dispData = sheet.getRange(startRow, 1, lastRow - startRow + 1, numCols).getDisplayValues();
+
+    for (let r = 0; r < rawData.length; r++) {
+      const row = rawData[r];
+      const disp = dispData[r];
+      const cellDate = row[0];
+      const typeColC = String(row[2] || '').trim().replace(/\t/g, '');
+      const category = String(row[7] || '').trim(); // Col H
+
+      if (!category) continue;
+
+      let dateMatch = false;
+      if (cellDate instanceof Date) {
+        const rowMonthYearStr = Utilities.formatDate(cellDate, 'Asia/Singapore', 'MM.yyyy');
+        dateMatch = (rowMonthYearStr === currentMonthYearStr);
+      } else if (typeof cellDate === 'string' && cellDate.trim()) {
+        const parts = cellDate.trim().split('.');
+        if (parts.length === 3) {
+          const monthYear = `${parts[1].padStart(2, '0')}.${parts[2]}`;
+          dateMatch = (monthYear === currentMonthYearStr);
+        }
+      }
+
+      if (!dateMatch) continue;
+
+      const catKey = category.toLowerCase();
+      if (!splits[catKey]) {
+        splits[catKey] = { discretionary: 0, committed: 0 };
+      }
+
+      const amount = (typeof parseAmountNumber === 'function')
+        ? (parseAmountNumber(row[4], disp[4]) || parseAmountNumber(row[3], disp[3]) || 0)
+        : (typeof row[4] === 'number' ? row[4] : parseFloat(String(disp[4] || '0').replace(/[^0-9.-]+/g, '')) || 0);
+
+      if (typeColC === 'Расходы') {
+        splits[catKey].discretionary += amount;
+      } else if (typeColC === 'Обязательные расходы') {
+        splits[catKey].committed += amount;
+      }
+    }
+  } catch (e) {
+    Logger.log(`Error reading category splits from Transactions: ${e.message}`);
+  }
+  return splits;
+}
+
+/**
+ * STAGE 2 — Reusable Coach Brief Generator using gemini-3.6-flash.
  * Evaluates budget payload and produces a concise, strictly grounded conversational brief.
  * 
  * @param {Object} [payload] - Structured budget payload (from buildCoachPayload).
@@ -144,25 +195,28 @@ function generateCoachBrief(payload) {
     throw new Error('GEMINI_API_KEY property is missing in Script Properties.');
   }
 
-  const systemInstruction = `You are a smart, attentive personal financial coach for a user in Singapore. Your job is to deliver a fresh, sharp, and encouraging morning coach update for Telegram based strictly on the provided budget JSON.
+  const systemInstruction = `You are a sharp, warm financial coach for a Singapore family. From this JSON write a Telegram brief of at most 4 short sentences. Speak naturally and conversationally, like a trusted human financial advisor giving a quick morning check-in.
 
-### CRITICAL ANTI-HALLUCINATION & ANTI-REPETITION RULES (ZERO TOLERANCE):
-1. USE ONLY NUMBERS PRESENT IN THE JSON: Never compute, infer, extrapolate, or invent figures. Every single number you mention MUST exist verbatim in the JSON payload.
-2. NO UNGROUNDED TREND CLAIMS: Never describe a trend direction (e.g. claiming an allowance increased or decreased or that money was clawed back) unless the JSON explicitly states it.
-3. NO FORMULAIC ROBOTIC GREETINGS: Do NOT begin messages with repetitive boilerplate like "Good morning! You have about S$X available to spend today, compared to your target daily goal of S$Y." Vary your opening naturally.
-4. NO CANNED CLICHÉ ADVICE: NEVER use canned suggestions like "a cozy home-cooked meal instead of dining out", "a relaxing walk in the park", or generic "taking it easy to reset".
-5. NO REPETITIVE MOTIVATIONAL SIGN-OFFS: NEVER end with formulaic cheerleading phrases like "You've got this! 🌟", "setting up peace of mind and incredible financial success for tomorrow", or robotic slogans.
+Structure:
+1. Lead with the reality check on pace (from cumulative_today):
+   - If negative, say plainly how far behind pace they are and how to recover (e.g. "You're S$88 behind pace, but one zero-spend day clears it." or "You're S$87.81 behind pace, which one zero-spend day clears.").
+   - NEVER use a minus sign in prose (write "You're S$88 behind pace" or "S$87.81 behind pace", NEVER "-S$87.81" or "behind pace at -87.81").
+   - If positive, state that they are ahead of pace (e.g. "You're in great shape at S$120 ahead of pace.").
+2. State what is realistically spendable per day for the remaining days (from realistic_daily and days_left_in_month, e.g. "That leaves S$110.63 a day for the last 2 days.").
+3. Give natural category context or guidance:
+   - Name every category in categories_over_target, most actionable first. Keep each to a short clause.
+   - For each category, if committed_spend is greater than 0, name the discretionary portion and say the rest is committed — e.g. 'Транспорт is over target, though S$2,707 of it is the car loan; S$786 was discretionary.' If committed_spend is 0, quote actual vs target directly (e.g. 'Развлечения is at S$1,892 against a S$450 target.').
+   - Never imply the user can cut a committed cost.
 
-### CORE CONTENT REQUIREMENTS (2 to 4 CONCISE SENTENCES):
-1. State the spendable amount per day (from \`spendable_per_day\`, e.g. <b>S$110.63</b>/day).
-2. State the cumulative position (from \`cumulative_position\`, e.g. if negative, explain that they are S$X behind pace, and use \`days_to_positive\` to state how many zero-spend days clear it). NEVER describe cumulative position as a negative daily allowance.
-3. If yesterday's spend is present (\`yesterday_spend\`), mention it concisely.
-
-### FORMATTING & SYNTAX RULES:
-- Output MUST be formatted in Telegram HTML (use <b>bold</b> and <i>italic</i> tags only).
-- NEVER use Markdown syntax (do NOT use **bold** or *italic* or # headings).
-- Use <b>S$XX.XX</b> for currency figures.
-- Length: 2 to 4 sentences maximum.`;
+Rules:
+- USE ONLY numbers present in the JSON. Never compute, infer, extrapolate or invent figures. Every number you mention must appear in the JSON.
+- Every money amount MUST be formatted with the "S$" currency symbol and 2 decimal places or rounded integers (e.g. S$88, S$110.63, S$1,892, S$3,304.80). NEVER print bare numbers like "87.81", "110.63" or "3304.8" without S$.
+- NEVER use a minus sign when describing being behind pace. The words "behind pace" already indicate the deficit.
+- Never describe a trend direction (rising, falling, clawed back, improving) unless the JSON explicitly states it. You have no history — do not imply any.
+- Always end with an instruction or category watchpoint, never a bare summary of numbers.
+- Telegram HTML only: <b>bold</b>, <i>italic</i>. Never markdown (**bold**).
+- No tables, no headers, no bullet lists. Short conversational sentences (at most 4 short sentences).
+- Warm, direct, natural — never preachy, robotic, or moralising. Never shame the user for spending.`;
 
   const apiPayload = {
     systemInstruction: {
@@ -178,11 +232,11 @@ function generateCoachBrief(payload) {
     }
   };
 
-  Logger.log(`Generating Coach Brief via Gemini (Target: ${typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.7-flash'})...`);
+  Logger.log(`Generating Coach Brief via Gemini (Target: ${typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.6-flash'})...`);
   try {
     const apiResult = callGeminiApiWithRetry(apiPayload, apiKey);
     const responseText = typeof apiResult === 'object' ? apiResult.text : apiResult;
-    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : (typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.7-flash');
+    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : (typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.6-flash');
     Logger.log(`Coach Brief successfully generated by model: ${modelUsed}`);
 
     const responseJson = JSON.parse(responseText);
@@ -221,31 +275,54 @@ function generateDailyCoachBrief(contextJSON) {
  * @return {string} Short, dynamic fallback brief in Telegram HTML.
  */
 function buildFallbackCoachBrief(payload) {
-  const spendablePerDay = Number(Number(payload.spendable_per_day || payload.current_daily_budget || 0).toFixed(2));
-  const cumulativePosition = Number(Number(payload.cumulative_position || 0).toFixed(2));
+  const cumulativeToday = Number(Number(payload.cumulative_today || 0).toFixed(2));
+  const realisticDaily = Number(Number(payload.realistic_daily || 0).toFixed(2));
+  const daysLeft = payload.days_left_in_month || 1;
   const daysToPositive = payload.days_to_positive || 0;
-  const ySpend = Number(Number(payload.yesterday_spend || 0).toFixed(2));
+  const categoriesOver = payload.categories_over_target || [];
 
-  let paceContext = '';
-  if (cumulativePosition < 0) {
-    const behindAmt = Math.abs(Math.round(cumulativePosition));
+  const formatSgd = (val, roundInt = false) => {
+    const num = Math.abs(Number(val) || 0);
+    if (roundInt) {
+      return 'S$' + Math.round(num).toLocaleString('en-US');
+    }
+    return 'S$' + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+
+  // 1. Reality check on pace
+  let sentence1 = '';
+  if (cumulativeToday < 0) {
+    const behindFormatted = formatSgd(cumulativeToday, true);
     const dayText = daysToPositive === 1 ? 'one zero-spend day clears it' : `${daysToPositive} zero-spend days clear it`;
-    paceContext = `You're S$${behindAmt} behind pace — ${dayText}.`;
-  } else if (cumulativePosition > 0) {
-    paceContext = `You're S$${Math.round(cumulativePosition)} ahead of pace.`;
+    sentence1 = `You're <b>${behindFormatted}</b> behind pace, but ${dayText}.`;
+  } else if (cumulativeToday > 0) {
+    sentence1 = `You're in great shape at <b>${formatSgd(cumulativeToday)}</b> ahead of pace.`;
   } else {
-    paceContext = `You're right on pace.`;
+    sentence1 = `You are tracking right on budget pace.`;
   }
 
-  let yesterdayContext = '';
-  if (ySpend > 0) {
-    yesterdayContext = ` Yesterday logged <b>S$${ySpend.toFixed(2)}</b> in discretionary expenses.`;
+  // 2. Realistic spendable per day
+  const daysText = daysLeft === 1 ? 'the final day' : `the last ${daysLeft} days`;
+  const sentence2 = `That leaves <b>${formatSgd(realisticDaily)}</b> a day for ${daysText}.`;
+
+  // 3. Category context covering every category in categories_over_target
+  let sentence3 = '';
+  if (categoriesOver.length > 0) {
+    const catClauses = categoriesOver.map(cat => {
+      if (cat.committed_spend > 0) {
+        return `<i>${cat.name}</i> is over target, though <b>${formatSgd(cat.committed_spend, true)}</b> is committed; <b>${formatSgd(cat.discretionary_spend, true)}</b> was discretionary`;
+      } else {
+        return `<i>${cat.name}</i> is at <b>${formatSgd(cat.actual, true)}</b> vs a <b>${formatSgd(cat.target, true)}</b> target`;
+      }
+    });
+    sentence3 = `${catClauses.join('; ')}.`;
+  } else if (cumulativeToday < 0) {
+    sentence3 = `Keep discretionary spending minimal today to protect your buffer.`;
   } else {
-    yesterdayContext = ` Yesterday was a clean zero-spend day.`;
+    sentence3 = `You have room for normal everyday expenses today while protecting your buffer.`;
   }
 
-  const msg = `Your spendable allowance sits at <b>S$${spendablePerDay.toFixed(2)}</b>/day. ${paceContext}${yesterdayContext}`;
-  return msg.trim();
+  return `${sentence1} ${sentence2} ${sentence3}`;
 }
 
 /**
@@ -276,57 +353,50 @@ function testCoachBriefScenarios() {
       name: 'Scenario 1: Behind Pace (Negative Cumulative Position)',
       payload: {
         period: 'daily',
-        spendable_per_day: 110.63,
-        current_daily_budget: 110.63,
-        cumulative_position: -87.81,
-        flat_daily_budget: 125.00,
-        daily_saldo: 85.00,
+        cumulative_today: -87.81,
+        realistic_daily: 110.63,
+        flat_daily: 125.00,
         days_left_in_month: 2,
         days_to_positive: 1,
-        yesterday_spend: 210.00,
+        spend_today: 0.00,
         buckets: basePacing,
-        category_pacing: {
-          needs: { 'Продукты': { target_monthly: 600, actual_monthly_total: 400, daily_budget_contributing_spend: 120 } },
-          wants: { 'Рестораны': { target_monthly: 400, actual_monthly_total: 350, daily_budget_contributing_spend: 180 } }
-        }
+        categories_over_target: [
+          { name: 'Развлечения', actual: 1892.22, target: 450, over_by: 1442.22, discretionary_spend: 1892.22, committed_spend: 0, actionable: true },
+          { name: 'Школа & Детский сад', actual: 7204.80, target: 3900, over_by: 3304.80, discretionary_spend: 304.80, committed_spend: 6900.00, actionable: true }
+        ],
+        mandatory_warnings: []
       }
     },
     {
       name: 'Scenario 2: Ahead of Pace (Positive Cumulative Position)',
       payload: {
         period: 'daily',
-        spendable_per_day: 135.00,
-        current_daily_budget: 135.00,
-        cumulative_position: 120.50,
-        flat_daily_budget: 125.00,
-        daily_saldo: 165.00,
+        cumulative_today: 120.50,
+        realistic_daily: 135.00,
+        flat_daily: 125.00,
         days_left_in_month: 10,
         days_to_positive: 0,
-        yesterday_spend: 0.00,
+        spend_today: 0.00,
         buckets: basePacing,
-        category_pacing: {
-          needs: { 'Продукты': { target_monthly: 600, actual_monthly_total: 400, daily_budget_contributing_spend: 0 } },
-          wants: { 'Рестораны': { target_monthly: 400, actual_monthly_total: 350, daily_budget_contributing_spend: 0 } }
-        }
+        target_header: 'Target month',
+        categories_over_target: [],
+        mandatory_warnings: []
       }
     },
     {
       name: 'Scenario 3: Disciplined / Steady Spending',
       payload: {
         period: 'daily',
-        spendable_per_day: 118.00,
-        current_daily_budget: 118.00,
-        cumulative_position: 15.00,
-        flat_daily_budget: 120.00,
-        daily_saldo: 120.00,
+        cumulative_today: 15.00,
+        realistic_daily: 118.00,
+        flat_daily: 120.00,
         days_left_in_month: 16,
         days_to_positive: 0,
-        yesterday_spend: 25.00,
+        spend_today: 25.00,
         buckets: basePacing,
-        category_pacing: {
-          needs: { 'Продукты': { target_monthly: 600, actual_monthly_total: 400, daily_budget_contributing_spend: 25 } },
-          wants: { 'Рестораны': { target_monthly: 400, actual_monthly_total: 350, daily_budget_contributing_spend: 0 } }
-        }
+        target_header: 'Target month',
+        categories_over_target: [],
+        mandatory_warnings: []
       }
     }
   ];
@@ -463,7 +533,7 @@ Keep the tone concise, encouraging, and clear.`;
   try {
     const apiResult = callGeminiApiWithRetry(payload, apiKey);
     const responseText = typeof apiResult === 'object' ? apiResult.text : apiResult;
-    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : (typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.7-flash');
+    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : (typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.6-flash');
     Logger.log(`Weekly Mandatory Audit report generated by model: ${modelUsed}`);
 
     const json = JSON.parse(responseText);
@@ -564,7 +634,7 @@ MANDATORY HTML MESSAGE TEMPLATE:
   try {
     const apiResult = callGeminiApiWithRetry(payload, apiKey);
     const responseText = typeof apiResult === 'object' ? apiResult.text : apiResult;
-    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : (typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.7-flash');
+    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : (typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.6-flash');
     Logger.log(`Monthly Coach Brief generated by model: ${modelUsed}`);
 
     const json = JSON.parse(responseText);

@@ -1735,11 +1735,13 @@ function test_dailyBudgetConsistency() {
   // 1. Coach Payload Verification
   const coachPayload = typeof buildCoachPayload === 'function' ? buildCoachPayload('daily', ss) : {};
   Logger.log('\n--- 2. Coach Payload Daily Budget Fields ---');
-  Logger.log(`Spendable per day (D19): S$${coachPayload.spendable_per_day || coachPayload.current_daily_budget}`);
-  Logger.log(`Cumulative Position (K): S$${coachPayload.cumulative_position}`);
-  Logger.log(`Daily Saldo (L):        S$${coachPayload.daily_saldo}`);
-  Logger.log(`Days left in month:     ${coachPayload.days_left_in_month}`);
-  Logger.log(`Days to positive:       ${coachPayload.days_to_positive}`);
+  Logger.log(`Realistic Daily (D19):   S$${coachPayload.realistic_daily}`);
+  Logger.log(`Cumulative Today (K):    S$${coachPayload.cumulative_today}`);
+  Logger.log(`Flat Daily (D17):        S$${coachPayload.flat_daily}`);
+  Logger.log(`Days left in month:      ${coachPayload.days_left_in_month}`);
+  Logger.log(`Days to positive:        ${coachPayload.days_to_positive}`);
+  Logger.log(`Spend today:             S$${coachPayload.spend_today}`);
+  Logger.log(`Categories over target:  ${JSON.stringify(coachPayload.categories_over_target)}`);
 
   // 2. Thin Wrapper Checks
   const dailySaldoWrapper = getDailySaldo(ss);
@@ -1763,12 +1765,13 @@ function test_dailyBudgetConsistency() {
   Logger.log('--- 5. Assertion Checks ---');
   let passed = true;
 
-  // Assert A: Coach payload uses D19 as spendable_per_day / current_daily_budget
+  // Assert A: Coach payload uses D19 as realistic_daily and K as cumulative_today
   const expectedD19 = Number(Number(pacing.D19_realistic_daily || 0).toFixed(2));
-  if (coachPayload.spendable_per_day === expectedD19 && coachPayload.current_daily_budget === expectedD19) {
-    Logger.log(`✅ PASS: Coach payload spendable_per_day (${coachPayload.spendable_per_day}) matches D19 (${expectedD19}).`);
+  const expectedK = Number(Number(pacing.K_cumulative_today || 0).toFixed(2));
+  if (coachPayload.realistic_daily === expectedD19 && coachPayload.cumulative_today === expectedK) {
+    Logger.log(`✅ PASS: Coach payload realistic_daily (${coachPayload.realistic_daily}) matches D19 (${expectedD19}) and cumulative_today (${coachPayload.cumulative_today}) matches K (${expectedK}).`);
   } else {
-    Logger.log(`❌ FAIL: Coach payload spendable_per_day (${coachPayload.spendable_per_day}) does not match D19 (${expectedD19}).`);
+    Logger.log(`❌ FAIL: Coach payload realistic_daily (${coachPayload.realistic_daily}) or cumulative_today (${coachPayload.cumulative_today}) does not match expected D19 (${expectedD19}) / K (${expectedK}).`);
     passed = false;
   }
 
