@@ -29,6 +29,9 @@ function normaliseWhere(where) {
     return 'grab';
   }
 
+  // Normalize FairPrice variants ("Fair Price", "NTUC FairPrice", "NETS*FAIRPRICE", "FAIRPRICE FINEST") -> "fairprice"
+  s = s.replace(/^(ntuc\s*)?fair\s*price(\b.*)?$/i, 'fairprice');
+
   // Strip trailing transaction/order noise (e.g., "*12345678" or trailing "*1234")
   s = s.replace(/\*[a-z0-9\-]+$/i, '').trim();
 

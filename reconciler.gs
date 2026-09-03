@@ -970,3 +970,386 @@ function normalizeAmountValue(val) {
   const result = isNegative ? -Math.abs(num) : num;
   return Math.round(result * 100) / 100;
 }
+
+// ============================================================================
+// 5. STAGE 3C: MATCHING ENGINE (PURE FUNCTION)
+// ============================================================================
+
+/**
+ * STAGE 3C: Reconciles statement transactions against ledger transactions.
+ * 
+ * Rules:
+ * 1. PURE FUNCTION: Zero I/O, zero sheet reads, zero Telegram dependencies.
+ * 2. Fast Path: Exact dedupe_key hit (same date, account, amount, and normalized merchant).
+ * 3. Fuzzy Path:
+ *    - Amount equal (±0.00)
+ *    - Date within ±4 days (accommodates DBS posting drift, e.g. "03 Aug" posted "07 Aug")
+ *    - Merchant similarity >= 0.70 (uses 3B normaliseWhere on both sides)
+ * 4. Ambiguity: Multiple plausible matches -> lands in 'ambiguous', NEVER guesses.
+ * 5. One-to-one consumption: A ledger row can only be matched once.
+ * 6. CRITICAL: No already-logged row may ever land in 'missing'.
+ * 
+ * @param {Array<Object>} statementRows - Normalized statement rows (from Stage 3B normalizeRows).
+ * @param {Array<Object>} ledgerRows - Ledger transaction rows (from Transactions tab).
+ * @return {{ matched: Array<Object>, missing: Array<Object>, ambiguous: Array<Object> }}
+ */
+function findMissing(statementRows, ledgerRows) {
+  const result = {
+    matched: [],
+    missing: [],
+    ambiguous: []
+  };
+
+  if (!Array.isArray(statementRows) || statementRows.length === 0) {
+    return result;
+  }
+
+  const safeLedgerRows = Array.isArray(ledgerRows) ? ledgerRows : [];
+
+  // Prepare statement & ledger items for matching (normalize date, amount, merchant, dedupe_key)
+  const sItems = statementRows.map((r, idx) => prepareReconcilerItem(r, idx, 'statement'));
+  const lItems = safeLedgerRows.map((r, idx) => prepareReconcilerItem(r, idx, 'ledger'));
+
+  const claimedLedgerIndices = new Set();
+  const matchedStatementIndices = new Set();
+  const ambiguousStatementIndices = new Set();
+
+  // --------------------------------------------------------------------------
+  // PASS 1: FAST PATH — EXACT DEDUPE KEY MATCH
+  // --------------------------------------------------------------------------
+  const sByKey = new Map();
+  for (let i = 0; i < sItems.length; i++) {
+    const s = sItems[i];
+    if (!s.dedupe_key) continue;
+    if (!sByKey.has(s.dedupe_key)) sByKey.set(s.dedupe_key, []);
+    sByKey.get(s.dedupe_key).push(s);
+  }
+
+  const lByKey = new Map();
+  for (let j = 0; j < lItems.length; j++) {
+    const l = lItems[j];
+    if (!l.dedupe_key) continue;
+    if (!lByKey.has(l.dedupe_key)) lByKey.set(l.dedupe_key, []);
+    lByKey.get(l.dedupe_key).push(l);
+  }
+
+  sByKey.forEach((sList, key) => {
+    const lList = lByKey.get(key) || [];
+    if (lList.length === 0) return;
+
+    if (sList.length === lList.length) {
+      // 1-to-1 match for all items in this exact group
+      for (let k = 0; k < sList.length; k++) {
+        const s = sList[k];
+        const l = lList[k];
+        claimedLedgerIndices.add(l.index);
+        matchedStatementIndices.add(s.index);
+        result.matched.push({
+          ...s.raw,
+          matched_ledger: l.raw,
+          match_type: 'exact'
+        });
+      }
+    } else {
+      // Unequal count: ambiguous! Multiple candidates or statement rows competing without 1-to-1 clarity
+      for (let k = 0; k < sList.length; k++) {
+        const s = sList[k];
+        ambiguousStatementIndices.add(s.index);
+        result.ambiguous.push({
+          ...s.raw,
+          candidates: lList.map(item => item.raw),
+          match_type: 'ambiguous_exact',
+          reason: `Count mismatch on exact dedupe key (${sList.length} statement vs ${lList.length} ledger)`
+        });
+      }
+      // Claim ledger rows so they cannot be matched fuzzily to other rows
+      lList.forEach(item => claimedLedgerIndices.add(item.index));
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // PASS 2: FUZZY MATCH (Amount equal, Date within ±4 days, Merchant similarity >= 0.70)
+  // --------------------------------------------------------------------------
+  const remainingStatement = sItems.filter(s => !matchedStatementIndices.has(s.index) && !ambiguousStatementIndices.has(s.index));
+  const remainingLedger = lItems.filter(l => !claimedLedgerIndices.has(l.index));
+
+  // Build candidate map for each remaining statement row
+  const sCandidateMap = new Map(); // s.index -> array of matching { ledgerItem, daysDiff, similarity }
+  const lCandidateMap = new Map(); // l.index -> array of matching sItems
+
+  remainingStatement.forEach(s => {
+    const candidates = [];
+    remainingLedger.forEach(l => {
+      // 1. Amount equal (exact ±0.005)
+      if (Math.abs(s.amount - l.amount) >= 0.005) return;
+
+      // 2. Date within ±4 days
+      const daysDiff = getDaysDifference(s.date, l.date);
+      if (daysDiff > 4) return;
+
+      // 3. Merchant similarity >= 0.70
+      const similarity = computeMerchantSimilarity(s.merchant, l.merchant);
+      if (similarity < 0.70) return;
+
+      candidates.push({ ledgerItem: l, daysDiff: daysDiff, similarity: similarity });
+    });
+
+    sCandidateMap.set(s.index, candidates);
+    candidates.forEach(c => {
+      const lIdx = c.ledgerItem.index;
+      if (!lCandidateMap.has(lIdx)) lCandidateMap.set(lIdx, []);
+      lCandidateMap.get(lIdx).push(s);
+    });
+  });
+
+  // Process remaining statement rows
+  for (let i = 0; i < remainingStatement.length; i++) {
+    const s = remainingStatement[i];
+    if (matchedStatementIndices.has(s.index) || ambiguousStatementIndices.has(s.index)) continue;
+
+    const candidates = (sCandidateMap.get(s.index) || []).filter(c => !claimedLedgerIndices.has(c.ledgerItem.index));
+
+    if (candidates.length === 0) {
+      // Genuine Miss: No match in ledger
+      result.missing.push(s.raw);
+      continue;
+    }
+
+    if (candidates.length === 1) {
+      const singleCandidate = candidates[0].ledgerItem;
+      const competingStatementRows = (lCandidateMap.get(singleCandidate.index) || [])
+        .filter(compS => !matchedStatementIndices.has(compS.index) && !ambiguousStatementIndices.has(compS.index));
+
+      if (competingStatementRows.length === 1) {
+        // Unique 1-to-1 match
+        claimedLedgerIndices.add(singleCandidate.index);
+        matchedStatementIndices.add(s.index);
+        result.matched.push({
+          ...s.raw,
+          matched_ledger: singleCandidate.raw,
+          match_type: 'fuzzy',
+          days_diff: candidates[0].daysDiff,
+          similarity: candidates[0].similarity
+        });
+      } else {
+        // Multiple statement rows compete for this single ledger candidate -> ambiguous!
+        competingStatementRows.forEach(compS => {
+          ambiguousStatementIndices.add(compS.index);
+          result.ambiguous.push({
+            ...compS.raw,
+            candidates: [singleCandidate.raw],
+            match_type: 'ambiguous_competing_statement',
+            reason: `Multiple statement rows compete for single ledger row (date: ${singleCandidate.date}, amount: ${singleCandidate.amount})`
+          });
+        });
+        claimedLedgerIndices.add(singleCandidate.index);
+      }
+    } else {
+      // candidates.length > 1: Check for symmetric duplicate group
+      const identicalStatementRows = remainingStatement.filter(otherS => 
+        !matchedStatementIndices.has(otherS.index) &&
+        !ambiguousStatementIndices.has(otherS.index) &&
+        otherS.date === s.date &&
+        Math.abs(otherS.amount - s.amount) < 0.005 &&
+        otherS.merchant === s.merchant
+      );
+
+      const firstCandidate = candidates[0].ledgerItem;
+      const allCandidatesIdentical = candidates.every(c => 
+        c.ledgerItem.date === firstCandidate.date &&
+        Math.abs(c.ledgerItem.amount - firstCandidate.amount) < 0.005 &&
+        c.ledgerItem.merchant === firstCandidate.merchant
+      );
+
+      if (allCandidatesIdentical && identicalStatementRows.length === candidates.length) {
+        // Symmetric duplicate amounts matched 1-to-1
+        for (let k = 0; k < identicalStatementRows.length; k++) {
+          const matchedS = identicalStatementRows[k];
+          const matchedL = candidates[k].ledgerItem;
+          claimedLedgerIndices.add(matchedL.index);
+          matchedStatementIndices.add(matchedS.index);
+          result.matched.push({
+            ...matchedS.raw,
+            matched_ledger: matchedL.raw,
+            match_type: 'fuzzy_duplicate_group',
+            days_diff: candidates[k].daysDiff,
+            similarity: candidates[k].similarity
+          });
+        }
+      } else {
+        // Multiple candidate ledger rows without 1-to-1 symmetry -> ambiguous!
+        ambiguousStatementIndices.add(s.index);
+        result.ambiguous.push({
+          ...s.raw,
+          candidates: candidates.map(c => c.ledgerItem.raw),
+          match_type: 'ambiguous_multiple_ledger',
+          reason: `Found ${candidates.length} plausible ledger candidates within ±4 days`
+        });
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Normalizes an input row for the matching engine.
+ * Standardizes date to DD.MM.YYYY, amount to float, merchant with normaliseWhere(), and dedupe_key.
+ * 
+ * @param {Object|Array} r - Input statement or ledger row.
+ * @param {number} idx - Index in source array.
+ * @param {string} source - 'statement' or 'ledger'.
+ * @return {Object} Prepared matching item.
+ */
+function prepareReconcilerItem(r, idx, source) {
+  if (!r) {
+    return { index: idx, date: '', amount: 0, merchant: '', account: '', dedupe_key: '', raw: r };
+  }
+
+  let rawDate = '';
+  let rawAmount = null;
+  let rawMerchant = '';
+  let account = 'DBS CC SGD';
+  let dedupeKey = '';
+
+  if (Array.isArray(r)) {
+    rawDate = r[0] || '';
+    rawMerchant = r[1] || '';
+    rawAmount = r[2];
+    if (r.length > 3) account = r[3] || account;
+  } else if (typeof r === 'object') {
+    rawDate = r.date || r.raw_date || '';
+    rawAmount = (r.amount !== undefined && r.amount !== null) ? r.amount : r.raw_amount;
+    rawMerchant = r.merchant || r.description || r.where || r.raw_merchant || '';
+    account = r.account || account;
+    dedupeKey = r.dedupe_key || '';
+  }
+
+  const normDate = typeof normalizeDateString === 'function' ? normalizeDateString(rawDate) : String(rawDate || '').trim();
+  const numAmount = typeof normalizeAmountValue === 'function' ? normalizeAmountValue(rawAmount) : parseFloat(rawAmount || 0);
+  const normMerchant = typeof normaliseWhere === 'function' ? normaliseWhere(rawMerchant) : String(rawMerchant || '').toLowerCase().trim();
+
+  if (!dedupeKey && typeof generateDedupeKey === 'function') {
+    dedupeKey = generateDedupeKey(normDate, account, numAmount, normMerchant);
+  }
+
+  return {
+    index: idx,
+    date: normDate,
+    amount: numAmount,
+    merchant: normMerchant,
+    account: account,
+    dedupe_key: dedupeKey,
+    source: source,
+    raw: r
+  };
+}
+
+/**
+ * Computes calendar day difference between two date strings (DD.MM.YYYY, ISO, or Date objects).
+ * Pure in-memory date math using UTC midnight to prevent DST/timezone errors.
+ * 
+ * @param {string|Date} date1 - First date.
+ * @param {string|Date} date2 - Second date.
+ * @return {number} Absolute difference in calendar days (or 999 if invalid).
+ */
+function getDaysDifference(date1, date2) {
+  const d1 = parseToDateObj(date1);
+  const d2 = parseToDateObj(date2);
+  if (!d1 || !d2) return 999;
+  const msPerDay = 1000 * 60 * 60 * 24;
+  const utc1 = Date.UTC(d1.getFullYear(), d1.getMonth(), d1.getDate());
+  const utc2 = Date.UTC(d2.getFullYear(), d2.getMonth(), d2.getDate());
+  return Math.abs(Math.round((utc1 - utc2) / msPerDay));
+}
+
+function parseToDateObj(val) {
+  if (!val) return null;
+  if (val instanceof Date) return val;
+  const s = String(val).trim();
+  // DD.MM.YYYY or DD/MM/YYYY or DD-MM-YYYY
+  const dmy = s.match(/^(\d{1,2})[-/. ](\d{1,2})[-/. ](\d{4})$/);
+  if (dmy) {
+    return new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1]));
+  }
+  // YYYY-MM-DD or YYYY.MM.DD
+  const ymd = s.match(/^(\d{4})[-/. ](\d{1,2})[-/. ](\d{1,2})$/);
+  if (ymd) {
+    return new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3]));
+  }
+  return null;
+}
+
+/**
+ * Computes a similarity score between 0.0 and 1.0 for two merchant strings.
+ * Evaluates normalized representations, compact representations, prefix/substring containment,
+ * token Jaccard similarity, and bigram Dice coefficient.
+ * 
+ * @param {string} str1 - First merchant string.
+ * @param {string} str2 - Second merchant string.
+ * @return {number} Similarity score between 0.0 and 1.0.
+ */
+function computeMerchantSimilarity(str1, str2) {
+  if (!str1 && !str2) return 1.0;
+  if (!str1 || !str2) return 0.0;
+
+  const s1 = (typeof normaliseWhere === 'function' ? normaliseWhere(str1) : String(str1).toLowerCase()).trim();
+  const s2 = (typeof normaliseWhere === 'function' ? normaliseWhere(str2) : String(str2).toLowerCase()).trim();
+
+  if (s1 === s2) return 1.0;
+
+  const c1 = (typeof compactWhere === 'function' ? compactWhere(s1) : s1.replace(/[^a-z0-9а-яё]/gi, ''));
+  const c2 = (typeof compactWhere === 'function' ? compactWhere(s2) : s2.replace(/[^a-z0-9а-яё]/gi, ''));
+
+  if (c1 === c2) return 1.0;
+
+  // Prefix / substring containment if min length is meaningful (>= 4 chars)
+  const minLen = Math.min(c1.length, c2.length);
+  if (minLen >= 4 && (c1.startsWith(c2) || c2.startsWith(c1))) {
+    return 0.90;
+  }
+  if (minLen >= 4 && (c1.includes(c2) || c2.includes(c1))) {
+    return 0.85;
+  }
+
+  // Token-based Jaccard similarity
+  const tokens1 = s1.split(/\s+/).filter(t => t.length > 1);
+  const tokens2 = s2.split(/\s+/).filter(t => t.length > 1);
+
+  if (tokens1.length > 0 && tokens2.length > 0) {
+    const set2 = new Set(tokens2);
+    let intersection = 0;
+    tokens1.forEach(t => { if (set2.has(t)) intersection++; });
+    const union = new Set([...tokens1, ...tokens2]).size;
+    const jaccard = union > 0 ? (intersection / union) : 0;
+    if (jaccard >= 0.5) return jaccard;
+
+    // If primary brand token matches and is >= 4 chars
+    if (tokens1[0] === tokens2[0] && tokens1[0].length >= 4) {
+      return 0.80;
+    }
+  }
+
+  // Bigram Dice coefficient
+  return calculateBigramSimilarity(c1, c2);
+}
+
+function calculateBigramSimilarity(s1, s2) {
+  if (s1.length < 2 || s2.length < 2) return 0;
+  const bigrams1 = new Map();
+  for (let i = 0; i < s1.length - 1; i++) {
+    const bg = s1.substring(i, i + 2);
+    bigrams1.set(bg, (bigrams1.get(bg) || 0) + 1);
+  }
+  let intersection = 0;
+  for (let i = 0; i < s2.length - 1; i++) {
+    const bg = s2.substring(i, i + 2);
+    const count = bigrams1.get(bg) || 0;
+    if (count > 0) {
+      bigrams1.set(bg, count - 1);
+      intersection++;
+    }
+  }
+  const total = (s1.length - 1) + (s2.length - 1);
+  return (2.0 * intersection) / total;
+}

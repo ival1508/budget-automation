@@ -622,3 +622,189 @@ function test_normalizeRows() {
 
   Logger.log('\n=== test_normalizeRows() Execution Finished ===');
 }
+
+// ============================================================================
+// 5. STAGE 3C TESTS
+// ============================================================================
+
+/**
+ * STAGE 3C TEST: Pure Matching Engine Verification.
+ * 
+ * Asserts:
+ * 1. Exact dedupe_key match -> matched (Fast Path)
+ * 2. Match 4 days off (real DBS posting drift: "03 Aug 2026" posted "07 Aug 2026") -> matched (Fuzzy)
+ * 3. NETS*FAIRPRICE vs Fair Price -> matched (Exact dedupe_key)
+ * 3B. FAIRPRICE FINEST vs Fair Price -> matched on FAST PATH (Exact dedupe_key)
+ * 4. A genuine miss -> missing
+ * 5. Two same-amount same-day rows -> ambiguous (never guesses)
+ * 6. Duplicate amounts in statement (with matching ledger entries) -> matched 1-to-1
+ * 
+ * CRITICAL ASSERTION:
+ * No already-logged row may ever land in 'missing'.
+ */
+function test_findMissing() {
+  Logger.log('====================================================');
+  Logger.log('       TEST: test_findMissing() EXECUTION');
+  Logger.log('====================================================\n');
+
+  // --------------------------------------------------------------------------
+  // BRANCH 1: Exact dedupe_key match
+  // --------------------------------------------------------------------------
+  Logger.log('--- Branch 1: Exact dedupe_key match ---');
+  const b1_statement = [
+    { date: '11.08.2026', amount: 30.00, merchant: 'SIMPLYGO APP', account: 'DBS CC SGD' }
+  ];
+  const b1_ledger = [
+    { date: '11.08.2026', amount: 30.00, where: 'SIMPLYGO APP', account: 'DBS CC SGD' }
+  ];
+  const res1 = findMissing(b1_statement, b1_ledger);
+  assertEq(res1.matched.length, 1, 'Branch 1: Exactly 1 row in matched');
+  assertEq(res1.missing.length, 0, 'Branch 1: 0 rows in missing');
+  assertEq(res1.ambiguous.length, 0, 'Branch 1: 0 rows in ambiguous');
+  assertEq(res1.matched[0].match_type, 'exact', 'Branch 1: Match type is exact');
+
+  // --------------------------------------------------------------------------
+  // BRANCH 2: Match 4 days off (real DBS posting drift: 03 Aug posted 07 Aug)
+  // --------------------------------------------------------------------------
+  Logger.log('\n--- Branch 2: Match 4 days off (DBS posting drift) ---');
+  const b2_statement = [
+    { date: '07.08.2026', amount: 45.50, merchant: 'STARBUCKS', account: 'DBS CC SGD' }
+  ];
+  const b2_ledger = [
+    { date: '03.08.2026', amount: 45.50, where: 'Starbucks', account: 'DBS CC SGD' }
+  ];
+  const res2 = findMissing(b2_statement, b2_ledger);
+  assertEq(res2.matched.length, 1, 'Branch 2: Exactly 1 row in matched with 4 days drift');
+  assertEq(res2.missing.length, 0, 'Branch 2: 0 rows in missing');
+  assertEq(res2.ambiguous.length, 0, 'Branch 2: 0 rows in ambiguous');
+  assertEq(res2.matched[0].match_type, 'fuzzy', 'Branch 2: Match type is fuzzy');
+
+  // --------------------------------------------------------------------------
+  // BRANCH 3: NETS*FAIRPRICE vs Fair Price
+  // --------------------------------------------------------------------------
+  Logger.log('\n--- Branch 3: NETS*FAIRPRICE vs Fair Price ---');
+  const b3_statement = [
+    { date: '12.08.2026', amount: 82.35, merchant: 'NETS*FAIRPRICE', account: 'DBS CC SGD' }
+  ];
+  const b3_ledger = [
+    { date: '12.08.2026', amount: 82.35, where: 'Fair Price', account: 'DBS CC SGD' }
+  ];
+  const res3 = findMissing(b3_statement, b3_ledger);
+  assertEq(res3.matched.length, 1, 'Branch 3: Exactly 1 row in matched for NETS*FAIRPRICE vs Fair Price');
+  assertEq(res3.missing.length, 0, 'Branch 3: 0 rows in missing');
+  assertEq(res3.ambiguous.length, 0, 'Branch 3: 0 rows in ambiguous');
+  assertEq(res3.matched[0].match_type, 'exact', 'Branch 3: Match type is exact');
+
+  // --------------------------------------------------------------------------
+  // BRANCH 3B: FAIRPRICE FINEST vs Fair Price (Fast-path exact dedupe_key hit)
+  // --------------------------------------------------------------------------
+  Logger.log('\n--- Branch 3B: FAIRPRICE FINEST vs Fair Price (Fast-path exact dedupe_key hit) ---');
+  const b3b_statement = [
+    { date: '14.08.2026', amount: 64.20, merchant: 'FAIRPRICE FINEST', account: 'DBS CC SGD' }
+  ];
+  const b3b_ledger = [
+    { date: '14.08.2026', amount: 64.20, where: 'Fair Price', account: 'DBS CC SGD' }
+  ];
+  const res3b = findMissing(b3b_statement, b3b_ledger);
+  assertEq(res3b.matched.length, 1, 'Branch 3B: Exactly 1 row in matched for FAIRPRICE FINEST vs Fair Price');
+  assertEq(res3b.missing.length, 0, 'Branch 3B: 0 rows in missing');
+  assertEq(res3b.ambiguous.length, 0, 'Branch 3B: 0 rows in ambiguous');
+  assertEq(res3b.matched[0].match_type, 'exact', 'Branch 3B: FAIRPRICE FINEST matches Fair Price on FAST PATH (exact dedupe_key)');
+
+  // --------------------------------------------------------------------------
+  // BRANCH 4: A genuine miss
+  // --------------------------------------------------------------------------
+  Logger.log('\n--- Branch 4: Genuine miss ---');
+  const b4_statement = [
+    { date: '18.08.2026', amount: 99.90, merchant: 'UNIQLO ION ORCHARD', account: 'DBS CC SGD' }
+  ];
+  const b4_ledger = [
+    { date: '11.08.2026', amount: 30.00, where: 'SIMPLYGO APP', account: 'DBS CC SGD' },
+    { date: '18.08.2026', amount: 25.00, where: 'UNIQLO ION ORCHARD', account: 'DBS CC SGD' }
+  ];
+  const res4 = findMissing(b4_statement, b4_ledger);
+  assertEq(res4.matched.length, 0, 'Branch 4: 0 rows in matched');
+  assertEq(res4.missing.length, 1, 'Branch 4: Exactly 1 row in missing');
+  assertEq(res4.ambiguous.length, 0, 'Branch 4: 0 rows in ambiguous');
+
+  // --------------------------------------------------------------------------
+  // BRANCH 5: Two same-amount same-day rows (ambiguous)
+  // --------------------------------------------------------------------------
+  Logger.log('\n--- Branch 5: Two same-amount same-day rows (ambiguous) ---');
+  const b5_statement = [
+    { date: '15.08.2026', amount: 50.00, merchant: 'RESTAURANT A', account: 'DBS CC SGD' }
+  ];
+  const b5_ledger = [
+    { date: '15.08.2026', amount: 50.00, where: 'Restaurant A', id: 'L1', account: 'DBS CC SGD' },
+    { date: '15.08.2026', amount: 50.00, where: 'Restaurant A', id: 'L2', account: 'DBS CC SGD' }
+  ];
+  const res5 = findMissing(b5_statement, b5_ledger);
+  assertEq(res5.matched.length, 0, 'Branch 5: 0 rows in matched (multiple candidates, no guess)');
+  assertEq(res5.missing.length, 0, 'Branch 5: 0 rows in missing (not missing, has candidates)');
+  assertEq(res5.ambiguous.length, 1, 'Branch 5: Exactly 1 row in ambiguous');
+
+  // --------------------------------------------------------------------------
+  // BRANCH 6: Duplicate amounts in the statement (1-to-1 matching)
+  // --------------------------------------------------------------------------
+  Logger.log('\n--- Branch 6: Duplicate amounts in the statement ---');
+  const b6_statement = [
+    { date: '20.08.2026', amount: 15.00, merchant: 'TOAST BOX', account: 'DBS CC SGD', id: 'S1' },
+    { date: '20.08.2026', amount: 15.00, merchant: 'TOAST BOX', account: 'DBS CC SGD', id: 'S2' }
+  ];
+  const b6_ledger = [
+    { date: '20.08.2026', amount: 15.00, where: 'Toast Box', account: 'DBS CC SGD', id: 'L1' },
+    { date: '20.08.2026', amount: 15.00, where: 'Toast Box', account: 'DBS CC SGD', id: 'L2' }
+  ];
+  const res6 = findMissing(b6_statement, b6_ledger);
+  assertEq(res6.matched.length, 2, 'Branch 6: Both duplicate amount statement rows matched 1-to-1');
+  assertEq(res6.missing.length, 0, 'Branch 6: 0 rows in missing');
+  assertEq(res6.ambiguous.length, 0, 'Branch 6: 0 rows in ambiguous');
+
+  // --------------------------------------------------------------------------
+  // COMBINED BATCH TEST: All branches evaluated together
+  // --------------------------------------------------------------------------
+  Logger.log('\n--- Combined Batch Test: All Branches Together ---');
+  const combinedStatement = [
+    { date: '11.08.2026', amount: 30.00, merchant: 'SIMPLYGO APP', account: 'DBS CC SGD', id: 'S_exact' },
+    { date: '07.08.2026', amount: 45.50, merchant: 'STARBUCKS', account: 'DBS CC SGD', id: 'S_drift' },
+    { date: '12.08.2026', amount: 82.35, merchant: 'NETS*FAIRPRICE', account: 'DBS CC SGD', id: 'S_fairprice' },
+    { date: '14.08.2026', amount: 64.20, merchant: 'FAIRPRICE FINEST', account: 'DBS CC SGD', id: 'S_finest' },
+    { date: '18.08.2026', amount: 99.90, merchant: 'UNIQLO ION ORCHARD', account: 'DBS CC SGD', id: 'S_miss' },
+    { date: '15.08.2026', amount: 50.00, merchant: 'RESTAURANT A', account: 'DBS CC SGD', id: 'S_ambig' },
+    { date: '20.08.2026', amount: 15.00, merchant: 'TOAST BOX', account: 'DBS CC SGD', id: 'S_dup1' },
+    { date: '20.08.2026', amount: 15.00, merchant: 'TOAST BOX', account: 'DBS CC SGD', id: 'S_dup2' }
+  ];
+
+  const combinedLedger = [
+    { date: '11.08.2026', amount: 30.00, where: 'SIMPLYGO APP', account: 'DBS CC SGD', id: 'L_exact' },
+    { date: '03.08.2026', amount: 45.50, where: 'Starbucks', account: 'DBS CC SGD', id: 'L_drift' }, // 4 days drift
+    { date: '12.08.2026', amount: 82.35, where: 'Fair Price', account: 'DBS CC SGD', id: 'L_fairprice' },
+    { date: '14.08.2026', amount: 64.20, where: 'Fair Price', account: 'DBS CC SGD', id: 'L_finest' },
+    { date: '15.08.2026', amount: 50.00, where: 'Restaurant A', account: 'DBS CC SGD', id: 'L_ambig1' }, // 2 ledger candidates
+    { date: '15.08.2026', amount: 50.00, where: 'Restaurant A', account: 'DBS CC SGD', id: 'L_ambig2' },
+    { date: '20.08.2026', amount: 15.00, where: 'Toast Box', account: 'DBS CC SGD', id: 'L_dup1' },
+    { date: '20.08.2026', amount: 15.00, where: 'Toast Box', account: 'DBS CC SGD', id: 'L_dup2' },
+    { date: '25.08.2026', amount: 120.00, where: 'Unrelated Ledger Item', account: 'DBS CC SGD', id: 'L_unrelated' }
+  ];
+
+  const combinedRes = findMissing(combinedStatement, combinedLedger);
+  Logger.log(`Combined Results -> Matched: ${combinedRes.matched.length}, Missing: ${combinedRes.missing.length}, Ambiguous: ${combinedRes.ambiguous.length}`);
+
+  assertEq(combinedRes.matched.length, 6, 'Combined: Exactly 6 matched rows (exact, drift, fairprice, finest, 2x duplicate amounts)');
+  assertEq(combinedRes.missing.length, 1, 'Combined: Exactly 1 missing row (Uniqlo)');
+  assertEq(combinedRes.ambiguous.length, 1, 'Combined: Exactly 1 ambiguous row (Restaurant A)');
+
+  // CRITICAL INTEGRITY CHECK:
+  // Assert that no already-logged row ever lands in 'missing'.
+  const missingIds = combinedRes.missing.map(m => m.id || m.merchant);
+  assertEq(missingIds.includes('S_exact'), false, 'CRITICAL: Exact match never lands in missing');
+  assertEq(missingIds.includes('S_drift'), false, 'CRITICAL: 4-day drift match never lands in missing');
+  assertEq(missingIds.includes('S_fairprice'), false, 'CRITICAL: Fair Price match never lands in missing');
+  assertEq(missingIds.includes('S_finest'), false, 'CRITICAL: FAIRPRICE FINEST match never lands in missing');
+  assertEq(missingIds.includes('S_dup1'), false, 'CRITICAL: Duplicate row 1 never lands in missing');
+  assertEq(missingIds.includes('S_dup2'), false, 'CRITICAL: Duplicate row 2 never lands in missing');
+  assertEq(missingIds.includes('S_ambig'), false, 'CRITICAL: Ambiguous row never lands in missing');
+  assertEq(missingIds[0], 'S_miss', 'CRITICAL: Only the genuine miss lands in missing');
+
+  Logger.log('\n=== test_findMissing() Execution Finished ===');
+}
