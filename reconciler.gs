@@ -128,6 +128,7 @@ function tryParseDbsCsv(rows2D, rawCsvText, fileName) {
   let debitCol = -1;
   let creditCol = -1;
   let cardCol = -1;
+  let txnTypeCol = -1;
 
   for (let r = 0; r < Math.min(rows2D.length, 25); r++) {
     const row = rows2D[r].map(c => String(c || '').trim().toLowerCase());
@@ -154,6 +155,8 @@ function tryParseDbsCsv(rows2D, rawCsvText, fileName) {
           creditCol = cIdx;
         } else if (colName.includes('card no') || colName.includes('card number') || colName === 'card') {
           cardCol = cIdx;
+        } else if (colName.includes('transaction type') || colName.includes('txn type') || colName === 'type') {
+          txnTypeCol = cIdx;
         }
       });
       break;
@@ -220,6 +223,9 @@ function tryParseDbsCsv(rows2D, rawCsvText, fileName) {
     const cardNum = (cardCol !== -1 && row[cardCol])
       ? String(row[cardCol]).replace(/^['"\s]+|['"\s]+$/g, '').trim()
       : '';
+    const txnType = (txnTypeCol !== -1 && row[txnTypeCol])
+      ? String(row[txnTypeCol]).replace(/^['"\s]+|['"\s]+$/g, '').trim()
+      : '';
 
     rows.push({
       date: normDate,
@@ -229,6 +235,7 @@ function tryParseDbsCsv(rows2D, rawCsvText, fileName) {
       description: rawDesc,
       where: rawDesc,
       type: type,
+      transaction_type: txnType,
       currency: 'SGD',
       card_number: cardNum,
       raw_row: row
@@ -834,6 +841,7 @@ function normalizeRows(rows) {
       account = row.account || 'DBS CC SGD';
       cardNum = row.card_number || '';
       currency = row.currency || 'SGD';
+      txnType = row.transaction_type || '';
     }
 
     // 1. Date Normalization -> DD.MM.YYYY
@@ -905,6 +913,7 @@ function normalizeRows(rows) {
       merchant: normMerchant,
       raw_merchant: cleanRawMerchant,
       type: type,
+      transaction_type: txnType,
       account: account,
       card_number: cardNum ? String(cardNum).replace(/^['"\s]+|['"\s]+$/g, '') : '',
       currency: currency,
@@ -1352,4 +1361,215 @@ function calculateBigramSimilarity(s1, s2) {
   }
   const total = (s1.length - 1) + (s2.length - 1);
   return (2.0 * intersection) / total;
+}
+
+/**
+ * STAGE 3D: Filters non-spend lines from missing statement transactions.
+ * Follows Option B (Smart Dual-Sided Reconciler):
+ * Excludes:
+ * - credit-card autopay / repayments (the Кредитка pair) -> reason: 'CC payoff'
+ * - internal transfers between own accounts -> reason: 'Transfer to self'
+ * - fee and reversal net-zero pairs -> reason: 'Fee and reversal, net zero'
+ * - transit auto-topup adjustments -> reason: 'Refund'
+ * - standalone fee reversals / waivers -> reason: 'Fee and reversal, net zero'
+ * - interest credit lines -> reason: 'Interest / FX'
+ * 
+ * Proposes:
+ * - Genuine expenses (amount > 0, type === 'Расходы')
+ * - Legitimate external credits (merchant refunds, Allianz reimbursements, Carousell sales)
+ *   with type 'Получение денег' and negative amount.
+ * 
+ * GUARD RULE:
+ * isCcPayoff, isInternalTransfer, and isTransitAdjustment/isRefund rules must FIRST require
+ * the row to be a credit (amount < 0 || type === 'Получение денег').
+ * If amount > 0 && type === 'Расходы', skip those rules entirely so real expenses
+ * (e.g. "BILL PAYMENT - SP SERVICES", "GIRO CAFE", "AUTOPAY - TOWN COUNCIL") are never dropped.
+ * 
+ * CHOICE 1 INVARIANT:
+ * No row with amount > 0 && type === 'Расходы' may be excluded,
+ * UNLESS its reason is 'Fee and reversal, net zero'.
+ * 
+ * @param {Array<Object>} missing - Array of missing statement rows from findMissing().
+ * @return {{ proposals: Array<Object>, excluded: Array<Object> }} Proposals and excluded items with reasons.
+ */
+function filterNonSpend(missing) {
+  if (!Array.isArray(missing) || missing.length === 0) {
+    return { proposals: [], excluded: [] };
+  }
+
+  const proposals = [];
+  const excluded = [];
+
+  // Map of index -> reason for paired exclusions (e.g. fee & reversal net zero)
+  const pairedExcludedMap = new Map();
+
+  // PASS 1: Identify Fee and Reversal Net-Zero Pairs
+  // e.g. Citi "LATE CHARGE FEE" (+100 or -100 raw) and "AUTO LATE FEE REVERSAL" (-100 or +100 raw)
+  for (let i = 0; i < missing.length; i++) {
+    if (pairedExcludedMap.has(i)) continue;
+    const r1 = missing[i];
+    if (!r1) continue;
+
+    const desc1 = String(r1.raw_merchant || r1.merchant || r1.description || r1.where || '').toUpperCase();
+    const isFee1 = desc1.includes('LATE CHARGE') || desc1.includes('LATE FEE') || (desc1.includes('FEE') && !desc1.includes('REVERSAL') && !desc1.includes('WAIVER'));
+    if (!isFee1) continue;
+
+    const amt1 = Math.abs(Number(r1.amount !== undefined ? r1.amount : r1.raw_amount) || 0);
+    if (amt1 === 0) continue;
+
+    for (let j = 0; j < missing.length; j++) {
+      if (i === j || pairedExcludedMap.has(j)) continue;
+      const r2 = missing[j];
+      if (!r2) continue;
+
+      const desc2 = String(r2.raw_merchant || r2.merchant || r2.description || r2.where || '').toUpperCase();
+      const isReversal2 = desc2.includes('REVERSAL') || desc2.includes('WAIVER');
+      if (!isReversal2) continue;
+
+      const amt2 = Math.abs(Number(r2.amount !== undefined ? r2.amount : r2.raw_amount) || 0);
+
+      if (Math.abs(amt1 - amt2) < 0.01) {
+        pairedExcludedMap.set(i, 'Fee and reversal, net zero');
+        pairedExcludedMap.set(j, 'Fee and reversal, net zero');
+        break;
+      }
+    }
+  }
+
+  // PASS 2: Evaluate Each Row Against Rules
+  for (let idx = 0; idx < missing.length; idx++) {
+    const row = missing[idx];
+    if (!row) continue;
+
+    // 1. Paired Fee & Reversal Net-Zero (Pass 1)
+    if (pairedExcludedMap.has(idx)) {
+      excluded.push({
+        ...row,
+        reason: pairedExcludedMap.get(idx),
+        exclusion_category: 'fee_reversal'
+      });
+      continue;
+    }
+
+    const desc = String(row.raw_merchant || row.merchant || row.description || row.where || '').trim();
+    const descUpper = desc.toUpperCase();
+    const rawTxnType = String(row.transaction_type || row.raw_type || '').toUpperCase();
+    const type = String(row.type || '');
+    const amt = Number(row.amount !== undefined ? row.amount : row.raw_amount) || 0;
+
+    // GUARD RULE & CHOICE 1:
+    // If row has amount > 0 AND type === 'Расходы', it is a genuine positive expense.
+    // By Choice 1, no positive expense may be excluded unless it was paired in Pass 1.
+    // Skip CC payoff, internal transfer, and refund checks entirely.
+    const isExpense = (amt > 0 && type === 'Расходы');
+    if (isExpense) {
+      proposals.push(row);
+      continue;
+    }
+
+    // From here on, row is a credit (amt < 0 or type === 'Получение денег')
+    const isCredit = (amt < 0 || type === 'Получение денег');
+
+    if (isCredit) {
+      // 2. Credit Card Autopay / Repayment (the Кредитка pair / CC payoff)
+      // Strong signal: DBS Transaction Type === 'PAYMENT'
+      const isCcPayoff = (
+        rawTxnType === 'PAYMENT' ||
+        descUpper.includes('BILL PAYMENT') ||
+        descUpper.includes('AUTOPAY') ||
+        descUpper.includes('GIRO') ||
+        descUpper.includes('PAYMENT RECEIVED') ||
+        descUpper.includes('INTERNET PAYMENT') ||
+        descUpper.includes('CREDIT CARD PAYMENT') ||
+        descUpper.includes('DBS INTERNET/WIRELESS') ||
+        descUpper.includes('IBANK PAYMENT') ||
+        descUpper.includes('PAYMENT - THANK YOU') ||
+        descUpper.includes('CARD PAYMENT')
+      );
+
+      if (isCcPayoff) {
+        excluded.push({
+          ...row,
+          reason: 'CC payoff',
+          exclusion_category: 'cc_payoff'
+        });
+        continue;
+      }
+
+      // 3. Internal Transfers between own accounts (e.g. Citi "MONEYSEND VALERIY IVANOV")
+      const isInternalTransfer = (
+        descUpper.includes('MONEYSEND') ||
+        descUpper.includes('VALERIY IVANOV') ||
+        descUpper.includes('MARGARITA') ||
+        descUpper.includes('INTERNAL TRANSFER') ||
+        descUpper.includes('TRANSFER TO SELF') ||
+        descUpper.includes('FUNDS TRANSFER')
+      );
+
+      if (isInternalTransfer) {
+        excluded.push({
+          ...row,
+          reason: 'Transfer to self',
+          exclusion_category: 'transfer_to_self'
+        });
+        continue;
+      }
+
+      // 4. Transit auto-topup adjustments / internal reloads (e.g. DBS "SPL AUTO TOPUP (ABT/RE)")
+      const isTransitAdjustment = (
+        descUpper.includes('TOPUP (ABT/RE)') ||
+        descUpper.includes('SPL AUTO TOPUP')
+      );
+
+      if (isTransitAdjustment) {
+        excluded.push({
+          ...row,
+          reason: 'Refund',
+          exclusion_category: 'refund'
+        });
+        continue;
+      }
+
+      // 5. Standalone Fee Reversals / Waivers without matched fee
+      const isFeeWaiver = (
+        descUpper.includes('LATE FEE REVERSAL') ||
+        descUpper.includes('FEE REVERSAL') ||
+        descUpper.includes('FEE WAIVER')
+      );
+
+      if (isFeeWaiver) {
+        excluded.push({
+          ...row,
+          reason: 'Fee and reversal, net zero',
+          exclusion_category: 'fee_reversal'
+        });
+        continue;
+      }
+
+      // 6. FX and Interest Credit Lines
+      const isInterestCredit = (
+        descUpper.includes('INTEREST CREDIT') ||
+        descUpper.includes('CREDIT INTEREST')
+      );
+
+      if (isInterestCredit) {
+        excluded.push({
+          ...row,
+          reason: 'Interest / FX',
+          exclusion_category: 'interest_or_fx'
+        });
+        continue;
+      }
+
+      // OPTION B: Legitimate external credits (merchant refunds, Allianz reimbursements,
+      // Carousell sales) are PROPOSED with type 'Получение денег' and negative amount.
+      proposals.push(row);
+      continue;
+    }
+
+    // Default fallback for any remaining rows
+    proposals.push(row);
+  }
+
+  return { proposals, excluded };
 }

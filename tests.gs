@@ -808,3 +808,236 @@ function test_findMissing() {
 
   Logger.log('\n=== test_findMissing() Execution Finished ===');
 }
+
+// ============================================================================
+// 6. STAGE 3D TESTS
+// ============================================================================
+
+/**
+ * STAGE 3D TEST: Non-Spend Line Filtering Verification.
+ * 
+ * Verifies that filterNonSpend() follows Option B (Smart Dual-Sided) & Choice 1:
+ * 1. Excludes credit card repayment: DBS "BILL PAYMENT - DBS INTERNET/WIRELESS" S$12,969.24 (Credit) -> 'CC payoff'
+ * 2. Excludes refund / transit adjustment: DBS "SPL AUTO TOPUP (ABT/RE)" S$20.19 (Credit) -> 'Refund'
+ * 3. Excludes transfer to self: Citi "MONEYSEND VALERIY IVANOV" +483.23 -> 'Transfer to self'
+ * 4. Excludes net-zero fee pair: Citi "LATE CHARGE FEE" -100.00 & "AUTO LATE FEE REVERSAL" +100.00 -> 'Fee and reversal, net zero'
+ * 5. Passes through genuine expenses: SIMPLYGO APP S$30.00 and SHELL TELOK BLANGAH S$207.32 -> proposals
+ * 6. Passes through trap cases (Choice 1 Guard Rule):
+ *    - "BILL PAYMENT - SP SERVICES" +120.00 Расходы -> proposals
+ *    - "GIRO CAFE" +18.50 Расходы -> proposals
+ *    - "AUTOPAY - TOWN COUNCIL" +95.00 Расходы -> proposals
+ * 7. Passes through legitimate external credit (Option B):
+ *    - "ALLIANZ REIMBURSEMENT" -270.00 Получение денег -> proposals
+ * 8. Asserts exactly 6 proposals survive and exactly 5 non-spend lines are excluded.
+ * 9. Choice 1 Invariant: Asserts that no row with amount > 0 and type === 'Расходы' is ever excluded UNLESS reason is 'Fee and reversal, net zero'.
+ * 10. Asserts standalone unreversed fee survives as proposal (bias towards proposing).
+ */
+function test_filterNonSpend() {
+  Logger.log('====================================================');
+  Logger.log('       TEST: test_filterNonSpend() EXECUTION');
+  Logger.log('====================================================\n');
+
+  // Input missing rows constructed from real statement fixtures and trap cases
+  const inputMissing = [
+    // 1. DBS CC payoff (Payment)
+    {
+      date: '11.08.2026',
+      amount: -12969.24,
+      raw_amount: '12969.24',
+      merchant: 'bill payment - dbs internet/wireless',
+      raw_merchant: 'BILL PAYMENT - DBS INTERNET/WIRELESS',
+      type: 'Получение денег',
+      transaction_type: 'PAYMENT',
+      account: 'DBS CC SGD'
+    },
+    // 2. DBS Refund (Credit)
+    {
+      date: '12.08.2026',
+      amount: -20.19,
+      raw_amount: '20.19',
+      merchant: 'spl auto topup (abt/re)',
+      raw_merchant: 'SPL AUTO TOPUP (ABT/RE)',
+      type: 'Получение денег',
+      transaction_type: 'OTHERS',
+      account: 'DBS CC SGD'
+    },
+    // 3. Citi Transfer to self (Moneysend)
+    {
+      date: '26.08.2026',
+      amount: -483.23,
+      raw_amount: '+483.23',
+      merchant: 'moneysend valeriy ivanov',
+      raw_merchant: 'MONEYSEND VALERIY IVANOV',
+      type: 'Получение денег',
+      account: 'Citibank CC'
+    },
+    // 4. Citi Fee (Late Charge)
+    {
+      date: '26.08.2026',
+      amount: 100.00,
+      raw_amount: '-100.00',
+      merchant: 'late charge fee',
+      raw_merchant: 'LATE CHARGE FEE',
+      type: 'Расходы',
+      account: 'Citibank CC'
+    },
+    // 5. Citi Reversal (Late Fee Reversal)
+    {
+      date: '26.08.2026',
+      amount: -100.00,
+      raw_amount: '+100.00',
+      merchant: 'auto late fee reversal',
+      raw_merchant: 'AUTO LATE FEE REVERSAL',
+      type: 'Получение денег',
+      account: 'Citibank CC'
+    },
+    // 6. Genuine Expense 1 (DBS purchase)
+    {
+      date: '11.08.2026',
+      amount: 30.00,
+      raw_amount: '30.00',
+      merchant: 'simplygo app',
+      raw_merchant: 'SIMPLYGO APP SINGAPORE SGP',
+      type: 'Расходы',
+      transaction_type: 'PURCHASE',
+      account: 'DBS CC SGD'
+    },
+    // 7. Genuine Expense 2 (Citibank purchase)
+    {
+      date: '26.08.2026',
+      amount: 207.32,
+      raw_amount: '-207.32',
+      merchant: 'shell telok blangah',
+      raw_merchant: 'SHELL TELOK BLANGAH',
+      type: 'Расходы',
+      account: 'Citibank CC'
+    },
+    // 8. Trap Case 1: Genuine utility bill with "BILL PAYMENT" in merchant description
+    {
+      date: '15.08.2026',
+      amount: 120.00,
+      raw_amount: '120.00',
+      merchant: 'bill payment - sp services',
+      raw_merchant: 'BILL PAYMENT - SP SERVICES',
+      type: 'Расходы',
+      transaction_type: 'PURCHASE',
+      account: 'DBS CC SGD'
+    },
+    // 9. Trap Case 2: Genuine dining expense with "GIRO" in merchant name
+    {
+      date: '16.08.2026',
+      amount: 18.50,
+      raw_amount: '18.50',
+      merchant: 'giro cafe',
+      raw_merchant: 'GIRO CAFE',
+      type: 'Расходы',
+      transaction_type: 'PURCHASE',
+      account: 'DBS CC SGD'
+    },
+    // 10. Trap Case 3: Genuine municipal bill with "AUTOPAY" in merchant description
+    {
+      date: '17.08.2026',
+      amount: 95.00,
+      raw_amount: '95.00',
+      merchant: 'autopay - town council',
+      raw_merchant: 'AUTOPAY - TOWN COUNCIL',
+      type: 'Расходы',
+      transaction_type: 'PURCHASE',
+      account: 'DBS CC SGD'
+    },
+    // 11. Option B Credit: Genuine insurance reimbursement
+    {
+      date: '18.08.2026',
+      amount: -270.00,
+      raw_amount: '-270.00',
+      merchant: 'allianz reimbursement',
+      raw_merchant: 'ALLIANZ REIMBURSEMENT',
+      type: 'Получение денег',
+      account: 'DBS CC SGD'
+    }
+  ];
+
+  const result = filterNonSpend(inputMissing);
+  Logger.log(`filterNonSpend Results -> Proposals: ${result.proposals.length}, Excluded: ${result.excluded.length}`);
+
+  // 1. Assert proposal and exclusion counts
+  assertEq(result.proposals.length, 6, 'Option B: Exactly 6 proposals survive (5 genuine expenses + 1 legitimate credit)');
+  assertEq(result.excluded.length, 5, 'Option B: Exactly 5 non-spend lines are excluded');
+
+  // 2. Assert proposals content
+  const proposalMerchants = result.proposals.map(p => (p.raw_merchant || p.merchant || '').toUpperCase());
+  assertEq(proposalMerchants.some(m => m.includes('SIMPLYGO')), true, 'Proposal 1: SIMPLYGO APP survived');
+  assertEq(proposalMerchants.some(m => m.includes('SHELL')), true, 'Proposal 2: SHELL TELOK BLANGAH survived');
+  assertEq(proposalMerchants.some(m => m.includes('SP SERVICES')), true, 'Proposal 3 (Trap case): BILL PAYMENT - SP SERVICES survived');
+  assertEq(proposalMerchants.some(m => m.includes('GIRO CAFE')), true, 'Proposal 4 (Trap case): GIRO CAFE survived');
+  assertEq(proposalMerchants.some(m => m.includes('TOWN COUNCIL')), true, 'Proposal 5 (Trap case): AUTOPAY - TOWN COUNCIL survived');
+  assertEq(proposalMerchants.some(m => m.includes('ALLIANZ')), true, 'Proposal 6 (Option B credit): ALLIANZ REIMBURSEMENT survived');
+
+  // Assert Option B credit details
+  const allianz = result.proposals.find(p => (p.raw_merchant || p.merchant || '').toUpperCase().includes('ALLIANZ'));
+  assertEq(Boolean(allianz), true, 'ALLIANZ REIMBURSEMENT found in proposals');
+  assertEq(allianz.type, 'Получение денег', 'Option B: ALLIANZ credit type is "Получение денег"');
+  assertEq(allianz.amount < 0, true, 'Option B: ALLIANZ credit amount is negative (-270.00)');
+
+  // 3. Assert each exclusion carries the correct reason
+  const billPay = result.excluded.find(r => (r.raw_merchant || r.merchant || '').toUpperCase().includes('BILL PAYMENT - DBS'));
+  assertEq(Boolean(billPay), true, 'DBS Bill payment found in excluded');
+  assertEq(billPay.reason, 'CC payoff', 'DBS Bill payment exclusion reason is "CC payoff"');
+
+  const refund = result.excluded.find(r => (r.raw_merchant || r.merchant || '').toUpperCase().includes('SPL AUTO TOPUP'));
+  assertEq(Boolean(refund), true, 'DBS SPL AUTO TOPUP found in excluded');
+  assertEq(refund.reason, 'Refund', 'DBS SPL AUTO TOPUP exclusion reason is "Refund"');
+
+  const transfer = result.excluded.find(r => (r.raw_merchant || r.merchant || '').toUpperCase().includes('MONEYSEND'));
+  assertEq(Boolean(transfer), true, 'Citi MONEYSEND found in excluded');
+  assertEq(transfer.reason, 'Transfer to self', 'Citi MONEYSEND exclusion reason is "Transfer to self"');
+
+  const fee = result.excluded.find(r => (r.raw_merchant || r.merchant || '').toUpperCase().includes('LATE CHARGE FEE'));
+  assertEq(Boolean(fee), true, 'Citi LATE CHARGE FEE found in excluded');
+  assertEq(fee.reason, 'Fee and reversal, net zero', 'Citi LATE CHARGE FEE exclusion reason is "Fee and reversal, net zero"');
+
+  const reversal = result.excluded.find(r => (r.raw_merchant || r.merchant || '').toUpperCase().includes('AUTO LATE FEE REVERSAL'));
+  assertEq(Boolean(reversal), true, 'Citi AUTO LATE FEE REVERSAL found in excluded');
+  assertEq(reversal.reason, 'Fee and reversal, net zero', 'Citi AUTO LATE FEE REVERSAL exclusion reason is "Fee and reversal, net zero"');
+
+  // 4. CHOICE 1 INVARIANT ASSERTION:
+  // No row with amount > 0 AND type === 'Расходы' may be excluded, UNLESS its reason is 'Fee and reversal, net zero'.
+  Logger.log('\n--- Choice 1 Invariant: No positive Расходы row excluded unless net-zero fee pair ---');
+  const invalidExcludedExpenses = result.excluded.filter(r => {
+    const amt = Number(r.amount !== undefined ? r.amount : r.raw_amount) || 0;
+    const type = String(r.type || '');
+    return amt > 0 && type === 'Расходы' && r.reason !== 'Fee and reversal, net zero';
+  });
+  assertEq(invalidExcludedExpenses.length, 0, 'Choice 1 Invariant: No positive Расходы row is ever excluded unless part of net-zero fee pair');
+
+  // 5. CRITICAL: Bias towards proposing test
+  // An unreversed fee (e.g. ANNUAL FEE S$192.60 without reversal) MUST survive as proposal
+  Logger.log('\n--- Bias towards proposing: Standalone unreversed fee ---');
+  const standaloneFeeInput = [
+    {
+      date: '15.08.2026',
+      amount: 192.60,
+      merchant: 'annual fee',
+      raw_merchant: 'ANNUAL FEE',
+      type: 'Расходы',
+      account: 'DBS CC SGD'
+    }
+  ];
+  const standaloneFeeResult = filterNonSpend(standaloneFeeInput);
+  assertEq(standaloneFeeResult.proposals.length, 1, 'CRITICAL: Standalone unreversed fee survives as proposal (bias towards proposing)');
+  assertEq(standaloneFeeResult.excluded.length, 0, 'Standalone unreversed fee is not silently dropped');
+
+  const invalidStandaloneExcluded = standaloneFeeResult.excluded.filter(r => {
+    const amt = Number(r.amount !== undefined ? r.amount : r.raw_amount) || 0;
+    const type = String(r.type || '');
+    return amt > 0 && type === 'Расходы' && r.reason !== 'Fee and reversal, net zero';
+  });
+  assertEq(invalidStandaloneExcluded.length, 0, 'Choice 1 Invariant holds for standalone fee');
+
+  // 6. Empty / null input safety
+  const emptyResult = filterNonSpend([]);
+  assertEq(emptyResult.proposals.length, 0, 'Empty input yields 0 proposals');
+  assertEq(emptyResult.excluded.length, 0, 'Empty input yields 0 excluded');
+
+  Logger.log('\n=== test_filterNonSpend() Execution Finished ===');
+}
