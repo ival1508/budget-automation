@@ -1041,3 +1041,194 @@ function test_filterNonSpend() {
 
   Logger.log('\n=== test_filterNonSpend() Execution Finished ===');
 }
+
+// ============================================================================
+// 7. STAGE 3E TESTS
+// ============================================================================
+
+/**
+ * STAGE 3E TEST: Staging Tab (_Reconcile) Generation & Ledger Invariant.
+ * 
+ * Verifies that Stage 3E:
+ * 1. Creates/populates _Reconcile tab with exact 11 required columns:
+ *    ✓ · date · account · Тип · amount · merchant · proposed category · proposed bucket · confidence · source_row · status
+ * 2. Option B Dual-Sided:
+ *    - Genuine expenses staged with status = 'proposed', Тип = 'Расходы', positive amount.
+ *    - Legitimate external credits staged with status = 'proposed', Тип = 'Получение денег', negative amount, visually grouped.
+ * 3. Ambiguous rows from findMissing are surfaced with status = 'ambiguous' and candidate ledger rows listed in source_row.
+ * 4. Pre-categorisation via enricher assigns valid category and 50/30/20 bucket.
+ * 5. Column 1 receives interactive checkboxes.
+ * 6. End-to-end pipeline (3A -> 3E) executes against real fixture on SANDBOX sheet.
+ * 7. CRITICAL INVARIANT:
+ *    Transactions.getLastRow() is IDENTICAL before and after execution (Transactions is 100% untouched).
+ */
+function test_stageProposals() {
+  Logger.log('====================================================');
+  Logger.log('       TEST: test_stageProposals() EXECUTION');
+  Logger.log('====================================================\n');
+
+  const ss = (typeof getTargetSpreadsheet === 'function') ? getTargetSpreadsheet(true) : SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    throw new Error('test_stageProposals: No target spreadsheet available.');
+  }
+
+  const transSheet = ss.getSheetByName('Transactions');
+  if (!transSheet) {
+    throw new Error('test_stageProposals: Transactions sheet not found in target spreadsheet.');
+  }
+
+  // Record initial Transactions row count to prove it remains strictly untouched
+  const transLastRowBefore = transSheet.getLastRow();
+  Logger.log(`Initial Transactions.getLastRow(): ${transLastRowBefore}`);
+
+  // --------------------------------------------------------------------------
+  // PART 1: Controlled Staging Verification (Dual-Sided & Ambiguous)
+  // --------------------------------------------------------------------------
+  Logger.log('\n--- Part 1: Controlled Staging Verification (Dual-Sided & Ambiguous) ---');
+
+  const mockProposals = [
+    // 1. Genuine expense proposal
+    {
+      date: '11.08.2026',
+      amount: 30.00,
+      raw_amount: '30.00',
+      merchant: 'simplygo app',
+      raw_merchant: 'SIMPLYGO APP SINGAPORE SGP',
+      type: 'Расходы',
+      transaction_type: 'PURCHASE',
+      account: 'DBS CC SGD'
+    },
+    // 2. Option B legitimate external credit proposal
+    {
+      date: '18.08.2026',
+      amount: -270.00,
+      raw_amount: '-270.00',
+      merchant: 'allianz reimbursement',
+      raw_merchant: 'ALLIANZ REIMBURSEMENT',
+      type: 'Получение денег',
+      account: 'DBS CC SGD'
+    }
+  ];
+
+  const mockAmbiguous = [
+    // Ambiguous row with multiple candidate ledger rows
+    {
+      date: '15.08.2026',
+      amount: 50.00,
+      raw_amount: '50.00',
+      merchant: 'restaurant a',
+      raw_merchant: 'RESTAURANT A',
+      type: 'Расходы',
+      account: 'DBS CC SGD',
+      candidates: [
+        { row_index: 42, date: '15.08.2026', where: 'Restaurant A', amount: 50.00 },
+        { row_index: 45, date: '15.08.2026', where: 'Restaurant A', amount: 50.00 }
+      ]
+    }
+  ];
+
+  const stageResult = stageProposals(mockProposals, mockAmbiguous, ss);
+  assertEq(stageResult.stagedCount, 3, 'Part 1: Exactly 3 rows staged (1 expense, 1 credit, 1 ambiguous)');
+  assertEq(stageResult.proposalsCount, 2, 'Part 1: Proposals count is 2');
+  assertEq(stageResult.ambiguousCount, 1, 'Part 1: Ambiguous count is 1');
+
+  // Verify staging sheet existence
+  const stagingSheet = ss.getSheetByName(RECONCILE_STAGING_TAB_NAME);
+  assertEq(Boolean(stagingSheet), true, `Staging sheet "${RECONCILE_STAGING_TAB_NAME}" exists`);
+
+  const stagedLastRow = stagingSheet.getLastRow();
+  assertEq(stagedLastRow, 4, 'Staging sheet has exactly 4 rows (1 header + 3 data rows)');
+
+  // A. Verify headers
+  const headerRow = stagingSheet.getRange(1, 1, 1, 11).getValues()[0];
+  const expectedHeaders = [
+    '✓', 'date', 'account', 'Тип', 'amount', 'merchant',
+    'proposed category', 'proposed bucket', 'confidence', 'source_row', 'status'
+  ];
+  assertEq(headerRow, expectedHeaders, 'Header row matches the exact 11 required columns');
+
+  // B. Read staged data rows
+  const stagedData = stagingSheet.getRange(2, 1, 3, 11).getValues();
+
+  // Row 1: Clean Expense Proposal
+  const expRow = stagedData[0];
+  assertEq(expRow[0], false, 'Row 1: Checkbox is unchecked (false)');
+  assertEq(typeof expRow[1], 'string', 'Row 1 date is type STRING (not Date object)');
+  assertEq(expRow[1], '11.08.2026', 'Row 1 date round-trips exactly as "11.08.2026" (not shifted by timezone)');
+  assertEq(expRow[2], 'DBS CC SGD', 'Row 1: Account is DBS CC SGD');
+  assertEq(expRow[3], 'Расходы', 'Row 1: Тип is "Расходы"');
+  assertClose(Number(expRow[4]), 30.00, 0.01, 'Row 1: Amount is +30.00');
+  assertEq(Boolean(expRow[6]), true, 'Row 1: Proposed category is populated');
+  assertEq(Boolean(expRow[7]), true, 'Row 1: Proposed bucket is populated');
+  assertEq(expRow[10], 'proposed', 'Row 1: Status is "proposed"');
+
+  // Row 2: Option B Credit Proposal
+  const creditRow = stagedData[1];
+  assertEq(creditRow[0], false, 'Row 2: Checkbox is unchecked (false)');
+  assertEq(typeof creditRow[1], 'string', 'Row 2 date is type STRING (not Date object)');
+  assertEq(creditRow[1], '18.08.2026', 'Row 2 date round-trips exactly as "18.08.2026" (not shifted by timezone)');
+  assertEq(creditRow[3], 'Получение денег', 'Row 2: Option B Credit Тип is "Получение денег"');
+  assertClose(Number(creditRow[4]), -270.00, 0.01, 'Row 2: Amount is negative (-270.00)');
+  assertEq(creditRow[10], 'proposed', 'Row 2: Status is "proposed"');
+
+  // Row 3: Ambiguous Row
+  const ambRow = stagedData[2];
+  assertEq(ambRow[0], false, 'Row 3: Checkbox is unchecked (false)');
+  assertEq(typeof ambRow[1], 'string', 'Row 3 date is type STRING (not Date object)');
+  assertEq(ambRow[1], '15.08.2026', 'Row 3 date round-trips exactly as "15.08.2026" (not shifted by timezone)');
+  assertEq(ambRow[10], 'ambiguous', 'Row 3: Status is "ambiguous" (surfaced without guessing)');
+  const ambSource = String(ambRow[9]);
+  assertEq(
+    ambSource.includes('Row 42') && ambSource.includes('Row 45'),
+    true,
+    'Row 3: Candidate ledger rows (Row 42, Row 45) are listed in source_row'
+  );
+
+  // C. Verify Transactions invariant after Part 1
+  assertEq(
+    transSheet.getLastRow(),
+    transLastRowBefore,
+    'CRITICAL INVARIANT (Part 1): Transactions.getLastRow() is IDENTICAL before and after stageProposals()'
+  );
+
+  // --------------------------------------------------------------------------
+  // PART 2: End-to-End Pipeline (3A -> 3E) Against Fixture on Sandbox Sheet
+  // --------------------------------------------------------------------------
+  Logger.log('\n--- Part 2: End-to-End Pipeline (3A -> 3E) Against Fixture on Sandbox ---');
+
+  const fixtureCsv = getFixture('dbs_small_csv', ss);
+  if (!fixtureCsv) {
+    Logger.log('⚠️ Fixture "dbs_small_csv" not found. Skipping Part 2 fixture execution.');
+  } else {
+    const e2eResult = reconcileAndStage(fixtureCsv, ss);
+    Logger.log(`reconcileAndStage Result: totalParsed=${e2eResult.totalParsed}, matched=${e2eResult.matchedCount}, proposals=${e2eResult.proposalsCount}, ambiguous=${e2eResult.ambiguousCount}, staged=${e2eResult.stagedCount}`);
+
+    assertEq(e2eResult.totalParsed > 0, true, 'Part 2: 3A parsed statement rows from fixture');
+    assertEq(e2eResult.stagedCount > 0, true, 'Part 2: 3E staged rows to _Reconcile tab');
+
+    const e2eStagingSheet = ss.getSheetByName(RECONCILE_STAGING_TAB_NAME);
+    assertEq(e2eStagingSheet.getLastRow(), e2eResult.stagedCount + 1, 'Part 2: Staging tab row count matches stagedCount + 1 header');
+
+    // Check all staged rows have valid status
+    const e2eData = e2eStagingSheet.getRange(2, 1, e2eResult.stagedCount, 11).getValues();
+    const allStatusesValid = e2eData.every(r => r[10] === 'proposed' || r[10] === 'ambiguous');
+    assertEq(allStatusesValid, true, 'Part 2: Every staged row has status "proposed" or "ambiguous"');
+
+    // Check all staged rows have boolean checkboxes
+    const allCheckboxesBoolean = e2eData.every(r => typeof r[0] === 'boolean');
+    assertEq(allCheckboxesBoolean, true, 'Part 2: Every staged row has a valid checkbox (boolean)');
+
+    // Check all staged rows have plain text string dates matching DD.MM.YYYY
+    const allDatesValidStrings = e2eData.every(r => typeof r[1] === 'string' && /^\d{2}\.\d{2}\.\d{4}$/.test(r[1]));
+    assertEq(allDatesValidStrings, true, 'Part 2: Every staged date is a string matching DD.MM.YYYY (no Date object coercion)');
+
+    // D. Final Transactions Invariant Check
+    assertEq(
+      transSheet.getLastRow(),
+      transLastRowBefore,
+      'CRITICAL INVARIANT (Part 2): Transactions.getLastRow() is IDENTICAL after complete 3A->3E run'
+    );
+  }
+
+  Logger.log('\n=== test_stageProposals() Execution Finished ===');
+}

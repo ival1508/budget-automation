@@ -1573,3 +1573,419 @@ function filterNonSpend(missing) {
 
   return { proposals, excluded };
 }
+
+// ============================================================================
+// 4. STAGE 3E: STAGING REVIEW (_Reconcile TAB)
+// ============================================================================
+
+const RECONCILE_STAGING_TAB_NAME = '_Reconcile';
+
+/**
+ * Reads historical transactions from the "Transactions" tab without modifying anything.
+ * Captures row indices (1-indexed), dates, accounts, types, amounts, categories, and merchants.
+ * 
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSpreadsheet] - Target spreadsheet instance.
+ * @return {Array<Object>} Standardized ledger rows.
+ */
+function readLedgerRowsForReconciliation(optSpreadsheet) {
+  const spreadsheet = optSpreadsheet || SpreadsheetApp.getActiveSpreadsheet();
+  if (!spreadsheet) return [];
+
+  const sheet = spreadsheet.getSheetByName('Transactions');
+  if (!sheet) {
+    Logger.log('⚠️ Warning: Sheet "Transactions" not found in readLedgerRowsForReconciliation.');
+    return [];
+  }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return [];
+
+  const numCols = Math.max(sheet.getLastColumn(), 11);
+  const data = sheet.getRange(2, 1, lastRow - 1, numCols).getValues();
+  const ledgerRows = [];
+
+  for (let r = 0; r < data.length; r++) {
+    const row = data[r];
+    const dateVal = row[0];
+    const dateStr = typeof formatSheetDate === 'function'
+      ? formatSheetDate(dateVal)
+      : (typeof normalizeDateString === 'function' ? normalizeDateString(dateVal) : String(dateVal || '').trim());
+    const accountStr = String(row[1] || '').trim();
+    const typeStr = String(row[2] || '').trim();
+    const amountVal = typeof parseAmountNumber === 'function'
+      ? parseAmountNumber(row[4] !== undefined && row[4] !== '' ? row[4] : row[3])
+      : (parseFloat(row[4] || row[3]) || 0);
+    const categoryStr = String(row[7] || '').trim();
+    const whereStr = String(row[8] || '').trim();
+    const notesStr = String(row[9] || '').trim();
+    const bucketStr = String(row[10] || '').trim();
+
+    if (dateStr || whereStr || amountVal !== 0) {
+      ledgerRows.push({
+        row_index: r + 2, // 1-indexed row number in Transactions sheet
+        date: dateStr,
+        account: accountStr,
+        type: typeStr,
+        amount: amountVal,
+        category: categoryStr,
+        where: whereStr,
+        merchant: whereStr,
+        notes: notesStr,
+        bucket: bucketStr
+      });
+    }
+  }
+
+  return ledgerRows;
+}
+
+/**
+ * Builds a lookup map from normalized merchant to most frequently / recently used category in the ledger.
+ * Enables automatic pre-categorization of statement rows based on past user transactions.
+ * 
+ * @param {Array<Object>} [ledgerRows] - Historical transactions from Transactions tab.
+ * @return {Map<string, string>} Map of normalized merchant -> category.
+ */
+function buildMerchantCategoryLookup(ledgerRows) {
+  const map = new Map();
+  if (!Array.isArray(ledgerRows)) return map;
+
+  for (let i = 0; i < ledgerRows.length; i++) {
+    const row = ledgerRows[i];
+    const merchantNorm = typeof normaliseWhere === 'function'
+      ? normaliseWhere(row.where || row.merchant || '')
+      : String(row.where || '').toLowerCase().trim();
+    const category = String(row.category || '').trim();
+
+    if (merchantNorm && category && category !== 'Другое') {
+      map.set(merchantNorm, category);
+    }
+  }
+
+  return map;
+}
+
+/**
+ * STAGE 3E: Writes proposals and ambiguous rows to the _Reconcile staging tab.
+ * Invariant: Transactions stays 100% UNTOUCHED.
+ * 
+ * Columns:
+ * ✓ (checkbox) · date · account · Тип · amount · merchant · proposed category · proposed bucket · confidence · source_row · status
+ * 
+ * Option B Dual-Sided Features:
+ * - Expenses (positive amount, type 'Расходы')
+ * - Credits (negative amount, type 'Получение денег' — Allianz, Carousell, returns)
+ * - Ambiguous rows surfaced with status 'ambiguous' and candidate rows in source_row
+ * - Inline category dropdown validation
+ * - Soft mint green tint on credit rows, soft amber tint on ambiguous rows
+ * 
+ * @param {Array<Object>} proposals - Proposed transactions from filterNonSpend.
+ * @param {Array<Object>} [ambiguous] - Ambiguous transactions from findMissing.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSpreadsheet] - Target spreadsheet instance.
+ * @param {Array<Object>} [optLedgerRows] - Optional pre-read ledger rows for merchant category learning.
+ * @return {Object} Summary { stagedCount, proposalsCount, ambiguousCount, sheet }.
+ */
+function stageProposals(proposals, ambiguous, optSpreadsheet, optLedgerRows) {
+  const spreadsheet = optSpreadsheet || SpreadsheetApp.getActiveSpreadsheet();
+  if (!spreadsheet) {
+    throw new Error('stageProposals: No spreadsheet instance available.');
+  }
+
+  const cleanProposals = Array.isArray(proposals) ? proposals : [];
+  const ambiguousRows = Array.isArray(ambiguous) ? ambiguous : [];
+
+  // 1. Get or create the _Reconcile staging tab
+  let sheet = spreadsheet.getSheetByName(RECONCILE_STAGING_TAB_NAME);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(RECONCILE_STAGING_TAB_NAME);
+  }
+
+  // 2. Clear existing sheet contents and validations
+  sheet.clear();
+  sheet.clearConditionalFormatRules();
+
+  // Enforce plain text '@' format across entire Column B (date) so Sheets never coerces date strings to Date objects
+  sheet.getRange(1, 2, sheet.getMaxRows(), 1).setNumberFormat('@');
+  SpreadsheetApp.flush();
+
+  // 3. Define 11 required columns
+  const headers = [
+    '✓',
+    'date',
+    'account',
+    'Тип',
+    'amount',
+    'merchant',
+    'proposed category',
+    'proposed bucket',
+    'confidence',
+    'source_row',
+    'status'
+  ];
+
+  // Set headers in row 1
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(1, 1, 1, headers.length)
+    .setFontWeight('bold')
+    .setBackground('#1e293b')
+    .setFontColor('#ffffff')
+    .setHorizontalAlignment('center');
+  sheet.setFrozenRows(1);
+
+  if (cleanProposals.length === 0 && ambiguousRows.length === 0) {
+    Logger.log(`ℹ️ stageProposals: No rows to stage. Initialized empty "${RECONCILE_STAGING_TAB_NAME}" tab.`);
+    return { stagedCount: 0, proposalsCount: 0, ambiguousCount: 0, sheet: sheet };
+  }
+
+  // 4. Load runtime category bucket map and learned merchant category lookup
+  const catMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap(spreadsheet) : {};
+  const merchantCatMap = buildMerchantCategoryLookup(optLedgerRows);
+
+  // 5. Separate proposals into Expenses and Credits for clear visual and structural grouping
+  const expenseProposals = [];
+  const creditProposals = [];
+
+  for (let i = 0; i < cleanProposals.length; i++) {
+    const p = cleanProposals[i];
+    const amt = Number(p.amount !== undefined ? p.amount : p.raw_amount) || 0;
+    const type = String(p.type || '');
+    if (amt < 0 || type === 'Получение денег') {
+      creditProposals.push(p);
+    } else {
+      expenseProposals.push(p);
+    }
+  }
+
+  // Sorter by date ascending
+  const dateSorter = (a, b) => {
+    const da = typeof parseToDateObj === 'function' ? parseToDateObj(a.date) : null;
+    const db = typeof parseToDateObj === 'function' ? parseToDateObj(b.date) : null;
+    if (da && db) return da.getTime() - db.getTime();
+    return String(a.date || '').localeCompare(String(b.date || ''));
+  };
+
+  expenseProposals.sort(dateSorter);
+  creditProposals.sort(dateSorter);
+  const sortedAmbiguous = [...ambiguousRows].sort(dateSorter);
+
+  // Combine into structured staging queue
+  const stagingQueue = [];
+  for (const p of expenseProposals) stagingQueue.push({ item: p, status: 'proposed', isCredit: false });
+  for (const p of creditProposals) stagingQueue.push({ item: p, status: 'proposed', isCredit: true });
+  for (const amb of sortedAmbiguous) {
+    const isAmbCredit = (Number(amb.amount) < 0 || amb.type === 'Получение денег');
+    stagingQueue.push({ item: amb, status: 'ambiguous', isCredit: isAmbCredit });
+  }
+
+  const numRows = stagingQueue.length;
+  const rows2D = [];
+  const backgrounds = [];
+
+  for (let i = 0; i < numRows; i++) {
+    const entry = stagingQueue[i];
+    const r = entry.item;
+    const status = entry.status;
+    const isCredit = entry.isCredit;
+
+    const dateStr = typeof normalizeDateString === 'function'
+      ? normalizeDateString(r.date || r.raw_date)
+      : String(r.date || '').trim();
+    const accountStr = String(r.account || (typeof DEFAULT_ACCOUNT !== 'undefined' ? DEFAULT_ACCOUNT : 'DBS CC SGD')).trim();
+    const typeStr = isCredit ? 'Получение денег' : (r.type || 'Расходы');
+
+    // Amount: negative for credits, positive for expenses
+    let numAmt = Number(r.amount !== undefined ? r.amount : r.raw_amount) || 0;
+    if (isCredit && numAmt > 0) numAmt = -numAmt;
+    if (!isCredit && numAmt < 0) numAmt = Math.abs(numAmt);
+
+    const merchantStr = String(r.raw_merchant || r.merchant || r.where || '').trim();
+    const normMerchant = typeof normaliseWhere === 'function'
+      ? normaliseWhere(merchantStr)
+      : merchantStr.toLowerCase();
+
+    // Determine category:
+    // 1. Existing category on row
+    // 2. Learned category from ledger
+    // 3. Category from merchant aliases
+    // 4. Fallback to enricher / 'Другое'
+    let proposedCat = r.category || r.proposed_category || '';
+    if (!proposedCat && merchantCatMap.has(normMerchant)) {
+      proposedCat = merchantCatMap.get(normMerchant);
+    }
+    if (!proposedCat && typeof getMerchantAliases === 'function') {
+      const aliases = getMerchantAliases();
+      const alias = aliases[normMerchant];
+      if (alias && typeof alias === 'object' && alias.category) {
+        proposedCat = alias.category;
+      }
+    }
+    if (!proposedCat) {
+      proposedCat = 'Другое';
+    }
+
+    // Determine bucket via enricher or catMap
+    let proposedBucket = catMap ? catMap[proposedCat] : undefined;
+    if (!proposedBucket || proposedBucket === 'UNKNOWN') {
+      proposedBucket = (typeof CATEGORY_TO_BUCKET !== 'undefined' && CATEGORY_TO_BUCKET[proposedCat])
+        ? CATEGORY_TO_BUCKET[proposedCat]
+        : 'Wants';
+    }
+
+    // Confidence: 1.0 for confident proposals, 0.8 for default category, 0.5 for ambiguous
+    let confidenceVal = 1.0;
+    if (status === 'ambiguous') {
+      confidenceVal = 0.5;
+    } else if (proposedCat === 'Другое') {
+      confidenceVal = 0.8;
+    }
+
+    // Source Row: List candidates for ambiguous, or statement metadata for proposals
+    let sourceRowStr = '';
+    if (status === 'ambiguous') {
+      const candidates = r.candidates || [];
+      const candList = candidates.map((c, cIdx) => {
+        const cRow = c.row_index ? `Row ${c.row_index}` : `Cand ${cIdx + 1}`;
+        const cDate = c.date || '';
+        const cAmt = Number(c.amount || 0).toFixed(2);
+        const cWhere = c.where || c.merchant || '';
+        return `[${cRow}: ${cDate} S$${cAmt} "${cWhere}"]`;
+      }).join(', ');
+      sourceRowStr = `Ambiguous (${candidates.length} candidates): ${candList}`;
+    } else {
+      const rawTxnType = r.transaction_type ? ` (${r.transaction_type})` : '';
+      sourceRowStr = r.raw_merchant ? `Statement: "${r.raw_merchant}"${rawTxnType}` : `Statement row`;
+    }
+
+    // Row layout:
+    // 1:✓, 2:date, 3:account, 4:Тип, 5:amount, 6:merchant, 7:proposed category, 8:proposed bucket, 9:confidence, 10:source_row, 11:status
+    rows2D.push([
+      false,               // 1. ✓ (checkbox unchecked)
+      dateStr,             // 2. date
+      accountStr,          // 3. account
+      typeStr,             // 4. Тип
+      numAmt,              // 5. amount
+      merchantStr,         // 6. merchant
+      proposedCat,         // 7. proposed category
+      proposedBucket,      // 8. proposed bucket
+      confidenceVal,       // 9. confidence
+      sourceRowStr,        // 10. source_row
+      status               // 11. status
+    ]);
+
+    // Visual separation:
+    // - Credit rows: soft mint green (#f0fdf4)
+    // - Ambiguous rows: soft amber yellow (#fffbeb)
+    // - Expense proposals: clean white (#ffffff)
+    let rowBg = '#ffffff';
+    if (isCredit) {
+      rowBg = '#f0fdf4';
+    } else if (status === 'ambiguous') {
+      rowBg = '#fffbeb';
+    }
+    backgrounds.push(new Array(headers.length).fill(rowBg));
+  }
+
+  // Set Date column (Col 2) format to plain text '@' BEFORE setValues to prevent Sheets date coercion
+  sheet.getRange(2, 2, numRows, 1).setNumberFormat('@');
+
+  // 6. Batch write values and background colors
+  const dataRange = sheet.getRange(2, 1, numRows, headers.length);
+  dataRange.setValues(rows2D);
+  dataRange.setBackgrounds(backgrounds);
+
+  // Re-affirm plain text format on Date column
+  sheet.getRange(2, 2, numRows, 1).setNumberFormat('@');
+
+  // 7. Checkbox validation on Column 1
+  sheet.getRange(2, 1, numRows, 1).insertCheckboxes();
+
+  // 8. Number formatting on Column 5 (amount)
+  sheet.getRange(2, 5, numRows, 1).setNumberFormat('#,##0.00;[Red]-#,##0.00');
+
+  // 9. Alignments
+  sheet.getRange(2, 1, numRows, 1).setHorizontalAlignment('center'); // ✓
+  sheet.getRange(2, 2, numRows, 1).setHorizontalAlignment('center'); // date
+  sheet.getRange(2, 4, numRows, 1).setHorizontalAlignment('center'); // Тип
+  sheet.getRange(2, 5, numRows, 1).setHorizontalAlignment('right');  // amount
+  sheet.getRange(2, 8, numRows, 1).setHorizontalAlignment('center'); // proposed bucket
+  sheet.getRange(2, 9, numRows, 1).setHorizontalAlignment('center'); // confidence
+  sheet.getRange(2, 11, numRows, 1).setHorizontalAlignment('center'); // status
+
+  // 10. Inline Category Dropdown Validation on Column 7 (proposed category)
+  if (typeof CATEGORIES !== 'undefined' && Array.isArray(CATEGORIES)) {
+    const catRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(CATEGORIES, true)
+      .setAllowInvalid(true)
+      .build();
+    sheet.getRange(2, 7, numRows, 1).setDataValidation(catRule);
+  }
+
+  // 11. Set clean, readable column widths
+  const colWidths = [40, 95, 110, 130, 95, 220, 160, 110, 90, 320, 95];
+  for (let c = 0; c < colWidths.length; c++) {
+    sheet.setColumnWidth(c + 1, colWidths[c]);
+  }
+
+  SpreadsheetApp.flush();
+
+  Logger.log(`✅ [STAGE 3E] Staged ${numRows} rows into "${RECONCILE_STAGING_TAB_NAME}" (${cleanProposals.length} proposals, ${ambiguousRows.length} ambiguous).`);
+
+  return {
+    stagedCount: numRows,
+    proposalsCount: cleanProposals.length,
+    ambiguousCount: ambiguousRows.length,
+    sheet: sheet
+  };
+}
+
+/**
+ * End-to-end execution of Stages 3A -> 3E.
+ * Takes statement input, matches against the ledger, filters non-spend, and stages to _Reconcile.
+ * 
+ * CRITICAL INVARIANT:
+ * Transactions tab remains 100% UNTOUCHED.
+ * 
+ * @param {Blob|string|Object} statementInput - Bank statement Blob, CSV text, or parsed payload.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSpreadsheet] - Target spreadsheet instance.
+ * @return {Object} Reconciliation summary.
+ */
+function reconcileAndStage(statementInput, optSpreadsheet) {
+  const ss = optSpreadsheet || SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    throw new Error('reconcileAndStage: No spreadsheet available.');
+  }
+
+  // 3A: Parse statement
+  const parsed = (statementInput && typeof statementInput === 'object' && Array.isArray(statementInput.rows))
+    ? statementInput
+    : parseStatement(statementInput);
+
+  if (parsed.error && (!parsed.rows || parsed.rows.length === 0)) {
+    throw new Error(`reconcileAndStage: Statement parsing failed: ${parsed.message || parsed.error}`);
+  }
+
+  // 3B: Normalize statement rows
+  const normalizedStatementRows = normalizeRows(parsed.rows || []);
+
+  // 3C: Read Transactions ledger and match (PURE READ)
+  const ledgerRows = readLedgerRowsForReconciliation(ss);
+  const matchResult = findMissing(normalizedStatementRows, ledgerRows);
+
+  // 3D: Filter non-spend rows (Option B dual-sided)
+  const filterResult = filterNonSpend(matchResult.missing);
+
+  // 3E: Stage proposals & ambiguous rows
+  const stageResult = stageProposals(filterResult.proposals, matchResult.ambiguous, ss, ledgerRows);
+
+  return {
+    account: parsed.account,
+    period: parsed.period,
+    totalParsed: (parsed.rows || []).length,
+    normalizedCount: normalizedStatementRows.length,
+    matchedCount: matchResult.matched.length,
+    proposalsCount: filterResult.proposals.length,
+    ambiguousCount: matchResult.ambiguous.length,
+    excludedCount: filterResult.excluded.length,
+    stagedCount: stageResult.stagedCount
+  };
+}
