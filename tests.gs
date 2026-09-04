@@ -1268,150 +1268,198 @@ function test_commitStaged() {
   }
 
   // --------------------------------------------------------------------------
-  // SETUP: Populate sandbox _Reconcile staging tab with controlled test rows
+  // PRE-TEST CLEANUP: Remove any leftover test rows from prior runs in sandbox
   // --------------------------------------------------------------------------
-  Logger.log('--- Setting up _Reconcile test rows on Sandbox ---');
-  let stagingSheet = ss.getSheetByName(RECONCILE_STAGING_TAB_NAME);
-  if (!stagingSheet) {
-    stagingSheet = ss.insertSheet(RECONCILE_STAGING_TAB_NAME);
+  const initialTransLastRow = transSheet.getLastRow();
+  if (initialTransLastRow >= 2) {
+    const scanCount = Math.min(initialTransLastRow - 1, 50);
+    const startScanRow = initialTransLastRow - scanCount + 1;
+    const tailRows = transSheet.getRange(startScanRow, 1, scanCount, 9).getValues();
+    for (let i = tailRows.length - 1; i >= 0; i--) {
+      const row = tailRows[i];
+      const rDate = (typeof formatSheetDate === 'function') ? formatSheetDate(row[0]) : String(row[0] || '');
+      const rAcc = String(row[1] || '').trim();
+      const rAmt = Math.abs(Number(row[3]) || 0);
+      const rWhere = String(row[8] || '').trim().toLowerCase();
+      if (rAcc === 'DBS CC SGD' && (
+        (rDate === '11.08.2026' && Math.abs(rAmt - 30.00) < 0.01 && (rWhere === 'simplygo app' || rWhere === 'simplygo')) ||
+        (rDate === '18.08.2026' && Math.abs(rAmt - 270.00) < 0.01 && (rWhere === 'allianz reimbursement' || rWhere === 'allianz'))
+      )) {
+        const rowToDelete = startScanRow + i;
+        Logger.log(`[Pre-test Cleanup] Deleting leftover test row ${rowToDelete} from sandbox Transactions.`);
+        transSheet.deleteRow(rowToDelete);
+        SpreadsheetApp.flush();
+      }
+    }
   }
 
-  stagingSheet.clear();
-  stagingSheet.clearConditionalFormatRules();
-  stagingSheet.getRange(1, 2, stagingSheet.getMaxRows(), 1).setNumberFormat('@');
-  SpreadsheetApp.flush();
+  let transLastRowBeforeStep2 = 0;
 
-  const headers = [
-    '✓', 'date', 'account', 'Тип', 'amount', 'merchant',
-    'proposed category', 'proposed bucket', 'confidence', 'source_row', 'status'
-  ];
-  stagingSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  stagingSheet.setFrozenRows(1);
+  try {
+    // --------------------------------------------------------------------------
+    // SETUP: Populate sandbox _Reconcile staging tab with controlled test rows
+    // --------------------------------------------------------------------------
+    Logger.log('--- Setting up _Reconcile test rows on Sandbox ---');
+    let stagingSheet = ss.getSheetByName(RECONCILE_STAGING_TAB_NAME);
+    if (!stagingSheet) {
+      stagingSheet = ss.insertSheet(RECONCILE_STAGING_TAB_NAME);
+    }
 
-  const initialStagingRows = [
-    // Row 1: Ticked Expense Proposal
-    [true, '11.08.2026', 'DBS CC SGD', 'Расходы', 30.00, 'simplygo app', 'Транспорт', 'Needs', 1.0, 'Statement: "SIMPLYGO APP"', 'proposed'],
-    // Row 2: Ticked Credit Proposal (Option B dual-sided credit)
-    [true, '18.08.2026', 'DBS CC SGD', 'Получение денег', -270.00, 'allianz reimbursement', 'Медицина', 'Needs', 1.0, 'Statement: "ALLIANZ REIMBURSEMENT"', 'proposed'],
-    // Row 3: Unticked Ambiguous row
-    [false, '15.08.2026', 'DBS CC SGD', 'Расходы', 50.00, 'restaurant a', 'Рестораны', 'Wants', 0.5, 'Ambiguous (2 candidates)', 'ambiguous'],
-    // Row 4: Unticked Expense proposal
-    [false, '12.08.2026', 'DBS CC SGD', 'Расходы', 15.00, 'coffee shop', 'Рестораны', 'Wants', 0.8, 'Statement: "COFFEE SHOP"', 'proposed']
-  ];
+    stagingSheet.clear();
+    stagingSheet.clearConditionalFormatRules();
+    stagingSheet.getRange(1, 2, stagingSheet.getMaxRows(), 1).setNumberFormat('@');
+    SpreadsheetApp.flush();
 
-  stagingSheet.getRange(2, 1, 4, 11).setValues(initialStagingRows);
-  stagingSheet.getRange(2, 2, 4, 1).setNumberFormat('@');
-  stagingSheet.getRange(2, 1, 4, 1).insertCheckboxes();
-  stagingSheet.getRange(2, 1, 4, 1).setValues([[true], [true], [false], [false]]);
-  SpreadsheetApp.flush();
+    const headers = [
+      '✓', 'date', 'account', 'Тип', 'amount', 'merchant',
+      'proposed category', 'proposed bucket', 'confidence', 'source_row', 'status'
+    ];
+    stagingSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    stagingSheet.setFrozenRows(1);
 
-  // --------------------------------------------------------------------------
-  // STEP 1: DRY_RUN = true against the SANDBOX
-  // --------------------------------------------------------------------------
-  Logger.log('\n--- Step 1: DRY_RUN = true against the SANDBOX ---');
-  const transLastRowBeforeStep1 = transSheet.getLastRow();
-  Logger.log(`[Step 1] Initial Transactions.getLastRow(): ${transLastRowBeforeStep1}`);
+    const initialStagingRows = [
+      // Row 1: Ticked Expense Proposal
+      [true, '11.08.2026', 'DBS CC SGD', 'Расходы', 30.00, 'simplygo app', 'Транспорт', 'Needs', 1.0, 'Statement: "SIMPLYGO APP"', 'proposed'],
+      // Row 2: Ticked Credit Proposal (Option B dual-sided credit)
+      [true, '18.08.2026', 'DBS CC SGD', 'Получение денег', -270.00, 'allianz reimbursement', 'Медицина', 'Needs', 1.0, 'Statement: "ALLIANZ REIMBURSEMENT"', 'proposed'],
+      // Row 3: Unticked Ambiguous row
+      [false, '15.08.2026', 'DBS CC SGD', 'Расходы', 50.00, 'restaurant a', 'Рестораны', 'Wants', 0.5, 'Ambiguous (2 candidates)', 'ambiguous'],
+      // Row 4: Unticked Expense proposal
+      [false, '12.08.2026', 'DBS CC SGD', 'Расходы', 15.00, 'coffee shop', 'Рестораны', 'Wants', 0.8, 'Statement: "COFFEE SHOP"', 'proposed']
+    ];
 
-  const step1Result = commitStaged(true, true); // useTestSheet=true, optDryRun=true
-  Logger.log(`[Step 1 DRY_RUN] Result: committed=${step1Result.committedCount}, skipped=${step1Result.skippedCount}, dryRun=${step1Result.dryRun}`);
-  Logger.log('[Step 1 DRY_RUN] Exact rows that would be appended:');
-  (step1Result.writtenRows || []).forEach((r, idx) => {
-    Logger.log(`  Row ${idx + 1}: Date=${r.date} | Account=${r.account} | Type=${r.type} | Amount=${r.amount} | Cat=${r.category} | Where=${r.where} | Notes="${r.notes}" | Bucket=${r.bucket}`);
-  });
+    stagingSheet.getRange(2, 1, 4, 11).setValues(initialStagingRows);
+    stagingSheet.getRange(2, 2, 4, 1).setNumberFormat('@');
+    stagingSheet.getRange(2, 1, 4, 1).insertCheckboxes();
+    stagingSheet.getRange(2, 1, 4, 1).setValues([[true], [true], [false], [false]]);
+    SpreadsheetApp.flush();
 
-  assertEq(step1Result.dryRun, true, 'Step 1: dryRun flag is true');
-  assertEq(step1Result.committedCount, 2, 'Step 1: Exactly 2 ticked rows would be committed');
-  assertEq(transSheet.getLastRow(), transLastRowBeforeStep1, 'Step 1: Zero writes to Transactions in dry run');
-  assertEq(step1Result.writtenRows[0].where, 'SimplyGo App', 'Step 1: Row 1 clean display name is "SimplyGo App"');
-  assertEq(step1Result.writtenRows[1].where, 'Allianz Reimbursement', 'Step 1: Row 2 clean display name is "Allianz Reimbursement"');
+    // --------------------------------------------------------------------------
+    // STEP 1: DRY_RUN = true against the SANDBOX
+    // --------------------------------------------------------------------------
+    Logger.log('\n--- Step 1: DRY_RUN = true against the SANDBOX ---');
+    const transLastRowBeforeStep1 = transSheet.getLastRow();
+    Logger.log(`[Step 1] Initial Transactions.getLastRow(): ${transLastRowBeforeStep1}`);
 
-  // Verify _Reconcile statuses are untouched in dry run
-  const stageDataStep1 = stagingSheet.getRange(2, 1, 4, 11).getValues();
-  assertEq(stageDataStep1[0][10], 'proposed', 'Step 1: Row 1 status remains "proposed" in dry run');
-  assertEq(stageDataStep1[1][10], 'proposed', 'Step 1: Row 2 status remains "proposed" in dry run');
+    const step1Result = commitStaged(true, true); // useTestSheet=true, optDryRun=true
+    Logger.log(`[Step 1 DRY_RUN] Result: committed=${step1Result.committedCount}, skipped=${step1Result.skippedCount}, dryRun=${step1Result.dryRun}`);
+    Logger.log('[Step 1 DRY_RUN] Exact rows that would be appended:');
+    (step1Result.writtenRows || []).forEach((r, idx) => {
+      Logger.log(`  Row ${idx + 1}: Date=${r.date} | Account=${r.account} | Type=${r.type} | Amount=${r.amount} | Cat=${r.category} | Where=${r.where} | Notes="${r.notes}" | Bucket=${r.bucket}`);
+    });
 
-  // --------------------------------------------------------------------------
-  // STEP 2: DRY_RUN = false against the SANDBOX
-  // --------------------------------------------------------------------------
-  Logger.log('\n--- Step 2: DRY_RUN = false against the SANDBOX ---');
-  const transLastRowBeforeStep2 = transSheet.getLastRow();
-  const step2Result = commitStaged(true, false); // useTestSheet=true, optDryRun=false
-  Logger.log(`[Step 2 NON-DRY-RUN] Result: committed=${step2Result.committedCount}, skipped=${step2Result.skippedCount}, dryRun=${step2Result.dryRun}`);
+    assertEq(step1Result.dryRun, true, 'Step 1: dryRun flag is true');
+    assertEq(step1Result.committedCount, 2, 'Step 1: Exactly 2 ticked rows would be committed');
+    assertEq(transSheet.getLastRow(), transLastRowBeforeStep1, 'Step 1: Zero writes to Transactions in dry run');
 
-  assertEq(step2Result.dryRun, false, 'Step 2: dryRun flag is false');
-  assertEq(step2Result.committedCount, 2, 'Step 2: Exactly 2 rows committed to Transactions');
-  assertEq(transSheet.getLastRow(), transLastRowBeforeStep2 + 2, 'Step 2: Transactions row count increased by exactly 2');
+    // Guard against undefined writtenRows (Point 3)
+    if (!step1Result.writtenRows || step1Result.writtenRows.length < 2) {
+      throw new Error(`Step 1 assertion failed: expected at least 2 writtenRows, got ${step1Result.writtenRows ? step1Result.writtenRows.length : 0} (committed=${step1Result.committedCount}, skipped=${step1Result.skippedCount}, dryRun=${step1Result.dryRun})`);
+    }
+    assertEq(step1Result.writtenRows[0].where, 'SimplyGo App', 'Step 1: Row 1 clean display name is "SimplyGo App"');
+    assertEq(step1Result.writtenRows[1].where, 'Allianz Reimbursement', 'Step 1: Row 2 clean display name is "Allianz Reimbursement"');
 
-  // Read the 2 newly appended rows
-  const newRow1Idx = transLastRowBeforeStep2 + 1;
-  const newRows = transSheet.getRange(newRow1Idx, 1, 2, 11).getValues();
-  const newFormulas = transSheet.getRange(newRow1Idx, 6, 2, 2).getFormulas();
+    // Verify _Reconcile statuses are untouched in dry run
+    const stageDataStep1 = stagingSheet.getRange(2, 1, 4, 11).getValues();
+    assertEq(stageDataStep1[0][10], 'proposed', 'Step 1: Row 1 status remains "proposed" in dry run');
+    assertEq(stageDataStep1[1][10], 'proposed', 'Step 1: Row 2 status remains "proposed" in dry run');
 
-  // Verification 2.1: Row 1 (Expense: simplygo app S$30.00)
-  const expRow = newRows[0];
-  const expDateStr = (typeof formatSheetDate === 'function') ? formatSheetDate(expRow[0]) : normalizeDateString(expRow[0]);
-  assertEq(expDateStr, '11.08.2026', 'Step 2: Expense date lands on correct calendar day ("11.08.2026")');
-  assertEq(expRow[1], 'DBS CC SGD', 'Step 2: Expense account is "DBS CC SGD"');
-  assertEq(expRow[2], 'Расходы', 'Step 2: Expense type is "Расходы"');
-  assertClose(Math.abs(Number(expRow[3])), 30.00, 0.01, 'Step 2: Expense amount is 30.00');
-  assertEq(expRow[7], 'Транспорт', 'Step 2: Expense category is "Транспорт"');
-  assertEq(expRow[8], 'SimplyGo App', 'Step 2: Expense merchant is clean display name "SimplyGo App"');
-  assertEq(expRow[9], '', 'Step 2: J (Notes) is EMPTY');
-  assertEq(expRow[10], 'Needs', 'Step 2: K holds the bucket ("Needs")');
+    // --------------------------------------------------------------------------
+    // STEP 2: DRY_RUN = false against the SANDBOX
+    // --------------------------------------------------------------------------
+    Logger.log('\n--- Step 2: DRY_RUN = false against the SANDBOX ---');
+    transLastRowBeforeStep2 = transSheet.getLastRow();
+    const step2Result = commitStaged(true, false); // useTestSheet=true, optDryRun=false
+    Logger.log(`[Step 2 NON-DRY-RUN] Result: committed=${step2Result.committedCount}, skipped=${step2Result.skippedCount}, dryRun=${step2Result.dryRun}`);
 
-  // Formulas present on Expense
-  assertEq(newFormulas[0][0].length > 0, true, 'Step 2: Expense has formula in F (На счете до)');
-  assertEq(newFormulas[0][1].length > 0, true, 'Step 2: Expense has formula in G (На счете после)');
+    assertEq(step2Result.dryRun, false, 'Step 2: dryRun flag is false');
+    assertEq(step2Result.committedCount, 2, 'Step 2: Exactly 2 rows committed to Transactions');
+    assertEq(transSheet.getLastRow(), transLastRowBeforeStep2 + 2, 'Step 2: Transactions row count increased by exactly 2');
 
-  // Verification 2.2: Row 2 (Credit: allianz reimbursement S$270.00)
-  const creditRow = newRows[1];
-  const creditDateStr = (typeof formatSheetDate === 'function') ? formatSheetDate(creditRow[0]) : normalizeDateString(creditRow[0]);
-  assertEq(creditDateStr, '18.08.2026', 'Step 2: Credit date lands on correct calendar day ("18.08.2026")');
-  assertEq(creditRow[1], 'DBS CC SGD', 'Step 2: Credit account is "DBS CC SGD"');
-  assertEq(creditRow[2], 'Получение денег', 'Step 2: Credit type is "Получение денег"');
-  assertEq(creditRow[8], 'Allianz Reimbursement', 'Step 2: Credit merchant is clean display name "Allianz Reimbursement"');
-  assertEq(creditRow[9], '', 'Step 2: Credit J (Notes) is EMPTY');
-  assertEq(creditRow[10], 'Needs', 'Step 2: Credit K holds the bucket ("Needs")');
+    // Read the 2 newly appended rows
+    const newRow1Idx = transLastRowBeforeStep2 + 1;
+    const newRows = transSheet.getRange(newRow1Idx, 1, 2, 11).getValues();
+    const newFormulas = transSheet.getRange(newRow1Idx, 6, 2, 2).getFormulas();
 
-  // Formulas present on Credit
-  assertEq(newFormulas[1][0].length > 0, true, 'Step 2: Credit has formula in F (На счете до)');
-  assertEq(newFormulas[1][1].length > 0, true, 'Step 2: Credit has formula in G (На счете после)');
+    // Verification 2.1: Row 1 (Expense: simplygo app S$30.00)
+    const expRow = newRows[0];
+    const expDateStr = (typeof formatSheetDate === 'function') ? formatSheetDate(expRow[0]) : normalizeDateString(expRow[0]);
+    assertEq(expDateStr, '11.08.2026', 'Step 2: Expense date lands on correct calendar day ("11.08.2026")');
+    assertEq(expRow[1], 'DBS CC SGD', 'Step 2: Expense account is "DBS CC SGD"');
+    assertEq(expRow[2], 'Расходы', 'Step 2: Expense type is "Расходы"');
+    assertClose(Math.abs(Number(expRow[3])), 30.00, 0.01, 'Step 2: Expense amount is 30.00');
+    assertEq(expRow[7], 'Транспорт', 'Step 2: Expense category is "Транспорт"');
+    assertEq(expRow[8], 'SimplyGo App', 'Step 2: Expense merchant is clean display name "SimplyGo App"');
+    assertEq(expRow[9], '', 'Step 2: J (Notes) is EMPTY');
+    assertEq(expRow[10], 'Needs', 'Step 2: K holds the bucket ("Needs")');
 
-  // Verify G ADDED rather than subtracted on Credit row
-  const creditBalBefore = Number(creditRow[5]) || 0;
-  const creditBalAfter = Number(creditRow[6]) || 0;
-  Logger.log(`[Step 2 Balance Check] Credit row: F (before)=${creditBalBefore}, G (after)=${creditBalAfter}, diff=${creditBalAfter - creditBalBefore}`);
-  assertEq(creditBalAfter > creditBalBefore, true, 'Step 2: Credit row Column G ADDED rather than subtracted (balance increased)');
-  assertClose(creditBalAfter - creditBalBefore, 270.00, 0.01, 'Step 2: Credit row Column G added exact amount (S$270.00)');
+    // Formulas present on Expense
+    assertEq(newFormulas[0][0].length > 0, true, 'Step 2: Expense has formula in F (На счете до)');
+    assertEq(newFormulas[0][1].length > 0, true, 'Step 2: Expense has formula in G (На счете после)');
 
-  // Verification 2.3: _Reconcile tab status updates
-  const stageDataStep2 = stagingSheet.getRange(2, 1, 4, 11).getValues();
-  assertEq(stageDataStep2[0][10], 'imported', 'Step 2: Row 1 status marked "imported" in _Reconcile');
-  assertEq(stageDataStep2[1][10], 'imported', 'Step 2: Row 2 status marked "imported" in _Reconcile');
-  assertEq(stageDataStep2[2][10], 'ambiguous', 'Step 2: Row 3 unticked ambiguous status remains "ambiguous"');
-  assertEq(stageDataStep2[3][10], 'proposed', 'Step 2: Row 4 unticked proposal status remains "proposed"');
+    // Verification 2.2: Row 2 (Credit: allianz reimbursement S$270.00)
+    const creditRow = newRows[1];
+    const creditDateStr = (typeof formatSheetDate === 'function') ? formatSheetDate(creditRow[0]) : normalizeDateString(creditRow[0]);
+    assertEq(creditDateStr, '18.08.2026', 'Step 2: Credit date lands on correct calendar day ("18.08.2026")');
+    assertEq(creditRow[1], 'DBS CC SGD', 'Step 2: Credit account is "DBS CC SGD"');
+    assertEq(creditRow[2], 'Получение денег', 'Step 2: Credit type is "Получение денег"');
+    assertEq(creditRow[8], 'Allianz Reimbursement', 'Step 2: Credit merchant is clean display name "Allianz Reimbursement"');
+    assertEq(creditRow[9], '', 'Step 2: Credit J (Notes) is EMPTY');
+    assertEq(creditRow[10], 'Needs', 'Step 2: Credit K holds the bucket ("Needs")');
 
-  // --------------------------------------------------------------------------
-  // STEP 3: Re-run against the sandbox — must import NOTHING (idempotency)
-  // --------------------------------------------------------------------------
-  Logger.log('\n--- Step 3: Re-run against the sandbox (Idempotency) ---');
-  const transLastRowBeforeStep3 = transSheet.getLastRow();
-  const step3Result = commitStaged(true, false);
-  Logger.log(`[Step 3 IDEMPOTENCY] Result: committed=${step3Result.committedCount}, skipped=${step3Result.skippedCount}`);
+    // Formulas present on Credit
+    assertEq(newFormulas[1][0].length > 0, true, 'Step 2: Credit has formula in F (На счете до)');
+    assertEq(newFormulas[1][1].length > 0, true, 'Step 2: Credit has formula in G (На счете после)');
 
-  assertEq(step3Result.committedCount, 0, 'Step 3: Idempotency re-run committed ZERO rows');
-  assertEq(transSheet.getLastRow(), transLastRowBeforeStep3, 'Step 3: Transactions row count is IDENTICAL (nothing imported)');
+    // Verify G ADDED rather than subtracted on Credit row
+    const creditBalBefore = Number(creditRow[5]) || 0;
+    const creditBalAfter = Number(creditRow[6]) || 0;
+    Logger.log(`[Step 2 Balance Check] Credit row: F (before)=${creditBalBefore}, G (after)=${creditBalAfter}, diff=${creditBalAfter - creditBalBefore}`);
+    assertEq(creditBalAfter > creditBalBefore, true, 'Step 2: Credit row Column G ADDED rather than subtracted (balance increased)');
+    assertClose(creditBalAfter - creditBalBefore, 270.00, 0.01, 'Step 2: Credit row Column G added exact amount (S$270.00)');
 
-  // --------------------------------------------------------------------------
-  // STEP 4: Live Sheet Safety Gate
-  // --------------------------------------------------------------------------
-  Logger.log('\n--- Step 4: Live Sheet Safety Gate ---');
-  const activeSs = SpreadsheetApp.getActiveSpreadsheet();
-  const sandboxId = typeof SHEET_FACTS !== 'undefined' ? SHEET_FACTS.TEST_SPREADSHEET_ID : '';
-  if (activeSs && sandboxId && activeSs.getId() !== sandboxId) {
-    Logger.log('✅ PASS: Active sheet is NOT sandbox; confirmed live sheet was not modified during test.');
+    // Verification 2.3: _Reconcile tab status updates
+    const stageDataStep2 = stagingSheet.getRange(2, 1, 4, 11).getValues();
+    assertEq(stageDataStep2[0][10], 'imported', 'Step 2: Row 1 status marked "imported" in _Reconcile');
+    assertEq(stageDataStep2[1][10], 'imported', 'Step 2: Row 2 status marked "imported" in _Reconcile');
+    assertEq(stageDataStep2[2][10], 'ambiguous', 'Step 2: Row 3 unticked ambiguous status remains "ambiguous"');
+    assertEq(stageDataStep2[3][10], 'proposed', 'Step 2: Row 4 unticked proposal status remains "proposed"');
+
+    // --------------------------------------------------------------------------
+    // STEP 3: Re-run against the sandbox — must import NOTHING (idempotency)
+    // --------------------------------------------------------------------------
+    Logger.log('\n--- Step 3: Re-run against the sandbox (Idempotency) ---');
+    const transLastRowBeforeStep3 = transSheet.getLastRow();
+    const step3Result = commitStaged(true, false);
+    Logger.log(`[Step 3 IDEMPOTENCY] Result: committed=${step3Result.committedCount}, skipped=${step3Result.skippedCount}`);
+
+    assertEq(step3Result.committedCount, 0, 'Step 3: Idempotency re-run committed ZERO rows');
+    assertEq(transSheet.getLastRow(), transLastRowBeforeStep3, 'Step 3: Transactions row count is IDENTICAL (nothing imported)');
+
+    // --------------------------------------------------------------------------
+    // STEP 4: Live Sheet Safety Gate
+    // --------------------------------------------------------------------------
+    Logger.log('\n--- Step 4: Live Sheet Safety Gate ---');
+    const activeSs = SpreadsheetApp.getActiveSpreadsheet();
+    const sandboxId = typeof SHEET_FACTS !== 'undefined' ? SHEET_FACTS.TEST_SPREADSHEET_ID : '';
+    if (activeSs && sandboxId && activeSs.getId() !== sandboxId) {
+      Logger.log('✅ PASS: Active sheet is NOT sandbox; confirmed live sheet was not modified during test.');
+    }
+    Logger.log('✅ PASS: All 4 steps of Stage 3F testing sequence verified on sandbox.');
+  } finally {
+    // --------------------------------------------------------------------------
+    // POST-TEST CLEANUP: Delete the rows appended during Step 2
+    // --------------------------------------------------------------------------
+    if (transSheet && transLastRowBeforeStep2 > 0) {
+      const finalTransLastRow = transSheet.getLastRow();
+      if (finalTransLastRow > transLastRowBeforeStep2) {
+        const rowsToDelete = finalTransLastRow - transLastRowBeforeStep2;
+        Logger.log(`[Post-test Cleanup] Deleting ${rowsToDelete} appended test row(s) (rows ${transLastRowBeforeStep2 + 1} to ${finalTransLastRow}) from sandbox Transactions.`);
+        transSheet.deleteRows(transLastRowBeforeStep2 + 1, rowsToDelete);
+        SpreadsheetApp.flush();
+      }
+    }
   }
-  Logger.log('✅ PASS: All 4 steps of Stage 3F testing sequence verified on sandbox.');
 
   Logger.log('\n=== test_commitStaged() Execution Finished ===');
 }

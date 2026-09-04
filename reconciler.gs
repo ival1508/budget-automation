@@ -2146,7 +2146,7 @@ function commitStaged(useTestSheet, optDryRun) {
     return {
       committedCount: writeResult.writtenCount,
       skippedCount: writeResult.skippedCount,
-      dryRun: Boolean(writeResult.dryRun),
+      dryRun: isDryRun,
       writtenRows: writeResult.writtenRows || []
     };
   } finally {
