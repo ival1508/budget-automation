@@ -1798,10 +1798,13 @@ function stageProposals(proposals, ambiguous, optSpreadsheet, optLedgerRows) {
     if (isCredit && numAmt > 0) numAmt = -numAmt;
     if (!isCredit && numAmt < 0) numAmt = Math.abs(numAmt);
 
-    const merchantStr = String(r.raw_merchant || r.merchant || r.where || '').trim();
+    const rawMerchant = String(r.merchant || r.raw_merchant || r.where || '').trim();
     const normMerchant = typeof normaliseWhere === 'function'
-      ? normaliseWhere(merchantStr)
-      : merchantStr.toLowerCase();
+      ? normaliseWhere(rawMerchant)
+      : rawMerchant.toLowerCase();
+    const merchantStr = typeof cleanMerchantDisplayName === 'function'
+      ? cleanMerchantDisplayName(rawMerchant)
+      : rawMerchant;
 
     // Determine category:
     // 1. Existing category on row
@@ -1989,3 +1992,165 @@ function reconcileAndStage(statementInput, optSpreadsheet) {
     stagedCount: stageResult.stagedCount
   };
 }
+
+/**
+ * STAGE 3F: Commit ticked rows from _Reconcile to Transactions.
+ * 
+ * The ONLY step in Stage 3 authorized to write to Transactions.
+ * Reads ticked rows (✓ = true) from the _Reconcile staging tab and appends them
+ * via the existing Phase-1 writer (appendTransactions in writer.gs).
+ * 
+ * Invariants:
+ * 1. Transactions Column A continues to store Date objects (writer.gs unchanged).
+ * 2. Credits (Получение денег) are written with correct type and magnitude so Column G adds to balance.
+ * 3. Notes (Col J) remains empty, Bucket (Col K) populated.
+ * 4. Successfully imported rows in _Reconcile are marked status = 'imported'.
+ * 5. Idempotent: rows with status = 'imported' are skipped on re-run.
+ * 6. Ambiguous rows are skipped unless explicitly ticked by the user.
+ * 
+ * @param {boolean} [useTestSheet=false] - If true, targets the sandbox spreadsheet.
+ * @param {boolean} [optDryRun] - Optional override for DRY_RUN mode.
+ * @return {Object} Commit summary { committedCount, skippedCount, dryRun, writtenRows }.
+ */
+function commitStaged(useTestSheet, optDryRun) {
+  const ss = (typeof getTargetSpreadsheet === 'function')
+    ? getTargetSpreadsheet(Boolean(useTestSheet))
+    : SpreadsheetApp.getActiveSpreadsheet();
+
+  if (!ss) {
+    throw new Error('commitStaged: No spreadsheet instance available.');
+  }
+
+  const isDryRun = (typeof optDryRun === 'boolean')
+    ? optDryRun
+    : (typeof SHEET_FACTS !== 'undefined' && Boolean(SHEET_FACTS.DRY_RUN));
+
+  const lock = LockService.getScriptLock();
+  const hasLock = lock.tryLock(30000);
+  if (!hasLock) {
+    throw new Error('commitStaged: Could not acquire script lock within 30 seconds.');
+  }
+
+  try {
+    const stagingSheet = ss.getSheetByName(RECONCILE_STAGING_TAB_NAME);
+    if (!stagingSheet) {
+      Logger.log(`ℹ️ commitStaged: No "${RECONCILE_STAGING_TAB_NAME}" staging tab found.`);
+      return { committedCount: 0, skippedCount: 0, dryRun: isDryRun, writtenRows: [] };
+    }
+
+    const lastRow = stagingSheet.getLastRow();
+    if (lastRow <= 1) {
+      Logger.log(`ℹ️ commitStaged: Staging tab "${RECONCILE_STAGING_TAB_NAME}" has no data rows.`);
+      return { committedCount: 0, skippedCount: 0, dryRun: isDryRun, writtenRows: [] };
+    }
+
+    // Read 11 columns across all data rows (Row 2 to lastRow)
+    // 1:✓, 2:date, 3:account, 4:Тип, 5:amount, 6:merchant, 7:proposed category, 8:proposed bucket, 9:confidence, 10:source_row, 11:status
+    const numRows = lastRow - 1;
+    const stagingData = stagingSheet.getRange(2, 1, numRows, 11).getValues();
+
+    // Inspect Column G formula in Transactions to determine credit magnitude handling
+    const transSheet = ss.getSheetByName('Transactions');
+    let gFormulaAddExpected = true;
+    if (transSheet && transSheet.getLastRow() >= 2) {
+      const sampleGFormula = String(transSheet.getRange(transSheet.getLastRow(), 7).getFormula() || '').toUpperCase();
+      Logger.log(`[commitStaged] Sample Column G formula in Transactions: "${sampleGFormula}"`);
+      // If formula is standard `=F - D` without type checking, negative amount is required for F - (-D) = F + D.
+      // If formula branches on type (e.g. IF(C="Получение денег", F + D, ...)), positive amount is required.
+      if (sampleGFormula.includes('ПОЛУЧЕНИЕ ДЕНЕГ') || sampleGFormula.includes('ДОХОД')) {
+        gFormulaAddExpected = true;
+      } else if (sampleGFormula.includes('-D') || sampleGFormula.includes('-E') || sampleGFormula.includes('- D') || sampleGFormula.includes('- E')) {
+        gFormulaAddExpected = false;
+      }
+    }
+
+    const toAppend = [];
+    const candidateRowIndices = []; // 1-based row index in stagingSheet for status update
+
+    for (let r = 0; r < stagingData.length; r++) {
+      const row = stagingData[r];
+      const isTicked = (row[0] === true);
+      const status = String(row[10] || '').trim().toLowerCase();
+
+      // Skip unticked rows
+      if (!isTicked) {
+        continue;
+      }
+
+      // Skip already imported rows (Idempotency safeguard)
+      if (status === 'imported') {
+        Logger.log(`[commitStaged] Row ${r + 2} skipped: already marked 'imported'.`);
+        continue;
+      }
+
+      const dateStr = String(row[1] || '').trim();
+      const accountStr = String(row[2] || (typeof DEFAULT_ACCOUNT !== 'undefined' ? DEFAULT_ACCOUNT : 'DBS CC SGD')).trim();
+      const typeStr = String(row[3] || 'Расходы').trim();
+      let rawAmt = Number(row[4]) || 0;
+      const rawMerchant = String(row[5] || '').trim();
+      const merchantStr = typeof cleanMerchantDisplayName === 'function'
+        ? cleanMerchantDisplayName(rawMerchant)
+        : rawMerchant;
+      const catStr = String(row[6] || 'Другое').trim();
+      const bucketStr = String(row[7] || 'Wants').trim();
+
+      const isCredit = (typeStr === 'Получение денег' || rawAmt < 0);
+
+      // Amount handling for Transactions:
+      // If credit, ensure amount sign matches formula expectation so G adds to running balance
+      let finalAmt = rawAmt;
+      if (isCredit) {
+        // If formula branches on type (+ D), amount should be positive.
+        // If formula is pure subtraction (F - D), amount should be negative.
+        finalAmt = gFormulaAddExpected ? Math.abs(rawAmt) : -Math.abs(rawAmt);
+      } else {
+        finalAmt = Math.abs(rawAmt);
+      }
+
+      toAppend.push({
+        date: dateStr,
+        account: accountStr,
+        type: isCredit ? 'Получение денег' : 'Расходы',
+        amount: finalAmt,
+        amount_sgd: finalAmt,
+        category: catStr,
+        where: merchantStr,
+        bucket: bucketStr,
+        notes: '',    // J (Notes) explicitly empty
+        flags: []     // No flags to keep Notes empty
+      });
+
+      candidateRowIndices.push(r + 2); // 1-based row in stagingSheet
+    }
+
+    if (toAppend.length === 0) {
+      Logger.log('ℹ️ commitStaged: No eligible ticked rows to commit.');
+      return { committedCount: 0, skippedCount: 0, dryRun: isDryRun, writtenRows: [] };
+    }
+
+    Logger.log(`[commitStaged] Preparing to commit ${toAppend.length} row(s) (dryRun=${isDryRun})...`);
+
+    // Call existing Phase-1 writer (appendTransactions)
+    const writeResult = appendTransactions(toAppend, ss, isDryRun);
+
+    // If not dry-run and rows were written, mark rows as 'imported' in _Reconcile
+    if (!isDryRun && writeResult.writtenCount > 0) {
+      for (let i = 0; i < candidateRowIndices.length; i++) {
+        const rowIdx = candidateRowIndices[i];
+        stagingSheet.getRange(rowIdx, 11).setValue('imported');
+      }
+      SpreadsheetApp.flush();
+      Logger.log(`✅ [commitStaged] Marked ${candidateRowIndices.length} row(s) as 'imported' in "${RECONCILE_STAGING_TAB_NAME}".`);
+    }
+
+    return {
+      committedCount: writeResult.writtenCount,
+      skippedCount: writeResult.skippedCount,
+      dryRun: Boolean(writeResult.dryRun),
+      writtenRows: writeResult.writtenRows || []
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+

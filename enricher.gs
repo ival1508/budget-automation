@@ -42,6 +42,81 @@ function normaliseWhere(where) {
 }
 
 /**
+ * Resolves a clean, human-readable display name for a merchant for Column I (Где).
+ * 1. Checks MERCHANT_ALIASES for a canonical name.
+ * 2. Falls back to smart title-casing of the merchant string.
+ * 
+ * @param {string} rawOrNormMerchant - Raw or normalized merchant string.
+ * @return {string} Properly capitalized, clean display name.
+ */
+function cleanMerchantDisplayName(rawOrNormMerchant) {
+  const str = String(rawOrNormMerchant || '').trim();
+  if (!str) return '';
+
+  // 1. Check MERCHANT_ALIASES
+  const normKey = typeof normaliseWhere === 'function' ? normaliseWhere(str) : str.toLowerCase();
+  if (typeof getMerchantAliases === 'function') {
+    try {
+      const aliases = getMerchantAliases();
+      if (aliases && aliases[normKey] && aliases[normKey].canonical) {
+        return aliases[normKey].canonical;
+      }
+    } catch (e) {
+      // Ignore alias lookup errors and proceed to title-case fallback
+    }
+  }
+
+  // 2. Fallback: Smart Title-Casing of the normalised string
+  return toSmartTitleCase(normKey || str);
+}
+
+/**
+ * Converts a merchant string into title case while respecting common brand names and acronyms.
+ * 
+ * @param {string} str - Raw or normalized merchant string.
+ * @return {string} Title-cased merchant string.
+ */
+function toSmartTitleCase(str) {
+  if (!str) return '';
+
+  const brandMap = {
+    'dbs': 'DBS',
+    'posb': 'POSB',
+    'citi': 'Citibank',
+    'citibank': 'Citibank',
+    'simplygo': 'SimplyGo',
+    'fairprice': 'Fair Price',
+    'ntuc': 'NTUC',
+    'sp': 'SP',
+    'mrt': 'MRT',
+    'nets': 'NETS',
+    'sgd': 'SGD',
+    'sg': 'SG',
+    'f&b': 'F&B',
+    'app': 'App',
+    'amazon': 'Amazon',
+    'grab': 'Grab',
+    'carousell': 'Carousell',
+    'allianz': 'Allianz'
+  };
+
+  // If the entire normalized string matches a brand
+  const lowerWhole = str.toLowerCase().trim();
+  if (brandMap[lowerWhole]) {
+    return brandMap[lowerWhole];
+  }
+
+  return str.split(/\s+/).map(word => {
+    const cleanWord = word.toLowerCase().replace(/[^a-z0-9&]/g, '');
+    if (brandMap[cleanWord]) {
+      return brandMap[cleanWord];
+    }
+    // Handle standard word capitalization
+    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+  }).join(' ');
+}
+
+/**
  * Retrieves the merchant alias mapping from Script Properties.
  * @return {Object} Dictionary of normalized raw names to preferred names / category metadata.
  */
