@@ -83,7 +83,7 @@ function handleCallbackQuery(callbackQuery) {
     }
 
     // Otherwise, proceed with normal clean write
-    const result = appendTransactions(transactions);
+    const result = appendTransactions(transactions, undefined, false);
 
     try {
       updateMerchantLearningStore(transactions);
@@ -326,7 +326,7 @@ function handleCallbackQuery(callbackQuery) {
           transactions[j].flags.push('force_add');
         }
       }
-      appendTransactions(transactions);
+      appendTransactions(transactions, undefined, false);
       
       // Update learning store for all items
       try {
@@ -358,7 +358,7 @@ function handleCallbackQuery(callbackQuery) {
       }
       
       if (cleanToLog.length > 0) {
-        appendTransactions(cleanToLog);
+        appendTransactions(cleanToLog, undefined, false);
         try {
           updateMerchantLearningStore(cleanToLog);
         } catch (e) {
@@ -427,7 +427,7 @@ function handleCallbackQuery(callbackQuery) {
     }
     
     if (cleanToLog.length > 0) {
-      appendTransactions(cleanToLog);
+      appendTransactions(cleanToLog, undefined, false);
       
       // Update learning store for approved items
       try {

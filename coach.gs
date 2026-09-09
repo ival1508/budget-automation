@@ -28,6 +28,10 @@ function buildCoachPayload(period, optSs) {
     days_to_positive: 0
   };
 
+  if (pacingData.error) {
+    return { period: p, error: pacingData.error, month_tab: pacingData.month_tab || '' };
+  }
+
   const pacing = typeof get503020Status === 'function' ? get503020Status(ss) : {};
   const todaySpend = typeof getTodaySpend === 'function' ? getTodaySpend(null, ss) : 0;
 
@@ -98,7 +102,6 @@ function buildCoachPayload(period, optSs) {
     .slice(0, 5);
 
   const isOverBudget = realisticDaily < 0;
-  const overBudgetBy = isOverBudget ? Number(Math.abs(realisticDaily).toFixed(2)) : 0;
 
   return {
     period: p,
@@ -109,7 +112,6 @@ function buildCoachPayload(period, optSs) {
     days_to_positive: daysToPositive,
     spend_today: spendToday,
     over_budget: isOverBudget,
-    over_budget_by: overBudgetBy,
     buckets: buckets,
     target_header: String(pacing.target_header || ''),
     categories_over_target: categoriesOverTarget,
@@ -199,6 +201,7 @@ function getCurrentMonthCategorySplits(ss) {
  */
 function generateCoachBrief(payload) {
   const ctx = payload || buildCoachPayload('daily');
+  if (ctx.error) return buildFallbackCoachBrief(ctx);
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY property is missing in Script Properties.');
@@ -208,7 +211,7 @@ function generateCoachBrief(payload) {
 
 Structure as bullet points:
 • <b>Pace:</b> State the reality check on pace and allowance:
-  - If realistic_daily is negative (or over_budget is true): do NOT state a daily allowance. Say the month's budget is already spent and name the overspend amount from over_budget_by, e.g. "You're <b>S$104</b> past the month's budget with 2 days left." NEVER present a negative number as a daily allowance or a "daily deficit".
+  - If realistic_daily is negative (or over_budget is true): do NOT state a daily allowance. Say the month's budget is already spent and state days_left_in_month. Do not quote a total overspend: realistic_daily is per day and no monthly overspend amount is supplied. NEVER present a negative number as a daily allowance or a "daily deficit".
   - If realistic_daily is positive:
     * If cumulative_today is negative: state plainly how far behind pace they are and how to clear it (e.g. "You're <b>S$88</b> behind pace (one zero-spend day clears it), leaving <b>S$110.63</b>/day for the last 2 days.").
     * NEVER use a minus sign in prose (write "S$88 behind pace", NEVER "-S$88" or "behind pace at -87.81").
@@ -216,8 +219,8 @@ Structure as bullet points:
 • <b>Watch:</b> Name at most 2 categories from categories_over_target — the largest discretionary overspend first. Do not list every category.
   - If committed_spend > 0: quote the discretionary portion and note the rest is committed (e.g. "<i>Транспорт</i> is over target, though S$2,707 is the car loan; S$786 was discretionary.").
   - If committed_spend == 0: quote actual vs target (e.g. "<i>Развлечения</i> is at S$1,892 vs a S$450 target.").
-  - Never imply the user can cut a committed cost. If categories_over_target is empty, omit this bullet or state categories are within target.
-• <b>Action:</b> End with one concrete instruction, never a motivational sign-off (e.g. "Zero out discretionary spending for the next 2 days to stop the deficit." or "Cap dining out at S$50 today to preserve your daily allowance."). NEVER end with motivational sign-offs like "finish the month strong", "keep up the great work", or "you've got this".
+  - Never imply the user can cut a committed cost. If categories_over_target is empty, omit this bullet; an empty filtered list does not prove all categories are within target.
+• <b>Action:</b> End with one concrete instruction, never a motivational sign-off (e.g. "Zero out discretionary spending for the next 2 days to stop the deficit." or "Keep today’s discretionary spending within the supplied realistic_daily allowance."). NEVER end with motivational sign-offs like "finish the month strong", "keep up the great work", or "you've got this".
 
 Rules:
 - USE ONLY numbers present in the JSON. Never compute, infer, extrapolate or invent figures.
@@ -243,12 +246,15 @@ Rules:
     }
   };
 
-  Logger.log(`Generating Coach Brief via Gemini (Target: ${typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.6-flash'})...`);
+  const targetModel = typeof COACH_MODEL_ID !== 'undefined' ? COACH_MODEL_ID : 'gemini-3.8-flash';
+  Logger.log(`Generating Coach Brief via Gemini (Target: ${targetModel})...`);
+  const coachStart = Date.now();
   try {
-    const apiResult = callGeminiApiWithRetry(apiPayload, apiKey);
+    const apiResult = callGeminiApiWithRetry(apiPayload, apiKey, targetModel);
     const responseText = typeof apiResult === 'object' ? apiResult.text : apiResult;
-    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : (typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.6-flash');
-    Logger.log(`Coach Brief successfully generated by model: ${modelUsed}`);
+    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : targetModel;
+    const elapsedMs = (typeof apiResult === 'object' && apiResult.elapsedTimeMs) ? apiResult.elapsedTimeMs : (Date.now() - coachStart);
+    Logger.log(`Coach Brief successfully generated by model: ${modelUsed} in ${elapsedMs}ms`);
 
     const responseJson = JSON.parse(responseText);
     const textOutput = responseJson.candidates &&
@@ -261,6 +267,10 @@ Rules:
       let cleaned = textOutput.trim();
       // Ensure any markdown **bold** is converted to <b>bold</b> for Telegram HTML
       cleaned = cleaned.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+      if (!coachMoneyIsGrounded(cleaned, ctx)) {
+        Logger.log('Coach returned a money amount absent from the payload; using grounded fallback.');
+        return buildFallbackCoachBrief(ctx);
+      }
       return cleaned;
     }
     Logger.log('Empty response from Gemini, using fallback brief.');
@@ -278,6 +288,28 @@ function generateDailyCoachBrief(contextJSON) {
   return generateCoachBrief(contextJSON || buildCoachPayload('daily'));
 }
 
+/** Reject generated monetary figures that cannot be traced to a money field. */
+function coachMoneyIsGrounded(text, payload) {
+  const allowed = new Set();
+  function add(value) {
+    if (typeof value !== 'number' || !isFinite(value)) return;
+    const amount = Math.abs(value);
+    allowed.add(Number(amount.toFixed(2)));
+    allowed.add(Math.round(amount));
+  }
+  ['cumulative_today', 'realistic_daily', 'flat_daily', 'spend_today'].forEach(key => add(payload[key]));
+  Object.values(payload.buckets || {}).forEach(bucket => { add(bucket.actual); add(bucket.target); });
+  (payload.categories_over_target || []).forEach(category => {
+    ['actual', 'target', 'over_by', 'discretionary_spend', 'committed_spend'].forEach(key => add(category[key]));
+  });
+  const plain = String(text || '').replace(/<[^>]*>/g, '');
+  const amounts = plain.matchAll(/(?:S\$|\$|SGD\s*)\s*(-?\d[\d,]*(?:\.\d+)?)/gi);
+  for (const match of amounts) {
+    if (!allowed.has(Number(match[1].replace(/,/g, '')))) return false;
+  }
+  return true;
+}
+
 /**
  * Fallback generator for coach brief if Gemini API call fails or capacity exceeds.
  * Generates dynamic, strictly grounded messages without hallucinations.
@@ -286,12 +318,15 @@ function generateDailyCoachBrief(contextJSON) {
  * @return {string} Short, dynamic fallback brief in Telegram HTML with bullet points.
  */
 function buildFallbackCoachBrief(payload) {
+  if (payload.error === 'missing_month') {
+    return "The current month's budget tab is missing; please create it before the next budget brief.";
+  }
+  if (payload.error) return 'Budget figures are unavailable; please check the sheet before planning today’s spending.';
   const cumulativeToday = Number(Number(payload.cumulative_today || 0).toFixed(2));
   const realisticDaily = Number(Number(payload.realistic_daily || 0).toFixed(2));
   const daysLeft = payload.days_left_in_month || 1;
   const daysToPositive = payload.days_to_positive || 0;
   const isOverBudget = Boolean(payload.over_budget || realisticDaily < 0);
-  const overBudgetBy = Number(Number(payload.over_budget_by || Math.abs(realisticDaily)).toFixed(2));
   const categoriesOver = (payload.categories_over_target || []).slice(0, 2);
 
   const formatSgd = (val, roundInt = false) => {
@@ -307,7 +342,7 @@ function buildFallbackCoachBrief(payload) {
   // Bullet 1: Pace & Runway
   let bullet1 = '';
   if (isOverBudget) {
-    bullet1 = `• <b>Pace:</b> You're <b>${formatSgd(overBudgetBy, true)}</b> past the month's budget with ${daysText} left.`;
+    bullet1 = `• <b>Pace:</b> The month's budget is already spent with ${daysText} left.`;
   } else if (cumulativeToday < 0) {
     const behindFormatted = formatSgd(cumulativeToday, true);
     const dayText = daysToPositive === 1 ? 'one zero-spend day clears it' : `${daysToPositive} zero-spend days clear it`;
@@ -429,7 +464,6 @@ function testCoachBriefScenarios() {
         days_to_positive: 1,
         spend_today: 429.00,
         over_budget: true,
-        over_budget_by: 103.92,
         buckets: basePacing,
         target_header: 'Target month',
         categories_over_target: [
@@ -568,12 +602,15 @@ Keep the tone concise, encouraging, and clear.`;
     }
   };
 
-  Logger.log('Generating Weekly Mandatory Audit report via Gemini...');
+  const targetModel = typeof COACH_MODEL_ID !== 'undefined' ? COACH_MODEL_ID : 'gemini-3.8-flash';
+  Logger.log(`Generating Weekly Mandatory Audit report via Gemini (Target: ${targetModel})...`);
+  const auditStart = Date.now();
   try {
-    const apiResult = callGeminiApiWithRetry(payload, apiKey);
+    const apiResult = callGeminiApiWithRetry(payload, apiKey, targetModel);
     const responseText = typeof apiResult === 'object' ? apiResult.text : apiResult;
-    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : (typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.6-flash');
-    Logger.log(`Weekly Mandatory Audit report generated by model: ${modelUsed}`);
+    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : targetModel;
+    const elapsedMs = (typeof apiResult === 'object' && apiResult.elapsedTimeMs) ? apiResult.elapsedTimeMs : (Date.now() - auditStart);
+    Logger.log(`Weekly Mandatory Audit report generated by model: ${modelUsed} in ${elapsedMs}ms`);
 
     const json = JSON.parse(responseText);
     const textOutput = json.candidates &&
@@ -669,12 +706,15 @@ MANDATORY HTML MESSAGE TEMPLATE:
     }
   };
 
-  Logger.log('Generating Monthly Coach Brief via Gemini...');
+  const targetModel = typeof COACH_MODEL_ID !== 'undefined' ? COACH_MODEL_ID : 'gemini-3.8-flash';
+  Logger.log(`Generating Monthly Coach Brief via Gemini (Target: ${targetModel})...`);
+  const monthlyStart = Date.now();
   try {
-    const apiResult = callGeminiApiWithRetry(payload, apiKey);
+    const apiResult = callGeminiApiWithRetry(payload, apiKey, targetModel);
     const responseText = typeof apiResult === 'object' ? apiResult.text : apiResult;
-    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : (typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'gemini-3.6-flash');
-    Logger.log(`Monthly Coach Brief generated by model: ${modelUsed}`);
+    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : targetModel;
+    const elapsedMs = (typeof apiResult === 'object' && apiResult.elapsedTimeMs) ? apiResult.elapsedTimeMs : (Date.now() - monthlyStart);
+    Logger.log(`Monthly Coach Brief generated by model: ${modelUsed} in ${elapsedMs}ms`);
 
     const json = JSON.parse(responseText);
     const textOutput = json.candidates &&

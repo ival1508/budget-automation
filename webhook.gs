@@ -6,6 +6,19 @@
  */
 
 /**
+ * Web App HTTP GET entry point.
+ * 
+ * @param {Object} e - Event object containing query parameters.
+ * @return {GoogleAppsScript.Content.TextOutput} JSON response.
+ */
+function doGet(e) {
+  // Health check only. Run diagnostics/tests from the Apps Script editor;
+  // this web app is publicly accessible and executes with the owner's access.
+  return ContentService.createTextOutput(JSON.stringify({ status: 'OK', message: 'Ready' }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
  * Main Web App HTTP POST entry point for Telegram webhook.
  * 
  * @param {Object} e - Event object containing postData and query parameters.

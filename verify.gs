@@ -321,10 +321,10 @@ function verifyStages012() {
   }
 
   // 4. Model Config
-  assert(typeof GEMINI_MODEL_ID !== 'undefined' && GEMINI_MODEL_ID === 'gemini-3.6-flash' &&
-         typeof BACKUP_MODEL_1 !== 'undefined' && BACKUP_MODEL_1 === 'gemini-3.5-flash-lite' &&
+  assert(typeof GEMINI_MODEL_ID !== 'undefined' && GEMINI_MODEL_ID === 'gemini-3.5-flash-lite' &&
+         typeof BACKUP_MODEL_1 !== 'undefined' && BACKUP_MODEL_1 === 'gemini-3.6-flash' &&
          typeof BACKUP_MODEL_2 !== 'undefined' && BACKUP_MODEL_2 === 'gemini-3.7-flash',
-         'Gemini model constants: 3.6-flash (primary) -> 3.5-flash-lite (b1) -> 3.7-flash (b2)',
+         'Gemini model constants: 3.5-flash-lite (default primary) -> 3.6-flash (b1) -> 3.7-flash (b2)',
          `Config: Primary=${typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'undefined'}`);
 
   // 5. Generate Coach Brief

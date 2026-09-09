@@ -67,6 +67,9 @@ function assertEq(actual, expected, label) {
     }
   }
 
+  if (!ok && !_testRunnerContext.active) {
+    throw new Error('Assertion failed: ' + (label || 'unnamed assertion'));
+  }
   return ok;
 }
 
@@ -113,6 +116,9 @@ function assertClose(actual, expected, toleranceOrLabel, optLabel) {
     }
   }
 
+  if (!ok && !_testRunnerContext.active) {
+    throw new Error('Assertion failed: ' + (label || 'unnamed assertion'));
+  }
   return ok;
 }
 
@@ -677,7 +683,7 @@ function test_findMissing() {
   assertEq(res2.matched.length, 1, 'Branch 2: Exactly 1 row in matched with 4 days drift');
   assertEq(res2.missing.length, 0, 'Branch 2: 0 rows in missing');
   assertEq(res2.ambiguous.length, 0, 'Branch 2: 0 rows in ambiguous');
-  assertEq(res2.matched[0].match_type, 'fuzzy', 'Branch 2: Match type is fuzzy');
+  assertEq(res2.matched[0].match_type, 'canonical', 'Branch 2: Match type is canonical');
 
   // --------------------------------------------------------------------------
   // BRANCH 3: NETS*FAIRPRICE vs Fair Price
@@ -1140,15 +1146,15 @@ function test_stageProposals() {
   assertEq(stagedLastRow, 4, 'Staging sheet has exactly 4 rows (1 header + 3 data rows)');
 
   // A. Verify headers
-  const headerRow = stagingSheet.getRange(1, 1, 1, 11).getValues()[0];
+  const headerRow = stagingSheet.getRange(1, 1, 1, 12).getValues()[0];
   const expectedHeaders = [
-    '✓', 'date', 'account', 'Тип', 'amount', 'merchant',
+    '✓', 'date', 'account', 'Cardholder', 'Тип', 'amount', 'merchant',
     'proposed category', 'proposed bucket', 'confidence', 'source_row', 'status'
   ];
-  assertEq(headerRow, expectedHeaders, 'Header row matches the exact 11 required columns');
+  assertEq(headerRow, expectedHeaders, 'Header row matches the exact 12 required columns');
 
   // B. Read staged data rows
-  const stagedData = stagingSheet.getRange(2, 1, 3, 11).getValues();
+  const stagedData = stagingSheet.getRange(2, 1, 3, 12).getValues();
 
   // Row 1: Clean Expense Proposal
   const expRow = stagedData[0];
@@ -1156,28 +1162,29 @@ function test_stageProposals() {
   assertEq(typeof expRow[1], 'string', 'Row 1 date is type STRING (not Date object)');
   assertEq(expRow[1], '11.08.2026', 'Row 1 date round-trips exactly as "11.08.2026" (not shifted by timezone)');
   assertEq(expRow[2], 'DBS CC SGD', 'Row 1: Account is DBS CC SGD');
-  assertEq(expRow[3], 'Расходы', 'Row 1: Тип is "Расходы"');
-  assertClose(Number(expRow[4]), 30.00, 0.01, 'Row 1: Amount is +30.00');
-  assertEq(Boolean(expRow[6]), true, 'Row 1: Proposed category is populated');
-  assertEq(Boolean(expRow[7]), true, 'Row 1: Proposed bucket is populated');
-  assertEq(expRow[10], 'proposed', 'Row 1: Status is "proposed"');
+  assertEq(expRow[3], 'Unknown', 'Row 1: Missing cardholder is not guessed as Val');
+  assertEq(expRow[4], 'Расходы', 'Row 1: Тип is "Расходы"');
+  assertClose(Number(expRow[5]), 30.00, 0.01, 'Row 1: Amount is +30.00');
+  assertEq(Boolean(expRow[7]), true, 'Row 1: Proposed category is populated');
+  assertEq(Boolean(expRow[8]), true, 'Row 1: Proposed bucket is populated');
+  assertEq(expRow[11], 'proposed', 'Row 1: Status is "proposed"');
 
   // Row 2: Option B Credit Proposal
   const creditRow = stagedData[1];
   assertEq(creditRow[0], false, 'Row 2: Checkbox is unchecked (false)');
   assertEq(typeof creditRow[1], 'string', 'Row 2 date is type STRING (not Date object)');
   assertEq(creditRow[1], '18.08.2026', 'Row 2 date round-trips exactly as "18.08.2026" (not shifted by timezone)');
-  assertEq(creditRow[3], 'Получение денег', 'Row 2: Option B Credit Тип is "Получение денег"');
-  assertClose(Number(creditRow[4]), -270.00, 0.01, 'Row 2: Amount is negative (-270.00)');
-  assertEq(creditRow[10], 'proposed', 'Row 2: Status is "proposed"');
+  assertEq(creditRow[4], 'Получение денег', 'Row 2: Option B Credit Тип is "Получение денег"');
+  assertClose(Number(creditRow[5]), -270.00, 0.01, 'Row 2: Amount is negative (-270.00)');
+  assertEq(creditRow[11], 'proposed', 'Row 2: Status is "proposed"');
 
   // Row 3: Ambiguous Row
   const ambRow = stagedData[2];
   assertEq(ambRow[0], false, 'Row 3: Checkbox is unchecked (false)');
   assertEq(typeof ambRow[1], 'string', 'Row 3 date is type STRING (not Date object)');
   assertEq(ambRow[1], '15.08.2026', 'Row 3 date round-trips exactly as "15.08.2026" (not shifted by timezone)');
-  assertEq(ambRow[10], 'ambiguous', 'Row 3: Status is "ambiguous" (surfaced without guessing)');
-  const ambSource = String(ambRow[9]);
+  assertEq(ambRow[11], 'ambiguous', 'Row 3: Status is "ambiguous" (surfaced without guessing)');
+  const ambSource = String(ambRow[10]);
   assertEq(
     ambSource.includes('Row 42') && ambSource.includes('Row 45'),
     true,
@@ -1210,8 +1217,8 @@ function test_stageProposals() {
     assertEq(e2eStagingSheet.getLastRow(), e2eResult.stagedCount + 1, 'Part 2: Staging tab row count matches stagedCount + 1 header');
 
     // Check all staged rows have valid status
-    const e2eData = e2eStagingSheet.getRange(2, 1, e2eResult.stagedCount, 11).getValues();
-    const allStatusesValid = e2eData.every(r => r[10] === 'proposed' || r[10] === 'ambiguous');
+    const e2eData = e2eStagingSheet.getRange(2, 1, e2eResult.stagedCount, 12).getValues();
+    const allStatusesValid = e2eData.every(r => r[11] === 'proposed' || r[11] === 'ambiguous');
     assertEq(allStatusesValid, true, 'Part 2: Every staged row has status "proposed" or "ambiguous"');
 
     // Check all staged rows have boolean checkboxes
@@ -1311,7 +1318,7 @@ function test_commitStaged() {
     SpreadsheetApp.flush();
 
     const headers = [
-      '✓', 'date', 'account', 'Тип', 'amount', 'merchant',
+      '✓', 'date', 'account', 'Cardholder', 'Тип', 'amount', 'merchant',
       'proposed category', 'proposed bucket', 'confidence', 'source_row', 'status'
     ];
     stagingSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -1319,16 +1326,16 @@ function test_commitStaged() {
 
     const initialStagingRows = [
       // Row 1: Ticked Expense Proposal
-      [true, '11.08.2026', 'DBS CC SGD', 'Расходы', 30.00, 'simplygo app', 'Транспорт', 'Needs', 1.0, 'Statement: "SIMPLYGO APP"', 'proposed'],
+      [true, '11.08.2026', 'DBS CC SGD', 'Val', 'Расходы', 30.00, 'simplygo app', 'Транспорт', 'Needs', 1.0, 'Statement: "SIMPLYGO APP"', 'proposed'],
       // Row 2: Ticked Credit Proposal (Option B dual-sided credit)
-      [true, '18.08.2026', 'DBS CC SGD', 'Получение денег', -270.00, 'allianz reimbursement', 'Медицина', 'Needs', 1.0, 'Statement: "ALLIANZ REIMBURSEMENT"', 'proposed'],
+      [true, '18.08.2026', 'DBS CC SGD', 'Rita', 'Получение денег', -270.00, 'allianz reimbursement', 'Медицина', 'Needs', 1.0, 'Statement: "ALLIANZ REIMBURSEMENT"', 'proposed'],
       // Row 3: Unticked Ambiguous row
-      [false, '15.08.2026', 'DBS CC SGD', 'Расходы', 50.00, 'restaurant a', 'Рестораны', 'Wants', 0.5, 'Ambiguous (2 candidates)', 'ambiguous'],
+      [false, '15.08.2026', 'DBS CC SGD', 'Grandparents', 'Расходы', 50.00, 'restaurant a', 'Рестораны', 'Wants', 0.5, 'Ambiguous (2 candidates)', 'ambiguous'],
       // Row 4: Unticked Expense proposal
-      [false, '12.08.2026', 'DBS CC SGD', 'Расходы', 15.00, 'coffee shop', 'Рестораны', 'Wants', 0.8, 'Statement: "COFFEE SHOP"', 'proposed']
+      [false, '12.08.2026', 'DBS CC SGD', 'Val', 'Расходы', 15.00, 'coffee shop', 'Рестораны', 'Wants', 0.8, 'Statement: "COFFEE SHOP"', 'proposed']
     ];
 
-    stagingSheet.getRange(2, 1, 4, 11).setValues(initialStagingRows);
+    stagingSheet.getRange(2, 1, 4, 12).setValues(initialStagingRows);
     stagingSheet.getRange(2, 2, 4, 1).setNumberFormat('@');
     stagingSheet.getRange(2, 1, 4, 1).insertCheckboxes();
     stagingSheet.getRange(2, 1, 4, 1).setValues([[true], [true], [false], [false]]);
@@ -1360,9 +1367,9 @@ function test_commitStaged() {
     assertEq(step1Result.writtenRows[1].where, 'Allianz Reimbursement', 'Step 1: Row 2 clean display name is "Allianz Reimbursement"');
 
     // Verify _Reconcile statuses are untouched in dry run
-    const stageDataStep1 = stagingSheet.getRange(2, 1, 4, 11).getValues();
-    assertEq(stageDataStep1[0][10], 'proposed', 'Step 1: Row 1 status remains "proposed" in dry run');
-    assertEq(stageDataStep1[1][10], 'proposed', 'Step 1: Row 2 status remains "proposed" in dry run');
+    const stageDataStep1 = stagingSheet.getRange(2, 1, 4, 12).getValues();
+    assertEq(stageDataStep1[0][11], 'proposed', 'Step 1: Row 1 status remains "proposed" in dry run');
+    assertEq(stageDataStep1[1][11], 'proposed', 'Step 1: Row 2 status remains "proposed" in dry run');
 
     // --------------------------------------------------------------------------
     // STEP 2: DRY_RUN = false against the SANDBOX
@@ -1419,11 +1426,11 @@ function test_commitStaged() {
     assertClose(creditBalAfter - creditBalBefore, 270.00, 0.01, 'Step 2: Credit row Column G added exact amount (S$270.00)');
 
     // Verification 2.3: _Reconcile tab status updates
-    const stageDataStep2 = stagingSheet.getRange(2, 1, 4, 11).getValues();
-    assertEq(stageDataStep2[0][10], 'imported', 'Step 2: Row 1 status marked "imported" in _Reconcile');
-    assertEq(stageDataStep2[1][10], 'imported', 'Step 2: Row 2 status marked "imported" in _Reconcile');
-    assertEq(stageDataStep2[2][10], 'ambiguous', 'Step 2: Row 3 unticked ambiguous status remains "ambiguous"');
-    assertEq(stageDataStep2[3][10], 'proposed', 'Step 2: Row 4 unticked proposal status remains "proposed"');
+    const stageDataStep2 = stagingSheet.getRange(2, 1, 4, 12).getValues();
+    assertEq(stageDataStep2[0][11], 'imported', 'Step 2: Row 1 status marked "imported" in _Reconcile');
+    assertEq(stageDataStep2[1][11], 'imported', 'Step 2: Row 2 status marked "imported" in _Reconcile');
+    assertEq(stageDataStep2[2][11], 'ambiguous', 'Step 2: Row 3 unticked ambiguous status remains "ambiguous"');
+    assertEq(stageDataStep2[3][11], 'proposed', 'Step 2: Row 4 unticked proposal status remains "proposed"');
 
     // --------------------------------------------------------------------------
     // STEP 3: Re-run against the sandbox — must import NOTHING (idempotency)
@@ -1484,7 +1491,7 @@ function test_cleanMerchantDisplayName() {
     { input: 'dbs bill payment', expected: 'DBS Bill Payment' },
     { input: 'citi phone banking', expected: 'Citibank Phone Banking' },
     { input: 'carousell sale', expected: 'Carousell Sale' },
-    { input: 'amazon sg', expected: 'Amazon SG' },
+    { input: 'amazon sg', expected: 'Amazon' },
     { input: 'sp services', expected: 'SP Services' },
     { input: 'mrt tops', expected: 'MRT Tops' },
     { input: '', expected: '' }
@@ -1506,4 +1513,909 @@ function test_cleanMerchantDisplayName() {
   Logger.log('\n✅ All cleanMerchantDisplayName tests passed.');
   Logger.log('=== test_cleanMerchantDisplayName() Execution Finished ===');
 }
+
+/**
+ * REGRESSION TEST: computeMerchantSimilarity threshold behaviour.
+ * Validates that substring matching properly discriminates between brand-leading prefixes,
+ * multi-word phrases (>= 2 words, ratio >= 0.30), substantial gateway substrings, and incidental location/sub-word tokens.
+ */
+function test_computeMerchantSimilarity() {
+  Logger.log('====================================================');
+  Logger.log('   TEST: test_computeMerchantSimilarity() EXECUTION');
+  Logger.log('====================================================\n');
+
+  // Case 1: Multi-word phrase inside truncated bank descriptor -> >= 0.80
+  const scoreSplAutoTopup = computeMerchantSimilarity("SPL AUTO TOPUP CONC (C", "Auto Topup");
+  Logger.log(`[Similarity] "SPL AUTO TOPUP CONC (C" vs "Auto Topup": ${scoreSplAutoTopup.toFixed(2)} (expected >= 0.80)`);
+  assertEq(scoreSplAutoTopup >= 0.80, true, 'SPL AUTO TOPUP CONC (C vs Auto Topup scores >= 0.80 (multi-word phrase)');
+
+  // Case 2: Incidental single-word location token inside hotel name -> < 0.70
+  const scoreLeMeridienShort = computeMerchantSimilarity("LE MERIDIEN PHUKET BEA PHUKET TH", "Phuket");
+  Logger.log(`[Similarity] "LE MERIDIEN PHUKET BEA PHUKET TH" vs "Phuket": ${scoreLeMeridienShort.toFixed(2)} (expected < 0.70)`);
+  assertEq(scoreLeMeridienShort < 0.70, true, 'LE MERIDIEN PHUKET BEA PHUKET TH vs Phuket scores < 0.70 (single-word location)');
+
+  // Case 3: Partial, unrelated shared token -> < 0.70
+  const scoreCaffeFernet = computeMerchantSimilarity("CAFFE FERNET SINGAPORE", "Fernet Branca");
+  Logger.log(`[Similarity] "CAFFE FERNET SINGAPORE" vs "Fernet Branca": ${scoreCaffeFernet.toFixed(2)} (expected < 0.70)`);
+  assertEq(scoreCaffeFernet < 0.70, true, 'CAFFE FERNET SINGAPORE vs Fernet Branca scores < 0.70 (partial unrelated token)');
+
+  // Case 4: Incidental location token with foreign currency string -> < 0.70
+  const scoreLeMeridien = computeMerchantSimilarity("LE MERIDIEN PHUKET BEA PHUKET TH THB 14,419.20", "Phuket");
+  Logger.log(`[Similarity] "LE MERIDIEN PHUKET...THB..." vs "Phuket": ${scoreLeMeridien.toFixed(2)} (expected < 0.70)`);
+  assertEq(scoreLeMeridien < 0.70, true, 'Le Meridien vs Phuket scores < 0.70 (incidental location token)');
+
+  // Case 5: Brand-leading prefix with descriptors -> >= 0.85
+  const scoreMcdonalds = computeMerchantSimilarity("Mcdonald's (psa) Singapore SG", "McDonald's");
+  Logger.log(`[Similarity] "Mcdonald's (psa) Singapore SG" vs "McDonald's": ${scoreMcdonalds.toFixed(2)} (expected >= 0.85)`);
+  assertEq(scoreMcdonalds >= 0.85, true, 'McDonalds PSA vs McDonalds scores >= 0.85 (brand-leading prefix)');
+
+  // Case 6: Brand-leading prefix with transaction code and country -> >= 0.85
+  const scoreSpotify = computeMerchantSimilarity("Spotify P466a9dde4 Stockholm Se", "Spotify");
+  Logger.log(`[Similarity] "Spotify P466a9dde4 Stockholm Se" vs "Spotify": ${scoreSpotify.toFixed(2)} (expected >= 0.85)`);
+  assertEq(scoreSpotify >= 0.85, true, 'Spotify descriptor vs Spotify scores >= 0.85 (brand-leading prefix)');
+
+  // Case 7: Gateway prefix with substantial length ratio and word boundary -> >= 0.85
+  const scoreLazada = computeMerchantSimilarity("2c2*lazada", "Lazada");
+  Logger.log(`[Similarity] "2c2*lazada" vs "Lazada": ${scoreLazada.toFixed(2)} (expected >= 0.85)`);
+  assertEq(scoreLazada >= 0.85, true, '2c2*lazada vs Lazada scores >= 0.85 (gateway prefix with ratio >= 0.50)');
+
+  // Case 8: Mid-word substring must NOT match -> < 0.70
+  const scoreCitibankBar = computeMerchantSimilarity("Citibank Singapore", "Bar");
+  Logger.log(`[Similarity] "Citibank Singapore" vs "Bar": ${scoreCitibankBar.toFixed(2)} (expected < 0.70)`);
+  assertEq(scoreCitibankBar < 0.70, true, 'Citibank Singapore vs Bar scores < 0.70 (sub-word token)');
+
+  Logger.log('\n✅ All computeMerchantSimilarity regression tests passed.');
+  Logger.log('=== test_computeMerchantSimilarity() Execution Finished ===');
+}
+
+/**
+ * TEST: Tier-3 Gemini Category Inference & Sampling.
+ * Tests:
+ * 1. sampleLedgerFewShotExamples: extracts representative merchants across distinct categories, excludes "Другое", respects validCategories.
+ * 2. inferCategoriesWithGeminiBatch: enforces constrained vocabulary, rejects unauthorized categories -> "Другое", graceful degradation when apiKey missing.
+ */
+function test_geminiTier3() {
+  Logger.log('====================================================');
+  Logger.log('      TEST: test_geminiTier3() EXECUTION');
+  Logger.log('====================================================\n');
+
+  const validCategories = [
+    'Продукты', 'Рестораны', 'Развлечения', 'Подписки',
+    'Счётчики', 'Транспорт', 'Красота', 'Медицина', 'Дом', 'Подарки', 'НКО', 'Другое',
+    'Extra fund', 'Отложения', 'Отложения (премия)', 'Лин', 'Квартира', 'Налоги',
+    'Школа & Детский сад', 'Отдых', 'Кредитка', 'Авто'
+  ];
+
+  // 1. Test sampleLedgerFewShotExamples
+  const mockLedger = [];
+  // Add 10 FairPrice (Продукты)
+  for (let i = 0; i < 10; i++) mockLedger.push({ where: 'FairPrice', category: 'Продукты' });
+  // Add 8 Grab (Транспорт)
+  for (let i = 0; i < 8; i++) mockLedger.push({ where: 'Grab', category: 'Транспорт' });
+  // Add 6 McDonald's (Рестораны)
+  for (let i = 0; i < 6; i++) mockLedger.push({ where: "McDonald's", category: 'Рестораны' });
+  // Add 5 Spotify (Подписки)
+  for (let i = 0; i < 5; i++) mockLedger.push({ where: 'Spotify', category: 'Подписки' });
+  // Add 4 SP Services (Счётчики)
+  for (let i = 0; i < 4; i++) mockLedger.push({ where: 'SP Services', category: 'Счётчики' });
+  // Add 20 "Unknown Shop" (Другое) -> Must be excluded!
+  for (let i = 0; i < 20; i++) mockLedger.push({ where: 'Unknown Shop', category: 'Другое' });
+  // Add 10 "Fake Category Merchant" -> Must be excluded since not in validCategories!
+  for (let i = 0; i < 10; i++) mockLedger.push({ where: 'Alien Merchant', category: 'НеизвестнаяКатегория' });
+
+  const sampled = sampleLedgerFewShotExamples(mockLedger, validCategories, 30);
+  Logger.log(`Sampled ${sampled.length} few-shot examples from mock ledger.`);
+
+  const sampledCategories = new Set(sampled.map(s => s.category));
+  const sampledMerchants = new Set(sampled.map(s => s.merchant));
+
+  assertEq(sampledMerchants.has('Unknown Shop'), false, 'sampleLedgerFewShotExamples excludes "Другое"');
+  assertEq(sampledMerchants.has('Alien Merchant'), false, 'sampleLedgerFewShotExamples excludes categories not in validCategories');
+  assertEq(sampledMerchants.has('FairPrice'), true, 'sampleLedgerFewShotExamples includes top frequency merchant FairPrice');
+  assertEq(sampledMerchants.has('Grab'), true, 'sampleLedgerFewShotExamples includes top frequency merchant Grab');
+  assertEq(sampledCategories.has('Продукты'), true, 'sampleLedgerFewShotExamples spans Продукты');
+  assertEq(sampledCategories.has('Транспорт'), true, 'sampleLedgerFewShotExamples spans Транспорт');
+  assertEq(sampledCategories.has('Рестораны'), true, 'sampleLedgerFewShotExamples spans Рестораны');
+  assertEq(sampledCategories.has('Подписки'), true, 'sampleLedgerFewShotExamples spans Подписки');
+  assertEq(sampledCategories.has('Счётчики'), true, 'sampleLedgerFewShotExamples spans Счётчики');
+
+  // 2. Test inferCategoriesWithGeminiBatch graceful degradation when no API key
+  const noKeyResult = inferCategoriesWithGeminiBatch(
+    [{ id: 1, raw_descriptor: 'TEST MERCHANT' }],
+    validCategories,
+    sampled,
+    null // null API key
+  );
+  assertEq(typeof noKeyResult === 'object' && Object.keys(noKeyResult).length === 0, true, 'inferCategoriesWithGeminiBatch returns empty map when apiKey is missing');
+
+  // 3. Test mock response parsing, category constraints, and clean display names
+  // Temporarily stub callGeminiApiWithRetry in global scope
+  const originalCallGemini = (typeof callGeminiApiWithRetry === 'function') ? callGeminiApiWithRetry : null;
+  const globalScope = (typeof globalThis !== 'undefined') ? globalThis : this;
+
+  globalScope.callGeminiApiWithRetry = function(payload, apiKey, preferredModel) {
+    return {
+      text: JSON.stringify({
+        candidates: [{
+          content: {
+            parts: [{
+              text: JSON.stringify([
+                {
+                  id: 1,
+                  raw_descriptor: "LE MERIDIEN PHUKET BEA PHUKET TH THB 14,419.20",
+                  clean_display_name: "Le Meridien Phuket",
+                  category: "Отдых"
+                },
+                {
+                  id: 2,
+                  raw_descriptor: "SPOTIFY P466A9DDE4 STOCKHOLM SE",
+                  clean_display_name: "Spotify",
+                  category: "Подписки"
+                },
+                {
+                  id: 3,
+                  raw_descriptor: "WEIRD MERCHANT XYZ",
+                  clean_display_name: "Weird Merchant",
+                  category: "IllegalCategoryNotAllowed"
+                }
+              ])
+            }]
+          }
+        }]
+      })
+    };
+  };
+
+  try {
+    const unknownItems = [
+      { id: 1, raw_descriptor: "LE MERIDIEN PHUKET BEA PHUKET TH THB 14,419.20" },
+      { id: 2, raw_descriptor: "SPOTIFY P466A9DDE4 STOCKHOLM SE" },
+      { id: 3, raw_descriptor: "WEIRD MERCHANT XYZ" }
+    ];
+
+    const batchRes = inferCategoriesWithGeminiBatch(unknownItems, validCategories, sampled, 'dummy_key');
+    const key1 = typeof normaliseWhere === 'function' ? normaliseWhere("LE MERIDIEN PHUKET BEA PHUKET TH THB 14,419.20") : "le meridien phuket bea phuket th thb 14,419.20";
+    const key2 = typeof normaliseWhere === 'function' ? normaliseWhere("SPOTIFY P466A9DDE4 STOCKHOLM SE") : "spotify p466a9dde4 stockholm se";
+    const key3 = typeof normaliseWhere === 'function' ? normaliseWhere("WEIRD MERCHANT XYZ") : "weird merchant xyz";
+
+    assertEq(batchRes[key1] && batchRes[key1].category, 'Отдых', 'Gemini classifies Le Meridien Phuket as Отдых');
+    assertEq(batchRes[key1] && batchRes[key1].clean_display_name, 'Le Meridien Phuket', 'Gemini extracts clean display name "Le Meridien Phuket"');
+    assertEq(batchRes[key2] && batchRes[key2].category, 'Подписки', 'Gemini classifies Spotify as Подписки');
+    assertEq(batchRes[key3] && batchRes[key3].category, 'Другое', 'Gemini rejects unauthorized category to "Другое"');
+    assertEq(batchRes[key3] && batchRes[key3].rejected, true, 'Gemini marks unauthorized category as rejected');
+  } finally {
+    if (originalCallGemini) {
+      globalScope.callGeminiApiWithRetry = originalCallGemini;
+    } else {
+      delete globalScope.callGeminiApiWithRetry;
+    }
+  }
+
+  Logger.log('Tier-3 assertions completed; see runner summary for pass/fail.');
+  Logger.log('=== test_geminiTier3() Execution Finished ===');
+}
+
+/**
+ * TEST: Ambiguous rows inference pipeline.
+ * Asserts that ambiguous rows pass through the full Tier 1/2/3 inference pipeline:
+ * - Merchant receives clean display name (e.g. from matched ledger merchant or Gemini)
+ * - Category and bucket are inferred
+ * - Status remains 'ambiguous'
+ * - Confidence remains 0.5
+ * - Candidate ledger rows remain formatted in source_row
+ */
+function test_ambiguousInferencePipeline() {
+  Logger.log('====================================================');
+  Logger.log('  TEST: test_ambiguousInferencePipeline() EXECUTION');
+  Logger.log('====================================================\n');
+
+  let stagedData = [];
+  const createMockRange = () => {
+    const range = {
+      setNumberFormat: () => range,
+      setValues: (vals) => { stagedData = vals; return range; },
+      getValues: () => [],
+      setBackground: () => range,
+      setFontWeight: () => range,
+      setFontColor: () => range,
+      setHorizontalAlignment: () => range,
+      setBackgrounds: () => range,
+      insertCheckboxes: () => range,
+      setDataValidation: () => range
+    };
+    return range;
+  };
+
+  const mockSpreadsheet = {
+    getSheetByName: () => ({
+      clear: () => {},
+      clearConditionalFormatRules: () => {},
+      getRange: () => createMockRange(),
+      getLastRow: () => 0,
+      getLastColumn: () => 0,
+      getMaxRows: () => 100,
+      setFrozenRows: () => {},
+      setColumnWidth: () => {}
+    })
+  };
+
+  const ambRows = [{
+    date: '11.08.2026',
+    amount: 20.00,
+    raw_amount: '20.00',
+    merchant: 'spl auto topup conc (c',
+    raw_merchant: 'SPL AUTO TOPUP CONC (C',
+    candidates: [{ row_index: 1850, date: '11.08.2026', amount: 20.00, where: 'Auto Topup' }]
+  }];
+
+  const mockLedger = [
+    { where: 'Auto Topup', category: 'Транспорт' },
+    { where: 'Auto Topup', category: 'Транспорт' },
+    { where: 'Auto Topup', category: 'Транспорт' }
+  ];
+
+  const result = stageProposals([], ambRows, mockSpreadsheet, mockLedger);
+
+  assertEq(result.ambiguousCount, 1, 'stageProposals staged exactly 1 ambiguous row');
+  assertEq(stagedData.length, 1, 'stagedData contains 1 row');
+
+  // Staged columns (12 columns):
+  // 1:✓, 2:date, 3:account, 4:Cardholder, 5:Тип, 6:amount, 7:merchant, 8:proposed category, 9:proposed bucket, 10:confidence, 11:source_row, 12:status
+  const [checked, date, account, cardholder, type, amt, merchant, cat, bucket, conf, sourceRow, status] = stagedData[0];
+
+  assertEq(merchant, 'Auto Topup', 'Ambiguous row receives clean display name "Auto Topup"');
+  assertEq(cat, 'Транспорт', 'Ambiguous row receives inferred category "Транспорт"');
+  assertEq(bucket, 'Needs', 'Ambiguous row receives inferred bucket "Needs"');
+  assertEq(conf, 0.5, 'Ambiguous row retains confidence 0.5');
+  assertEq(status, 'ambiguous', 'Ambiguous row retains status "ambiguous"');
+  assertEq(sourceRow.includes('Row 1850'), true, 'Ambiguous row retains candidates in source_row');
+
+  Logger.log('\n✅ All test_ambiguousInferencePipeline tests passed.');
+  Logger.log('=== test_ambiguousInferencePipeline() Execution Finished ===');
+}
+
+/**
+ * TEST: Grab Known Ambiguity & Conflict Checks.
+ * Asserts:
+ * 1. Differentiated Grab normalization:
+ *    - "GRAB* A-28082026", "WWW.GRAB.COM", "WWW.GRAB.COM BANGKOK" -> "grab"
+ *    - "GRABFOOD", "GRAB FOOD", "GRAB* FOOD" -> "grab food"
+ *    - "GRAB SUBSCRIPTION", "GRAB* SUBSCRIPTION" -> "grab subscription"
+ * 2. Clean display names:
+ *    - "grab" -> "Grab"
+ *    - "grab food" -> "Grab Food"
+ *    - "grab subscription" -> "Grab Subscription"
+ * 3. Merchants tab bad alias cleanup:
+ *    - cleanBadGrabAliasFromMerchantsTab deletes row with "Grab -> Рестораны"
+ * 4. Ledger history drives category (Транспорт for Grab rides, Рестораны for Grab Food):
+ *    - Tier 1 ledger match assigns category with confidence 0.9.
+ * 5. "WWW.GRAB.COM BANGKOK" is genuinely ambiguous from descriptor alone:
+ *    - Flagged with confidence 0.5 and note 'Grab Bangkok: ride vs food — verify'.
+ */
+function test_grabAmbiguityAndConflictCheck() {
+  Logger.log('====================================================');
+  Logger.log('  TEST: test_grabAmbiguityAndConflictCheck() EXECUTION');
+  Logger.log('====================================================\n');
+
+  // --- PART 1: Differentiated Grab Normalization & Clean Display Names ---
+  Logger.log('--- 1. Grab Normalization & Clean Display Names ---');
+  assertEq(normaliseWhere('GRAB* A-28082026'), 'grab', 'GRAB* A-... normalises to "grab"');
+  assertEq(normaliseWhere('WWW.GRAB.COM'), 'grab', 'WWW.GRAB.COM normalises to "grab"');
+  assertEq(normaliseWhere('WWW.GRAB.COM BANGKOK'), 'grab', 'WWW.GRAB.COM BANGKOK normalises to "grab"');
+  assertEq(normaliseWhere('Grab'), 'grab', 'Grab normalises to "grab"');
+  assertEq(normaliseWhere('GRABFOOD'), 'grab food', 'GRABFOOD normalises to "grab food"');
+  assertEq(normaliseWhere('GRAB FOOD'), 'grab food', 'GRAB FOOD normalises to "grab food"');
+  assertEq(normaliseWhere('GRAB* FOOD'), 'grab food', 'GRAB* FOOD normalises to "grab food"');
+  assertEq(normaliseWhere('Grab Food'), 'grab food', 'Grab Food normalises to "grab food"');
+  assertEq(normaliseWhere('GRAB SUBSCRIPTION'), 'grab subscription', 'GRAB SUBSCRIPTION normalises to "grab subscription"');
+  assertEq(normaliseWhere('GRAB* SUBSCRIPTION'), 'grab subscription', 'GRAB* SUBSCRIPTION normalises to "grab subscription"');
+
+  assertEq(cleanMerchantDisplayName('grab'), 'Grab', 'cleanMerchantDisplayName("grab") -> "Grab"');
+  assertEq(cleanMerchantDisplayName('grab food'), 'Grab Food', 'cleanMerchantDisplayName("grab food") -> "Grab Food"');
+  assertEq(cleanMerchantDisplayName('grab subscription'), 'Grab Subscription', 'cleanMerchantDisplayName("grab subscription") -> "Grab Subscription"');
+
+  // --- PART 2: Clean Bad Grab Alias from Merchants Tab ---
+  Logger.log('\n--- 2. Clean Bad Grab Alias from Merchants Tab ---');
+  let deletedRows = [];
+  const mockMerchantsSheet = {
+    getLastRow: () => 3,
+    getLastColumn: () => 5,
+    getRange: (r, c, nr, nc) => ({
+      getValues: () => [
+        ['McDonald\'s', 'Рестораны', 10, '01.09.2026', ''],
+        ['Grab', 'Рестораны', 1, '01.09.2026', 'GRAB* A-28082026'] // row 3 (simulating row 46)
+      ]
+    }),
+    deleteRow: (rowNum) => {
+      deletedRows.push(rowNum);
+    }
+  };
+  const mockSsForCleanup = {
+    getSheetByName: (name) => (name === 'Merchants' ? mockMerchantsSheet : null)
+  };
+  const cleanupResult = cleanBadGrabAliasFromMerchantsTab(mockSsForCleanup);
+  assertEq(cleanupResult, true, 'cleanBadGrabAliasFromMerchantsTab detected and deleted bad alias');
+  assertEq(deletedRows.includes(3), true, 'Deleted row containing "Grab -> Рестораны"');
+
+  // --- PART 3: Ledger Drives Category (Транспорт for rides, Рестораны for food) ---
+  Logger.log('\n--- 3. Ledger History Category Driving ---');
+  const ledgerStats = [
+    {
+      rawMerchant: 'Grab',
+      normMerchant: 'grab',
+      categoryCounts: { 'Транспорт': 63, 'Подписки': 9 },
+      bestCategory: 'Транспорт',
+      topCount: 63,
+      totalCount: 72
+    },
+    {
+      rawMerchant: 'Grab Food',
+      normMerchant: 'grab food',
+      categoryCounts: { 'Рестораны': 34 },
+      bestCategory: 'Рестораны',
+      topCount: 34,
+      totalCount: 34
+    }
+  ];
+
+  const rideInference = inferProposalCategory('GRAB* A-28082026', ledgerStats, [], {});
+  assertEq(rideInference.category, 'Транспорт', 'Grab ride infers Транспорт from ledger history');
+  assertEq(rideInference.confidence, 0.9, 'Grab ride gets Tier-1 confidence 0.9');
+
+  const foodInference = inferProposalCategory('GRABFOOD SINGAPORE', ledgerStats, [], {});
+  assertEq(foodInference.category, 'Рестораны', 'Grab Food infers Рестораны from ledger history');
+  assertEq(foodInference.confidence, 0.9, 'Grab Food gets Tier-1 confidence 0.9');
+
+  // --- PART 4: Proposal Staging & WWW.GRAB.COM BANGKOK Ambiguity ---
+  Logger.log('\n--- 4. Proposal Staging & Bangkok Ambiguity ---');
+  let stagedData = [];
+  let stagedBackgrounds = [];
+  const createMockRange = () => {
+    const range = {
+      setNumberFormat: () => range,
+      setValues: (vals) => { stagedData = vals; return range; },
+      getValues: () => [],
+      setBackground: () => range,
+      setFontWeight: () => range,
+      setFontColor: () => range,
+      setHorizontalAlignment: () => range,
+      setBackgrounds: (bgs) => { stagedBackgrounds = bgs; return range; },
+      insertCheckboxes: () => range,
+      setDataValidation: () => range
+    };
+    return range;
+  };
+
+  const mockSpreadsheet = {
+    getSheetByName: () => ({
+      clear: () => {},
+      clearConditionalFormatRules: () => {},
+      getRange: () => createMockRange(),
+      getLastRow: () => 0,
+      getLastColumn: () => 0,
+      getMaxRows: () => 100,
+      setFrozenRows: () => {},
+      setColumnWidth: () => {}
+    })
+  };
+
+  const mockLedger = [
+    { where: 'Grab', category: 'Транспорт' },
+    { where: 'Grab Food', category: 'Рестораны' }
+  ];
+
+  const testProposals = [
+    {
+      date: '28.08.2026',
+      amount: 18.50,
+      raw_amount: '18.50',
+      merchant: 'grab* a-28082026',
+      raw_merchant: 'GRAB* A-28082026',
+      type: 'Расходы'
+    },
+    {
+      date: '29.08.2026',
+      amount: 32.10,
+      raw_amount: '32.10',
+      merchant: 'grabfood',
+      raw_merchant: 'GRABFOOD',
+      type: 'Расходы'
+    },
+    {
+      date: '30.08.2026',
+      amount: 45.00,
+      raw_amount: '45.00',
+      merchant: 'www.grab.com bangkok',
+      raw_merchant: 'WWW.GRAB.COM BANGKOK',
+      type: 'Расходы'
+    }
+  ];
+
+  stageProposals(testProposals, [], mockSpreadsheet, mockLedger);
+  assertEq(stagedData.length, 3, 'Staged 3 proposals (Ride, Food, Bangkok)');
+
+  // Proposal 1: Ride -> Grab, Транспорт, conf 0.9
+  assertEq(stagedData[0][6], 'Grab', 'Proposal 1 clean merchant is "Grab"');
+  assertEq(stagedData[0][7], 'Транспорт', 'Proposal 1 category is "Транспорт"');
+  assertEq(stagedData[0][9], 0.9, 'Proposal 1 confidence is 0.9 (Tier 1 ledger match)');
+
+  // Proposal 2: Food -> Grab Food, Рестораны, conf 0.9
+  assertEq(stagedData[1][6], 'Grab Food', 'Proposal 2 clean merchant is "Grab Food"');
+  assertEq(stagedData[1][7], 'Рестораны', 'Proposal 2 category is "Рестораны"');
+  assertEq(stagedData[1][9], 0.9, 'Proposal 2 confidence is 0.9 (Tier 1 ledger match)');
+
+  // Proposal 3: Bangkok -> Conf 0.5, verification note
+  assertEq(stagedData[2][9], 0.5, 'Proposal 3 (Bangkok) flagged with confidence 0.5 for user decision');
+  assertEq(stagedData[2][10].includes('Grab Bangkok: ride vs food — verify'), true, 'Proposal 3 source_row has Grab Bangkok note');
+  assertEq(stagedBackgrounds[2][0], '#fffbeb', 'Proposal 3 receives soft amber background (#fffbeb)');
+
+  Logger.log('\n✅ All test_grabAmbiguityAndConflictCheck tests passed.');
+  Logger.log('=== test_grabAmbiguityAndConflictCheck() Execution Finished ===');
+}
+
+/**
+ * STAGE 3 TEST: Multi-Section DBS CSV Parsing, Cardholder Mapping & Disambiguation.
+ * 
+ * Asserts:
+ * 1. Multi-section parsing:
+ *    - Parses all 3 sections from DBS statement (Main Card 4320, Supp Card 7509, Supp Card 0465).
+ *    - Captures last-4 digits only, never the full 16-digit number.
+ *    - Correctly maps '4320' -> 'Val', '7509' -> 'Rita', '0465' -> 'Grandparents'.
+ *    - Reports row counts per section.
+ * 2. Cardholder matching disambiguation:
+ *    - Two identical same-day charges on different cards (Val 4320 vs Grandparents 0465).
+ *    - Matching against a Grandparents ledger row matches Grandparents and leaves Val as a proposal.
+ *    - Matching against a household ledger row matches Val and leaves Grandparents as a proposal.
+ *    - Ambiguous count is 0 (reduced from ambiguous).
+ * 3. Grandparents column J (Notes) tagging:
+ *    - Grandparents rows are tagged in staging with "[Grandparents - Card 0465]".
+ *    - Val/Rita rows leave Column J empty.
+ * 4. Per-card summary breakdown tallies correctly.
+ */
+function test_dbsMultiSectionAndCardholderMatching() {
+  Logger.log('====================================================');
+  Logger.log('  TEST: test_dbsMultiSectionAndCardholderMatching()');
+  Logger.log('====================================================\n');
+
+  // --- PART 1: Multi-Section DBS CSV Parser Test ---
+  Logger.log('--- 1. Multi-Section DBS CSV Parser Test ---');
+  const mockCsvLines = [
+    'Account Details,,,,',
+    'Account Type: DBS Altitude Visa Signature Card,,,,',
+    '"Card Transaction Details For:","DBS Altitude Visa Signature Card 4119-1100-9482-4320",,,',
+    'Transaction Date,Transaction Posting Date,Transaction Description,Debit Amount,Credit Amount',
+    '15.08.2026,16.08.2026,NTUC FAIRPRICE,45.50,',
+    '15.08.2026,16.08.2026,SIMPLYGO MRT,1.85,',
+    '"Supplementary Card:",""',
+    '"DBS Altitude Visa Signature Card 4119-1100-9439-7509",""',
+    'Transaction Date,Transaction Posting Date,Transaction Description,Debit Amount,Credit Amount',
+    '15.08.2026,16.08.2026,SIMPLYGO MRT,1.85,',
+    '18.08.2026,19.08.2026,WATSONS,22.30,',
+    '"Supplementary Card:",""',
+    '',
+    '"DBS Altitude Visa Signature Card 4119-1100-9444-0465",""',
+    'Transaction Date,Transaction Posting Date,Transaction Description,Debit Amount,Credit Amount',
+    '15.08.2026,16.08.2026,SIMPLYGO MRT,1.85,',
+    '20.08.2026,21.08.2026,CLINIC CARE,85.00,'
+  ];
+
+  const mockCsvText = mockCsvLines.join('\n');
+  const rows2D = (typeof Utilities !== 'undefined' && typeof Utilities.parseCsv === 'function')
+    ? Utilities.parseCsv(mockCsvText)
+    : mockCsvLines.map(line => line.split(',').map(c => c.replace(/^"|"$/g, '')));
+  const parsed = tryParseDbsCsv(rows2D, mockCsvText, 'dbs_statement.csv');
+
+  assertEq(Boolean(parsed && parsed.rows), true, 'tryParseDbsCsv successfully parsed multi-section statement');
+  assertEq(parsed.rows.length, 6, `Parsed exact 6 rows across all 3 sections (got ${parsed.rows.length})`);
+  assertEq(parsed.sections.length, 3, `Detected exact 3 sections (got ${parsed.sections.length})`);
+
+  // Assert section metadata
+  assertEq(parsed.sections[0].cardType, 'main', 'Section 1 is main card');
+  assertEq(parsed.sections[0].last4, '4320', 'Section 1 last-4 is 4320');
+  assertEq(parsed.sections[0].cardholder, 'Val', 'Section 1 cardholder is Val');
+  assertEq(parsed.sections[0].rowCount, 2, 'Section 1 has 2 rows');
+
+  assertEq(parsed.sections[1].cardType, 'supplementary', 'Section 2 is supplementary card');
+  assertEq(parsed.sections[1].last4, '7509', 'Section 2 last-4 is 7509');
+  assertEq(parsed.sections[1].cardholder, 'Rita', 'Section 2 cardholder is Rita');
+  assertEq(parsed.sections[1].rowCount, 2, 'Section 2 has 2 rows');
+
+  assertEq(parsed.sections[2].cardType, 'supplementary', 'Section 3 is supplementary card');
+  assertEq(parsed.sections[2].last4, '0465', 'Section 3 last-4 is 0465');
+  assertEq(parsed.sections[2].cardholder, 'Grandparents', 'Section 3 cardholder is Grandparents');
+  assertEq(parsed.sections[2].rowCount, 2, 'Section 3 has 2 rows');
+
+  // Verify rows taggings & privacy constraint (last-4 only)
+  parsed.rows.forEach((r, idx) => {
+    assertEq(r.card_number.length, 4, `Row ${idx + 1} card_number is exactly 4 digits: ${r.card_number}`);
+    assertEq(r.card_number.includes('4119'), false, `Row ${idx + 1} never stores full 16-digit card number`);
+  });
+
+  assertEq(parsed.rows[0].cardholder, 'Val', 'Row 1 tagged with cardholder Val');
+  assertEq(parsed.rows[2].cardholder, 'Rita', 'Row 3 tagged with cardholder Rita');
+  assertEq(parsed.rows[4].cardholder, 'Grandparents', 'Row 5 tagged with cardholder Grandparents');
+
+  // --- PART 2: Matching Disambiguation Test ---
+  Logger.log('\n--- 2. Matching Disambiguation Test ---');
+  const sRows = normalizeRows(parsed.rows);
+
+  // Test Case A: Statement has Val (1.85) and Grandparents (1.85).
+  // Ledger has ONLY Grandparents (1.85, Notes: 'Grandparents').
+  const stmtSubsetA = [
+    sRows[1], // 15.08.2026, SimplyGo MRT, 1.85, Val (4320)
+    sRows[4]  // 15.08.2026, SimplyGo MRT, 1.85, Grandparents (0465)
+  ];
+  const ledgerA = [
+    {
+      row_index: 2,
+      date: '15.08.2026',
+      account: 'DBS CC SGD',
+      type: 'Расходы',
+      amount: 1.85,
+      merchant: 'SimplyGo MRT',
+      where: 'SimplyGo MRT',
+      notes: 'Grandparents'
+    }
+  ];
+
+  const matchResA = findMissing(stmtSubsetA, ledgerA);
+  assertEq(matchResA.matched.length, 1, 'Match Case A: exactly 1 matched row');
+  assertEq(matchResA.matched[0].cardholder, 'Grandparents', 'Match Case A: matched row is Grandparents');
+  assertEq(matchResA.missing.length, 1, 'Match Case A: exactly 1 missing row (proposal for Val)');
+  assertEq(matchResA.missing[0].cardholder, 'Val', 'Match Case A: proposal is for Val');
+  assertEq(matchResA.ambiguous.length, 0, 'Match Case A: ZERO ambiguous rows (disambiguation succeeded!)');
+
+  // Test Case B: Ledger has ONLY Household/Val (1.85, Notes: '').
+  const ledgerB = [
+    {
+      row_index: 3,
+      date: '15.08.2026',
+      account: 'DBS CC SGD',
+      type: 'Расходы',
+      amount: 1.85,
+      merchant: 'SimplyGo MRT',
+      where: 'SimplyGo MRT',
+      notes: ''
+    }
+  ];
+
+  const matchResB = findMissing(stmtSubsetA, ledgerB);
+  assertEq(matchResB.matched.length, 1, 'Match Case B: exactly 1 matched row');
+  assertEq(matchResB.matched[0].cardholder, 'Val', 'Match Case B: matched row is Val');
+  assertEq(matchResB.missing.length, 1, 'Match Case B: exactly 1 missing row (proposal for Grandparents)');
+  assertEq(matchResB.missing[0].cardholder, 'Grandparents', 'Match Case B: proposal is for Grandparents');
+  assertEq(matchResB.ambiguous.length, 0, 'Match Case B: ZERO ambiguous rows (disambiguation succeeded!)');
+
+  // --- PART 3: Grandparents Column J (Notes) Tagging & Staging Test ---
+  Logger.log('\n--- 3. Grandparents Column J (Notes) Tagging & Staging Test ---');
+  let stagedData = [];
+  let stagedBackgrounds = [];
+  const mockRange = {
+    setValues: (v) => { stagedData = v; return mockRange; },
+    setFontWeight: () => mockRange,
+    setBackground: () => mockRange,
+    setFontColor: () => mockRange,
+    setHorizontalAlignment: () => mockRange,
+    setNumberFormat: () => mockRange,
+    insertCheckboxes: () => mockRange,
+    setDataValidation: () => mockRange,
+    setBackgrounds: (b) => { stagedBackgrounds = b; return mockRange; },
+    getFormula: () => '=F-D',
+    getValues: () => stagedData
+  };
+
+  let transData = [
+    ['01.08.2026', 'DBS CC SGD', 'Расходы', 10.0, 10.0, 100.0, 90.0, 'Другое', 'Prev Row', '', 'Wants']
+  ];
+  const transRange = {
+    getValues: () => transData,
+    setValues: (v) => { transData = transData.concat(v); return transRange; },
+    getFormula: () => '=F-D',
+    getFormulas: () => [['=F-D', '=F-D']],
+    copyTo: () => {}
+  };
+
+  const merchantsData = [];
+  const merchantsRange = {
+    setValues: () => merchantsRange,
+    getValues: () => merchantsData,
+    setFontWeight: () => merchantsRange,
+    setBackground: () => merchantsRange,
+    setFontColor: () => merchantsRange
+  };
+
+  const mockSs = {
+    getSheetByName: (name) => {
+      if (name === 'Transactions') {
+        return {
+          getName: () => 'Transactions',
+          getLastRow: () => transData.length,
+          getLastColumn: () => 11,
+          getRange: () => transRange,
+          deleteRow: () => {}
+        };
+      }
+      if (name === 'Merchants') {
+        return {
+          getName: () => 'Merchants',
+          getLastRow: () => 1,
+          getLastColumn: () => 5,
+          getRange: () => merchantsRange,
+          deleteRow: () => {}
+        };
+      }
+      if (name === '-' || name === 'Reference') {
+        return null;
+      }
+      return {
+        getName: () => '_Reconcile',
+        clear: () => {},
+        clearConditionalFormatRules: () => {},
+        getRange: () => mockRange,
+        getLastRow: () => stagedData.length + 1,
+        getLastColumn: () => 12,
+        getMaxRows: () => 100,
+        setFrozenRows: () => {},
+        setColumnWidth: () => {}
+      };
+    },
+    insertSheet: (name) => mockSs.getSheetByName(name || '_Reconcile')
+  };
+
+  const gpProposal = {
+    date: '15.08.2026',
+    amount: 1.85,
+    merchant: 'SimplyGo MRT',
+    card_last4: '0465',
+    cardholder: 'Grandparents',
+    type: 'Расходы'
+  };
+  const valProposal = {
+    date: '15.08.2026',
+    amount: 45.50,
+    merchant: 'NTUC FairPrice',
+    card_last4: '4320',
+    cardholder: 'Val',
+    type: 'Расходы'
+  };
+  const ritaProposal = {
+    date: '18.08.2026',
+    amount: 22.30,
+    merchant: 'Watsons',
+    card_last4: '7509',
+    cardholder: 'Rita',
+    type: 'Расходы'
+  };
+
+  stageProposals([gpProposal, valProposal, ritaProposal], [], mockSs, []);
+  assertEq(stagedData.length, 3, 'Staged 3 proposals (Grandparents, Val, Rita)');
+
+  // In 12-column layout:
+  // Col 1: ✓, Col 2: date, Col 3: account, Col 4: Cardholder (r[3]), Col 5: type, Col 6: amount,
+  // Col 7: merchant, Col 8: category, Col 9: bucket, Col 10: confidence, Col 11: source_row (r[10]), Col 12: status
+  const gpRow = stagedData.find(r => r[3] === 'Grandparents');
+  const valRow = stagedData.find(r => r[3] === 'Val');
+  const ritaRow = stagedData.find(r => r[3] === 'Rita');
+
+  assertEq(Boolean(gpRow), true, 'Found Grandparents staged row');
+  assertEq(Boolean(valRow), true, 'Found Val staged row');
+  assertEq(Boolean(ritaRow), true, 'Found Rita staged row');
+
+  assertEq(gpRow[3], 'Grandparents', 'Grandparents row has "Grandparents" in Column 4 (Cardholder)');
+  assertEq(valRow[3], 'Val', 'Val row has "Val" in Column 4 (Cardholder)');
+  assertEq(ritaRow[3], 'Rita', 'Rita row has "Rita" in Column 4 (Cardholder)');
+
+  assertEq(gpRow[10].includes('[Grandparents - Card 0465]'), true, 'Grandparents source_row tagged with [Grandparents - Card 0465]');
+  assertEq(valRow[10].includes('Grandparents'), false, 'Val source_row does NOT mention Grandparents');
+  assertEq(ritaRow[10].includes('Grandparents'), false, 'Rita source_row does NOT mention Grandparents');
+
+  // Verify distinct soft lavender tint for Grandparents row
+  const gpIdx = stagedData.indexOf(gpRow);
+  assertEq(stagedBackgrounds[gpIdx][0], '#f5f3ff', 'Grandparents row receives distinct soft lavender tint (#f5f3ff)');
+
+  // --- PART 4: Per-Card Breakdown Calculation Test ---
+  Logger.log('\n--- 4. Per-Card Breakdown Test ---');
+  const breakdown = computeCardholderBreakdown(
+    parsed.rows,
+    [parsed.rows[0], parsed.rows[2]], // matched: Val, Rita
+    [parsed.rows[4]],                 // proposals: Grandparents
+    [],                               // ambiguous: 0
+    []                                // excluded: 0
+  );
+
+  assertEq(breakdown['Val'].parsed, 2, 'Val parsed count = 2');
+  assertEq(breakdown['Val'].matched, 1, 'Val matched count = 1');
+  assertEq(breakdown['Rita'].parsed, 2, 'Rita parsed count = 2');
+  assertEq(breakdown['Rita'].matched, 1, 'Rita matched count = 1');
+  assertEq(breakdown['Grandparents'].parsed, 2, 'Grandparents parsed count = 2');
+  assertEq(breakdown['Grandparents'].proposals, 1, 'Grandparents proposals count = 1');
+
+  // --- PART 5: 68 / 63 / 25 Cardholder Table Verification ---
+  Logger.log('\n--- 5. 68 / 63 / 25 Cardholder Table Verification ---');
+  const mock156Rows = [];
+  for (let i = 0; i < 68; i++) {
+    mock156Rows.push({ cardholder: 'Val', card_last4: '4320', card_type: 'main' });
+  }
+  for (let i = 0; i < 63; i++) {
+    mock156Rows.push({ cardholder: 'Rita', card_last4: '7509', card_type: 'supplementary' });
+  }
+  for (let i = 0; i < 25; i++) {
+    mock156Rows.push({ cardholder: 'Grandparents', card_last4: '0465', card_type: 'supplementary' });
+  }
+  assertEq(mock156Rows.length, 156, 'Total simulated parsed rows = 156');
+
+  const cb156 = computeCardholderBreakdown(mock156Rows, [], [], [], []);
+  assertEq(cb156['Val'].parsed, 68, 'Val shows exactly 68 rows in per-card table');
+  assertEq(cb156['Rita'].parsed, 63, 'Rita shows exactly 63 rows in per-card table');
+  assertEq(cb156['Grandparents'].parsed, 25, 'Grandparents shows exactly 25 rows in per-card table');
+  assertEq(cb156['Other'].parsed, 0, 'Other shows exactly 0 rows (no cards misplaced into Other)');
+
+  // --- PART 6: End-to-End commitStaged() Dry Run & Column J Verification ---
+  Logger.log('\n--- 6. End-to-End commitStaged() Dry Run & Column J Verification ---');
+  // Tick all 3 staged rows for commit
+  stagedData[0][0] = true;
+  stagedData[1][0] = true;
+  stagedData[2][0] = true;
+
+  const commitRes = commitStaged(false, true, mockSs); // dryRun = true
+  assertEq(commitRes.dryRun, true, 'commitStaged executed in DRY RUN mode');
+  assertEq(commitRes.committedCount, 3, 'commitStaged committed 3 rows in dry run');
+  assertEq(commitRes.rows2D.length, 3, 'commitStaged produced 3 2D rows for Transactions');
+
+  // Locate the rows by merchant
+  const gpDryTxn = commitRes.rows2D.find(r => /simplygo/i.test(r[8]));
+  const valDryTxn = commitRes.rows2D.find(r => /fair\s*price/i.test(r[8]));
+  const ritaDryTxn = commitRes.rows2D.find(r => /watsons/i.test(r[8]));
+
+  assertEq(Boolean(gpDryTxn), true, 'Found Grandparents dry run row');
+  assertEq(Boolean(valDryTxn), true, 'Found Val dry run row');
+  assertEq(Boolean(ritaDryTxn), true, 'Found Rita dry run row');
+
+  // Grandparents 11-column inspection:
+  // [A:Дата, B:Счёт, C:Тип, D:Сумма, E:Сумма в SGD, F:До, G:После, H:Категория, I:Где, J:Notes, K:50/30/20]
+  assertEq(gpDryTxn.length, 11, 'Grandparents dry-run row has exactly 11 columns');
+  assertEq(gpDryTxn[0], '15.08.2026', 'GP Col A (Дата) is "15.08.2026"');
+  assertEq(gpDryTxn[1], 'DBS CC SGD', 'GP Col B (Счёт) is "DBS CC SGD"');
+  assertEq(gpDryTxn[2], 'Расходы', 'GP Col C (Тип) is "Расходы"');
+  assertClose(Number(gpDryTxn[3]), 1.85, 0.01, 'GP Col D (Сумма) is 1.85');
+  assertClose(Number(gpDryTxn[4]), 1.85, 0.01, 'GP Col E (Сумма в SGD) is 1.85');
+  assertEq(gpDryTxn[5], '', 'GP Col F (До) is empty formula placeholder');
+  assertEq(gpDryTxn[6], '', 'GP Col G (После) is empty formula placeholder');
+  assertEq(Boolean(gpDryTxn[7]), true, 'GP Col H (Категория) is populated');
+  assertEq(gpDryTxn[8], 'SimplyGo MRT', 'GP Col I (Где) is "SimplyGo MRT"');
+  assertEq(gpDryTxn[9], 'Grandparents', 'GP Col J (Notes) is TAGGED WITH "Grandparents"');
+  assertEq(Boolean(gpDryTxn[10]), true, 'GP Col K (50/30/20) is populated');
+
+  // Val and Rita Column J confirmation:
+  assertEq(valDryTxn[9], '', 'Val Col J (Notes) is CONFIRMED EMPTY ""');
+  assertEq(ritaDryTxn[9], '', 'Rita Col J (Notes) is CONFIRMED EMPTY ""');
+
+  // Also verify dryRunCommitSample on mockSs
+  const samples = dryRunCommitSample(mockSs);
+  assertEq(samples.Grandparents.columns11[9], 'Grandparents', 'dryRunCommitSample Grandparents row Col J is "Grandparents"');
+  assertEq(samples.Val.columns11[9], '', 'dryRunCommitSample Val row Col J is ""');
+  assertEq(samples.Rita.columns11[9], '', 'dryRunCommitSample Rita row Col J is ""');
+
+  Logger.log('\n✅ All test_dbsMultiSectionAndCardholderMatching tests passed.');
+  Logger.log('=== test_dbsMultiSectionAndCardholderMatching() Execution Finished ===');
+}
+
+/**
+ * UNIT TEST SUITE: Generalized Location Suffix Stripping, Gateway Prefixes,
+ * Canonical Merchant Resolution, and Multi-Factor Matching.
+ */
+function test_locationSuffixStrippingAndMultiFactorMatching() {
+  Logger.log('====================================================');
+  Logger.log('  TEST: test_locationSuffixStrippingAndMultiFactorMatching()');
+  Logger.log('====================================================\n');
+
+  // --- PART 1: Country & City Suffix Stripping Regressions ---
+  Logger.log('--- 1. Location & Country Suffix Normalisation ---');
+  assertEq(normaliseWhere('2C2*LAZADA SINGAPORE SG'), 'lazada', 'Stripped "SINGAPORE SG" -> "lazada"');
+  assertEq(normaliseWhere('SEPHORA SINGAPORE'), 'sephora', 'Stripped "SINGAPORE" -> "sephora"');
+  assertEq(normaliseWhere('NTUC FAIRPRICE SGP'), 'fairprice', 'Stripped "SGP" -> "fairprice"');
+  assertEq(normaliseWhere('LAZADA SG'), 'lazada', 'Stripped "SG" -> "lazada"');
+  assertEq(normaliseWhere('HOTEL BANGKOK TH'), 'hotel', 'Stripped "BANGKOK TH" -> "hotel"');
+  assertEq(normaliseWhere('CAFE SYDNEY AU'), 'cafe', 'Stripped "SYDNEY AU" -> "cafe"');
+  assertEq(normaliseWhere('STORE BEIJING CN'), 'store', 'Stripped "CN" -> "store"');
+  assertEq(normaliseWhere('PUB DUBLIN IE'), 'pub', 'Stripped "DUBLIN IE" -> "pub"');
+  assertEq(normaliseWhere('RETAILER SEATTLE US'), 'retailer', 'Stripped "SEATTLE US" -> "retailer"');
+  assertEq(normaliseWhere('SPOTIFY STOCKHOLM SE'), 'spotify', 'Stripped "STOCKHOLM SE" -> "spotify"');
+
+  // Brand protection: "Toys R Us"
+  assertEq(normaliseWhere('TOYS R US'), 'toys r us', 'Preserved brand "toys r us"');
+
+  // --- PART 2: Gateway Prefix Normalisation ---
+  Logger.log('\n--- 2. Gateway Prefix Normalisation ---');
+  assertEq(normaliseWhere('GOPAY-GOJEK'), 'gojek', 'Stripped "GOPAY-" -> "gojek"');
+  assertEq(normaliseWhere('GRABPAY*FOOD MERCHANT'), 'food merchant', 'Stripped "GRABPAY*" -> "food merchant"');
+  assertEq(normaliseWhere('PAYNOW*CLINIC SERVICES'), 'clinic services', 'Stripped "PAYNOW*" -> "clinic services"');
+  assertEq(normaliseWhere('2C2*LAZADA'), 'lazada', 'Stripped "2C2*" -> "lazada"');
+  assertEq(normaliseWhere('SPL AUTO TOPUP (CBT)'), 'auto topup (cbt)', 'Stripped "SPL " -> "auto topup (cbt)"');
+
+  // --- PART 3: Canonical Merchant Resolution ---
+  Logger.log('\n--- 3. Canonical Merchant Resolution ---');
+  assertEq(resolveCanonicalMerchant('SPL AUTO TOPUP (CBT)'), 'simplygo', 'SPL AUTO TOPUP -> "simplygo"');
+  assertEq(resolveCanonicalMerchant('SimplyGo Auto Topup'), 'simplygo', 'SimplyGo Auto Topup -> "simplygo"');
+  assertEq(resolveCanonicalMerchant('POPULAR-POS 1'), 'popular bookstores', 'POPULAR-POS 1 -> "popular bookstores"');
+  assertEq(resolveCanonicalMerchant('Popular Bookstores'), 'popular bookstores', 'Popular Bookstores -> "popular bookstores"');
+  assertEq(resolveCanonicalMerchant('JASONS MARKET PLACE-RA'), 'cold storage', 'JASONS MARKET PLACE-RA -> "cold storage"');
+  assertEq(resolveCanonicalMerchant('Cold Storage'), 'cold storage', 'Cold Storage -> "cold storage"');
+  assertEq(resolveCanonicalMerchant('AMZNPRIMESG MEMBERSHI'), 'amazon prime', 'AMZNPRIMESG MEMBERSHI -> "amazon prime"');
+  assertEq(resolveCanonicalMerchant('Amazon Prime'), 'amazon prime', 'Amazon Prime -> "amazon prime"');
+
+  // --- PART 4: Soft Cardholder Scoring & Compatibility ---
+  Logger.log('\n--- 4. Soft Cardholder Scoring & Compatibility ---');
+  const itemVal = { cardholder: 'Val' };
+  const itemRita = { cardholder: 'Rita' };
+  const itemGP = { cardholder: 'Grandparents' };
+  const itemEmptyLedger = { cardholder: '' };
+
+  assertEq(isCardholderCompatible(itemVal, itemEmptyLedger), true, 'Val statement compatible with empty ledger');
+  assertEq(isCardholderCompatible(itemGP, itemEmptyLedger), true, 'Grandparents statement compatible with empty ledger');
+  assertEq(isCardholderCompatible(itemVal, itemVal), true, 'Val statement compatible with Val ledger');
+  assertEq(isCardholderCompatible(itemVal, itemRita), false, 'Val statement NOT compatible with Rita ledger');
+  assertEq(isCardholderCompatible(itemGP, itemVal), false, 'Grandparents statement NOT compatible with Val ledger');
+
+  assertClose(computeCardholderScore(itemVal, itemVal), 0.15, 0.001, 'Same cardholder scores +0.15');
+  assertClose(computeCardholderScore(itemVal, itemRita), -0.20, 0.001, 'Conflicting cardholder scores -0.20');
+  assertClose(computeCardholderScore(itemVal, itemEmptyLedger), 0.00, 0.001, 'Empty ledger cardholder scores neutral 0.00');
+  assertClose(computeCardholderScore(itemGP, itemEmptyLedger), 0.00, 0.001, 'Grandparents vs empty ledger scores neutral 0.00');
+
+  // --- PART 5: End-to-End Matching of the 7 Target Cases ---
+  Logger.log('\n--- 5. End-to-End Matching of 7 Target Cases ---');
+  const statementBatch = [
+    { date: '13.08.2026', amount: 20.00, merchant: 'SPL AUTO TOPUP (CBT)', cardholder: 'Val' },
+    { date: '13.08.2026', amount: 20.34, merchant: 'POPULAR-POS 1', cardholder: 'Val' },
+    { date: '15.08.2026', amount: 19.98, merchant: '2C2*LAZADA SINGAPORE SG', cardholder: 'Val' },
+    { date: '15.08.2026', amount: 100.99, merchant: '2C2*LAZADA SINGAPORE SG', cardholder: 'Val' },
+    { date: '15.08.2026', amount: 20.80, merchant: 'GOPAY-GOJEK', cardholder: 'Val' },
+    { date: '16.08.2026', amount: 101.75, merchant: 'JASONS MARKET PLACE-RA', cardholder: 'Val' },
+    { date: '16.08.2026', amount: 4.99, merchant: 'AMZNPRIMESG MEMBERSHI', cardholder: 'Val' }
+  ];
+
+  const ledgerBatch = [
+    { row_index: 1790, date: '13.08.2026', amount: 20.00, where: 'SimplyGo Auto Topup', category: 'Транспорт', notes: '' },
+    { row_index: 1791, date: '13.08.2026', amount: 20.34, where: 'Popular Bookstores', category: 'Образование', notes: '' },
+    { row_index: 1811, date: '15.08.2026', amount: 19.98, where: 'Lazada SG', category: 'Дом', notes: '' },
+    { row_index: 1812, date: '15.08.2026', amount: 100.99, where: 'Lazada SG', category: 'Дом', notes: '' },
+    { row_index: 1823, date: '15.08.2026', amount: 20.80, where: 'Gojek', category: 'Транспорт', notes: '' },
+    { row_index: 1824, date: '16.08.2026', amount: 101.75, where: 'Cold Storage', category: 'Продукты', notes: '' },
+    { row_index: 1834, date: '16.08.2026', amount: 4.99, where: 'Amazon Prime', category: 'Подписки', notes: '' }
+  ];
+
+  const matchResult = findMissing(statementBatch, ledgerBatch);
+
+  assertEq(matchResult.matched.length, 7, 'All 7 target cases matched successfully');
+  assertEq(matchResult.missing.length, 0, 'No missing rows remaining among the 7 target cases');
+  assertEq(matchResult.ambiguous.length, 0, 'No ambiguous rows among the 7 target cases');
+
+  // Verify each individual match
+  const matchSimplyGo = matchResult.matched.find(m => Math.abs(m.amount - 20.00) < 0.01);
+  assertEq(Boolean(matchSimplyGo && matchSimplyGo.matched_ledger.where === 'SimplyGo Auto Topup'), true, 'SPL AUTO TOPUP matched SimplyGo Auto Topup');
+
+  const matchPopular = matchResult.matched.find(m => Math.abs(m.amount - 20.34) < 0.01);
+  assertEq(Boolean(matchPopular && matchPopular.matched_ledger.where === 'Popular Bookstores'), true, 'POPULAR-POS 1 matched Popular Bookstores');
+
+  const matchLazada1 = matchResult.matched.find(m => Math.abs(m.amount - 19.98) < 0.01);
+  assertEq(Boolean(matchLazada1 && matchLazada1.matched_ledger.where === 'Lazada SG'), true, 'Lazada S$19.98 matched Lazada SG');
+
+  const matchLazada2 = matchResult.matched.find(m => Math.abs(m.amount - 100.99) < 0.01);
+  assertEq(Boolean(matchLazada2 && matchLazada2.matched_ledger.where === 'Lazada SG'), true, 'Lazada S$100.99 matched Lazada SG');
+
+  const matchGojek = matchResult.matched.find(m => Math.abs(m.amount - 20.80) < 0.01);
+  assertEq(Boolean(matchGojek && matchGojek.matched_ledger.where === 'Gojek'), true, 'GOPAY-GOJEK matched Gojek');
+
+  const matchColdStorage = matchResult.matched.find(m => Math.abs(m.amount - 101.75) < 0.01);
+  assertEq(Boolean(matchColdStorage && matchColdStorage.matched_ledger.where === 'Cold Storage'), true, 'JASONS MARKET PLACE matched Cold Storage');
+
+  const matchAmazon = matchResult.matched.find(m => Math.abs(m.amount - 4.99) < 0.01);
+  assertEq(Boolean(matchAmazon && matchAmazon.matched_ledger.where === 'Amazon Prime'), true, 'AMZNPRIMESG matched Amazon Prime');
+
+  Logger.log('Location/matching assertions completed; see runner summary for pass/fail.');
+  Logger.log('=== test_locationSuffixStrippingAndMultiFactorMatching() Finished ===');
+}
+
+
+
 

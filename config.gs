@@ -33,6 +33,7 @@ const MONTH_TAB_NAMES = Object.assign({}, MONTH_TABS_EXISTING, MONTH_TABS_FUTURE
 // 2. SHEET_FACTS EXPORT
 const SHEET_FACTS = {
   // Stage 3 Environment & Safety Flags
+  STATEMENT_FILE_ID: '1Omhwqr2q5kLfZCa51Mj6igN3TPX032k0',
   DRY_RUN: true, // Default true for all Stage 3 sub-stages until 3F
   TEST_SPREADSHEET_ID: '1SgV3M1RWtEKvqWEazv-3slduXPCEi7x2gJFElWbFA70', // Sandbox spreadsheet ID (to be filled by user)
 
@@ -40,6 +41,8 @@ const SHEET_FACTS = {
   MONTH_TABS_FUTURE: MONTH_TABS_FUTURE,
   MONTH_TAB_NAMES: MONTH_TAB_NAMES,
   
+  NON_LEDGER_MANDATORY: ['CPF'],
+
   CORE_TABS: {
     TRANSACTIONS: 'Transactions',
     MERCHANTS: 'Merchants',
@@ -51,6 +54,13 @@ const SHEET_FACTS = {
   USERS: {
     VAL: { name: 'Val', chat_id: '96069960', morning_time: '08:00', active: true },
     RITA: { name: 'Rita', chat_id: '402188776', morning_time: '08:00', active: true }
+  },
+  
+  // Cardholder mapping (last 4 digits only — never store full card numbers)
+  CARDHOLDER_MAP: {
+    '4320': 'Val',          // Main card
+    '7509': 'Rita',         // Supplementary card
+    '0465': 'Grandparents'  // Supplementary card
   },
   
   MONTHLY_TAB_STRUCTURE: {
@@ -117,6 +127,22 @@ const SHEET_FACTS = {
     return this.MONTH_TAB_NAMES[monthNum] || '';
   }
 };
+
+/**
+ * Resolves a cardholder name from the last 4 digits of a card number.
+ * Only accepts/evaluates last-4 digits — never full card numbers.
+ * 
+ * @param {string|number} last4 - Last 4 digits of the card (e.g. '4320', '7509', '0465').
+ * @return {string} Cardholder name ('Val', 'Rita', 'Grandparents', or '' if unknown).
+ */
+function resolveCardholder(last4) {
+  if (last4 === undefined || last4 === null || last4 === '') return '';
+  const cleanLast4 = String(last4).replace(/\D/g, '').slice(-4);
+  const map = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.CARDHOLDER_MAP)
+    ? SHEET_FACTS.CARDHOLDER_MAP
+    : { '4320': 'Val', '7509': 'Rita', '0465': 'Grandparents' };
+  return map[cleanLast4] || '';
+}
 
 /**
  * STAGE 0: One-off Discovery & Inspection Function.

@@ -19,6 +19,18 @@ function formatSheetDate(cellValue) {
   return typeof normalizeDateString === 'function' ? normalizeDateString(cellValue) : String(cellValue || '').trim();
 }
 
+/** Run a sheet mutation under the shared script lock; retain a caller's lock. */
+function withBudgetWriteLock(operation) {
+  const lock = typeof LockService !== 'undefined' ? LockService.getScriptLock() : null;
+  const ownsLock = lock && !lock.hasLock();
+  if (ownsLock && !lock.tryLock(30000)) throw new Error('Budget write is busy; retry shortly.');
+  try {
+    return operation();
+  } finally {
+    if (ownsLock) lock.releaseLock();
+  }
+}
+
 /**
  * Appends approved transactions to the 'Transactions' sheet.
  * 
@@ -36,6 +48,10 @@ function formatSheetDate(cellValue) {
  * @return {Object} Result summary { writtenCount, skippedCount, writtenRows, dryRun }.
  */
 function appendTransactions(transactionsArray, ss, optDryRun) {
+  return withBudgetWriteLock(() => appendTransactionsUnlocked(transactionsArray, ss, optDryRun));
+}
+
+function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {
   if (!Array.isArray(transactionsArray) || transactionsArray.length === 0) {
     return { writtenCount: 0, skippedCount: 0, writtenRows: [] };
   }
@@ -71,13 +87,16 @@ function appendTransactions(transactionsArray, ss, optDryRun) {
 
   // 2. Idempotency Filtering: Filter out duplicate transactions unless force_add is set (§6.7)
   const toAppend = [];
+  const rowOutcomes = [];
   let skippedCount = 0;
-  const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap() : null;
+  const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap(ss) : null;
 
   for (let i = 0; i < transactionsArray.length; i++) {
     const txn = transactionsArray[i];
     // Ensure transaction is enriched before checking key
     const enriched = txn.dedupe_key ? txn : enrichTransaction(txn, categoryBucketMap);
+    // The staging reviewer explicitly selected this type; do not reclassify it.
+    if (txn.reviewed_type === true) enriched.type = txn.type;
 
     const isForced = Array.isArray(enriched.flags) && enriched.flags.indexOf('force_add') !== -1;
 
@@ -85,7 +104,9 @@ function appendTransactions(transactionsArray, ss, optDryRun) {
     if (!isForced && existingDedupeKeys.has(enriched.dedupe_key)) {
       Logger.log(`Skipping duplicate row: ${enriched.where} (${enriched.amount})`);
       skippedCount++;
+      rowOutcomes.push({ inputIndex: i, status: 'duplicate_review' });
     } else {
+      rowOutcomes.push({ inputIndex: i, status: 'pending' });
       toAppend.push(enriched);
       // Track dedupe key within current batch to prevent intra-batch duplicates
       existingDedupeKeys.add(enriched.dedupe_key);
@@ -93,7 +114,7 @@ function appendTransactions(transactionsArray, ss, optDryRun) {
   }
 
   if (toAppend.length === 0) {
-    return { writtenCount: 0, skippedCount: skippedCount, writtenRows: [] };
+    return { writtenCount: 0, skippedCount: skippedCount, writtenRows: [], rowOutcomes: rowOutcomes };
   }
 
   // 3. Prepare 2D Array for Input Columns (§4.1, §6.6)
@@ -146,6 +167,8 @@ function appendTransactions(transactionsArray, ss, optDryRun) {
       writtenCount: toAppend.length,
       skippedCount: skippedCount,
       writtenRows: toAppend,
+      rows2D: rows2D,
+      rowOutcomes: rowOutcomes.map(r => ({ ...r, status: r.status === 'pending' ? 'would_import' : r.status })),
       dryRun: true
     };
   }
@@ -169,7 +192,9 @@ function appendTransactions(transactionsArray, ss, optDryRun) {
   return {
     writtenCount: toAppend.length,
     skippedCount: skippedCount,
-    writtenRows: toAppend
+    writtenRows: toAppend,
+    rowOutcomes: rowOutcomes.map(r => ({ ...r, status: r.status === 'pending' ? 'imported' : r.status })),
+    dryRun: false
   };
 }
 

@@ -136,7 +136,8 @@ function getMandatoryExpenses(ss) {
       const amount = parseAmountNumber(rangeValues[i][1], rangeDisp[i][1]);
       // Col G is index 3 in D:G range (Col D=0, Col E=1, Col F=2, Col G=3)
       const rawCheck = rangeValues[i].length > 3 ? rangeValues[i][3] : rangeValues[i][2];
-      const paidFlag = (rawCheck === true || String(rawCheck).toUpperCase() === 'TRUE');
+      const nonLedger = (SHEET_FACTS.NON_LEDGER_MANDATORY || []).includes(label);
+      const paidFlag = amount === 0 || nonLedger || rawCheck === true || String(rawCheck).toUpperCase() === 'TRUE';
 
       // Filter out empty cells, blanks, zeros, and dashes in description
       if (label && label !== '0' && label !== '0.00' && label !== '0,00' && label !== '-' && label !== '—' && label !== '--') {
@@ -354,7 +355,7 @@ function getDailyPacing(optDate, ss) {
     const activeInfo = getActiveMonthTab(spreadsheet, targetDate);
     if (!activeInfo || !activeInfo.exists) {
       Logger.log(`⚠️ Warning: ${activeInfo ? activeInfo.message : 'Active month tab not found'}`);
-      return defaultResult;
+      return { ...defaultResult, error: 'missing_month', month_tab: activeInfo && activeInfo.tabName, message: activeInfo && activeInfo.message };
     }
     const sheet = activeInfo.sheet;
 
@@ -441,7 +442,7 @@ function getDailyPacing(optDate, ss) {
     };
   } catch (e) {
     Logger.log(`Error in getDailyPacing: ${e.message}`);
-    return defaultResult;
+    return { ...defaultResult, error: 'read_error', message: e.message };
   }
 }
 
