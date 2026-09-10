@@ -1159,8 +1159,8 @@ function test_stageProposals() {
   // Row 1: Clean Expense Proposal
   const expRow = stagedData[0];
   assertEq(expRow[0], false, 'Row 1: Checkbox is unchecked (false)');
-  assertEq(typeof expRow[1], 'string', 'Row 1 date is type STRING (not Date object)');
-  assertEq(expRow[1], '11.08.2026', 'Row 1 date round-trips exactly as "11.08.2026" (not shifted by timezone)');
+  assertEq(expRow[1] instanceof Date, true, 'Row 1 date is a real date');
+  assertEq(reconcileDateString(expRow[1], ss), '11.08.2026', 'Row 1 date round-trips exactly as "11.08.2026" (not shifted by timezone)');
   assertEq(expRow[2], 'DBS CC SGD', 'Row 1: Account is DBS CC SGD');
   assertEq(expRow[3], 'Unknown', 'Row 1: Missing cardholder is not guessed as Val');
   assertEq(expRow[4], 'Расходы', 'Row 1: Тип is "Расходы"');
@@ -1172,8 +1172,8 @@ function test_stageProposals() {
   // Row 2: Option B Credit Proposal
   const creditRow = stagedData[1];
   assertEq(creditRow[0], false, 'Row 2: Checkbox is unchecked (false)');
-  assertEq(typeof creditRow[1], 'string', 'Row 2 date is type STRING (not Date object)');
-  assertEq(creditRow[1], '18.08.2026', 'Row 2 date round-trips exactly as "18.08.2026" (not shifted by timezone)');
+  assertEq(creditRow[1] instanceof Date, true, 'Row 2 date is a real date');
+  assertEq(reconcileDateString(creditRow[1], ss), '18.08.2026', 'Row 2 date round-trips exactly as "18.08.2026" (not shifted by timezone)');
   assertEq(creditRow[4], 'Получение денег', 'Row 2: Option B Credit Тип is "Получение денег"');
   assertClose(Number(creditRow[5]), -270.00, 0.01, 'Row 2: Amount is negative (-270.00)');
   assertEq(creditRow[11], 'proposed', 'Row 2: Status is "proposed"');
@@ -1181,8 +1181,8 @@ function test_stageProposals() {
   // Row 3: Ambiguous Row
   const ambRow = stagedData[2];
   assertEq(ambRow[0], false, 'Row 3: Checkbox is unchecked (false)');
-  assertEq(typeof ambRow[1], 'string', 'Row 3 date is type STRING (not Date object)');
-  assertEq(ambRow[1], '15.08.2026', 'Row 3 date round-trips exactly as "15.08.2026" (not shifted by timezone)');
+  assertEq(ambRow[1] instanceof Date, true, 'Row 3 date is a real date');
+  assertEq(reconcileDateString(ambRow[1], ss), '15.08.2026', 'Row 3 date round-trips exactly as "15.08.2026" (not shifted by timezone)');
   assertEq(ambRow[11], 'ambiguous', 'Row 3: Status is "ambiguous" (surfaced without guessing)');
   const ambSource = String(ambRow[10]);
   assertEq(
@@ -1225,9 +1225,9 @@ function test_stageProposals() {
     const allCheckboxesBoolean = e2eData.every(r => typeof r[0] === 'boolean');
     assertEq(allCheckboxesBoolean, true, 'Part 2: Every staged row has a valid checkbox (boolean)');
 
-    // Check all staged rows have plain text string dates matching DD.MM.YYYY
-    const allDatesValidStrings = e2eData.every(r => typeof r[1] === 'string' && /^\d{2}\.\d{2}\.\d{4}$/.test(r[1]));
-    assertEq(allDatesValidStrings, true, 'Part 2: Every staged date is a string matching DD.MM.YYYY (no Date object coercion)');
+    // Check all staged rows contain real dates.
+    const allDatesValid = e2eData.every(r => r[1] instanceof Date && !isNaN(r[1].getTime()));
+    assertEq(allDatesValid, true, 'Part 2: Every staged date is a valid Date object');
 
     // D. Final Transactions Invariant Check
     assertEq(
@@ -1713,7 +1713,7 @@ function test_ambiguousInferencePipeline() {
   const createMockRange = () => {
     const range = {
       setNumberFormat: () => range,
-      setValues: (vals) => { stagedData = vals; return range; },
+      setValues: (vals) => { if (vals[0].length === 12) stagedData = vals; return range; },
       getValues: () => [],
       setBackground: () => range,
       setFontWeight: () => range,
@@ -1873,7 +1873,7 @@ function test_grabAmbiguityAndConflictCheck() {
   const createMockRange = () => {
     const range = {
       setNumberFormat: () => range,
-      setValues: (vals) => { stagedData = vals; return range; },
+      setValues: (vals) => { if (vals[0].length === 12) stagedData = vals; return range; },
       getValues: () => [],
       setBackground: () => range,
       setFontWeight: () => range,
@@ -2091,7 +2091,7 @@ function test_dbsMultiSectionAndCardholderMatching() {
   let stagedData = [];
   let stagedBackgrounds = [];
   const mockRange = {
-    setValues: (v) => { stagedData = v; return mockRange; },
+    setValues: (v) => { if (v[0].length === 12) stagedData = v; return mockRange; },
     setFontWeight: () => mockRange,
     setBackground: () => mockRange,
     setFontColor: () => mockRange,
@@ -2419,3 +2419,20 @@ function test_locationSuffixStrippingAndMultiFactorMatching() {
 
 
 
+
+/** Date storage stays sortable across months and preserves the sheet calendar day. */
+function test_reconcileDateValues() {
+  assertEq(reconcileDateSerial('31.08.2026') + 1, reconcileDateSerial('01.09.2026'), 'Month boundary sorts chronologically');
+  assertEq(reconcileDateSerial('31.12.2026') + 1, reconcileDateSerial('01.01.2027'), 'Year boundary sorts chronologically');
+  assertEq(reconcileDateSerial('28.02.2024') + 1, reconcileDateSerial('29.02.2024'), 'Leap day is retained');
+  assertEq(reconcileDateString(reconcileDateSerial('09.07.2026')), '09.07.2026', 'Serial round trip preserves date');
+  assertEq(reconcileDateSerial(''), '', 'Blank date stays blank');
+  const singapore = { getSpreadsheetTimeZone: function() { return 'Asia/Singapore'; } };
+  const losAngeles = { getSpreadsheetTimeZone: function() { return 'America/Los_Angeles'; } };
+  const instant = new Date('2026-08-31T16:00:00Z');
+  assertEq(reconcileDateString(instant, singapore), '01.09.2026', 'Date reads use Singapore sheet timezone');
+  assertEq(reconcileDateString(instant, losAngeles), '31.08.2026', 'Date reads use western sheet timezone');
+  let rejected = false;
+  try { reconcileDateSerial('31.02.2026'); } catch (error) { rejected = true; }
+  assertEq(rejected, true, 'Invalid dates cannot silently roll into the next month');
+}

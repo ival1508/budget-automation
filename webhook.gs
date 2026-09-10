@@ -164,8 +164,6 @@ function doPost(e) {
         inputs.push({ text: message.caption });
       }
 
-      let isDocumentInput = false;
-
       // Case B: Photo input (Receipt / Bank Screenshot)
       if (Array.isArray(message.photo) && message.photo.length > 0) {
         const largestPhoto = message.photo[message.photo.length - 1];
@@ -191,11 +189,13 @@ function doPost(e) {
         const isCsv = mimeType.includes('csv') || mimeType.includes('excel') || mimeType.includes('plain') || fileName.endsWith('.csv');
 
         if (isPdf || isCsv) {
-          isDocumentInput = true;
           const targetMime = isPdf ? 'application/pdf' : 'text/csv';
           const filePath = getTelegramFilePath(doc.file_id, botToken);
           const docMediaObj = fetchTelegramFileAsBase64(filePath, botToken, targetMime);
-          inputs.push(docMediaObj);
+          const blob = Utilities.newBlob(Utilities.base64Decode(docMediaObj.inlineData.data), targetMime, doc.file_name || (isPdf ? 'statement.pdf' : 'statement.csv'));
+          enqueueStatementFile(blob, doc.file_unique_id || doc.file_id);
+          sendTelegramMessage('📥 Statement queued in the Drive inbox. Use 💰 Budget → Reconcile statements from Drive, or wait for the automatic scan; review the results in _Reconcile.', chatId);
+          return HtmlService.createHtmlOutput('OK');
         } else {
           const warningUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
           fetchWithRetry(warningUrl, {
@@ -278,25 +278,7 @@ function doPost(e) {
 
           let finalTransactionsToConfirm = enrichedTransactions;
 
-          // Smart PDF Classification: Individual Receipt PDF vs. Bank Statement PDF
-          if (isDocumentInput) {
-            // Check if Gemini extracted multiple transactions (>1) indicating a multi-item Bank Statement
-            const isBankStatement = enrichedTransactions.length > 1;
-
-            if (isBankStatement) {
-              // Bank Statement Matching Exercise: compare against existing ledger
-              const missingTransactions = getMissingTransactions(enrichedTransactions);
-              if (missingTransactions.length === 0) {
-                sendTelegramMessage("📊 <b>Bank Statement Reconciled!</b> 100% of transactions in this statement are already logged in your sheet.", chatId);
-                return HtmlService.createHtmlOutput('OK');
-              }
-              finalTransactionsToConfirm = missingTransactions;
-            } else if (enrichedTransactions.length === 0) {
-              sendTelegramMessage("ℹ️ No financial transactions detected in your PDF. Please ensure it is a valid receipt or bank statement.", chatId);
-              return HtmlService.createHtmlOutput('OK');
-            }
-            // Note: Single-item PDF Receipts (length === 1) proceed directly to standard transaction proposal confirmation
-          } else if (finalTransactionsToConfirm.length === 0) {
+          if (finalTransactionsToConfirm.length === 0) {
             sendTelegramMessage("ℹ️ No financial transactions detected in your input. Try sending a receipt photo, voice note, or text spend (e.g., 'lunch 12.50').", chatId);
             return HtmlService.createHtmlOutput('OK');
           }

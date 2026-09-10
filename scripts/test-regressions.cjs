@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '..');
 const sourceFiles = ['constants.gs', 'config.gs', 'bootstrap.gs', 'reader.gs', 'enricher.gs',
-  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'coach.gs', 'webhook.gs', 'callbacks.gs'];
+  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'testStage3G.gs', 'coach.gs', 'webhook.gs', 'callbacks.gs'];
 function parseCsv(text) {
   const rows = []; let row = [], value = '', quoted = false;
   for (let i = 0; i < text.length; i++) {
@@ -28,11 +28,12 @@ function context() {
   const logs = [], props = {};
   const c = {
     Logger: { log: value => logs.push(String(value)) },
+    SpreadsheetApp: { flush: () => {} },
     PropertiesService: { getScriptProperties: () => ({
       getProperty: key => props[key] || null, setProperty: (key, value) => { props[key] = value; }
     }) },
     Utilities: {
-      parseCsv, getUuid: () => crypto.randomUUID(),
+      parseCsv, base64Encode: bytes => Buffer.from(bytes).toString('base64'), getUuid: () => crypto.randomUUID(),
       computeDigest: (_, text) => Array.from(crypto.createHash('sha256').update(text).digest()),
       DigestAlgorithm: { SHA_256: 'SHA_256' }, Charset: { UTF_8: 'UTF_8' },
       formatDate: (date, tz, fmt) => {
@@ -59,7 +60,7 @@ for (const file of fs.readdirSync(root).filter(f => f.endsWith('.gs'))) {
 for (const name of ['test_normalizeRows', 'test_findMissing', 'test_filterNonSpend',
   'test_cleanMerchantDisplayName', 'test_computeMerchantSimilarity',
   'test_dbsMultiSectionAndCardholderMatching', 'test_locationSuffixStrippingAndMultiFactorMatching',
-  'test_ambiguousInferencePipeline', 'test_grabAmbiguityAndConflictCheck', 'test_geminiTier3', 'test_reportedMerchantDuplicates', 'test_netsFlashpayDuplicate', 'test_claimedLedgerDuplicateReview', 'test_statementCardIdentityGuard']) {
+  'test_ambiguousInferencePipeline', 'test_grabAmbiguityAndConflictCheck', 'test_geminiTier3', 'test_reportedMerchantDuplicates', 'test_netsFlashpayDuplicate', 'test_claimedLedgerDuplicateReview', 'test_statementCardIdentityGuard', 'test_stage3GInboxRetries', 'test_stage3GInboxFailures', 'test_stage3GRecoveryMarker', 'test_stage3GMenuAndScheduler', 'test_stage3GModelCardSections', 'test_stage3GChangedFile', 'test_reconcileDateValues']) {
   test(name, c => {
     c[name]();
     assert.equal(c.logs.filter(l => l.includes('❌ FAIL')).length, 0);
@@ -133,13 +134,14 @@ test('coach does not turn a daily shortfall into monthly overspend', c => {
 // In-memory sheet double: verifies values, destinations, statuses and locking.
 // It records formula copy requests; it deliberately does NOT simulate Sheets formula evaluation.
 class Sheet {
-  constructor(name, data = []) { this.name = name; this.data = data; this.copies = []; this.validations = new Map(); }
+  constructor(name, data = []) { this.name = name; this.data = data; this.copies = []; this.validations = new Map(); this.formats = new Map(); }
   getName() { return this.name; }
   setName(name) { this.name = name; return this; }
   getLastRow() { return this.data.length; }
   getLastColumn() { return Math.max(0, ...this.data.map(r => r.length)); }
   getMaxRows() { return 100; }
   clear() { this.data = []; }
+  deleteRows(row, count) { this.data.splice(row - 1, count); }
   clearConditionalFormatRules() {}
   setFrozenRows() {}
   setColumnWidth() {}
@@ -154,7 +156,7 @@ class Sheet {
       setValue: value => range.setValues([[value]]),
       getFormula: () => '=F2-D2',
       copyTo: target => sheet.copies.push(target),
-      setNumberFormat: () => range, setFontWeight: () => range, setBackground: () => range,
+      setNumberFormat: format => { sheet.formats.set(col, format); return range; }, setFontWeight: () => range, setBackground: () => range,
       setFontColor: () => range, setHorizontalAlignment: () => range, setBackgrounds: () => range,
       insertCheckboxes: () => range, setDataValidation: rule => { sheet.validations.set(col, rule); return range; }
     };
@@ -165,7 +167,9 @@ const headers = ['✓', 'date', 'account', 'Cardholder', 'Тип', 'amount', 'me
 function storage(c) {
   const ledger = new Sheet('Transactions', [['header'], ['15.08.2026', 'DBS CC SGD', 'Расходы', 20, 20, 100, 80, 'Другое', 'Old Merchant', '', 'Wants']]);
   const staging = new Sheet('_Reconcile', [headers]);
-  const ss = { archives: [], getSheetByName: name => ({ Transactions: ledger, _Reconcile: staging })[name] || null };
+  const sheets = { Transactions: ledger, _Reconcile: staging };
+  const ss = { archives: [], getSheetByName: name => sheets[name] || null,
+    insertSheet: name => (sheets[name] = new Sheet(name)) };
   const lock = { held: false, acquired: 0, released: 0, hasLock() { return this.held; },
     tryLock() { assert.equal(this.held, false); this.held = true; this.acquired++; return true; },
     releaseLock() { assert.equal(this.held, true); this.held = false; this.released++; } };
@@ -297,6 +301,9 @@ test('staging does not assign unidentified cardholders to Val', c => {
   const { staging, ss } = storage(c);
   c.stageProposals([{ date: '09.09.2026', amount: 10, merchant: 'Merchant', category: 'Другое' }], [], ss, []);
   assert.equal(staging.data[1][3], 'Unknown');
+  assert.equal(typeof staging.data[1][1], 'number');
+  assert.equal(c.reconcileDateString(staging.data[1][1], ss), '09.09.2026');
+  assert.equal(staging.formats.get(2), 'dd.MM.yyyy');
   assert.match(staging.data[1][10], /Cardholder missing/);
 });
 test('repair sets E types, clears G merchant validation and retains H categories without changing review', c => {
@@ -343,5 +350,162 @@ test('preview always invokes the actual commit in dry-run mode', c => {
   c.commitStaged = (...values) => { args = values; return { dryRun: true }; };
   assert.equal(c.previewReconcileCommit().dryRun, true);
   assert.deepEqual(args, [false, true]);
+});
+test('Drive pipeline appends, preserves review, and deduplicates overlapping files', c => {
+  const { staging, ledger, ss } = storage(c);
+  staging.data.push(staged('Reviewed Merchant', 45));
+  const before = structuredClone(staging.data[1]);
+  const statement = { account: 'DBS CC SGD', rows: [
+    { date: '20.08.2026', amount: 31, merchant: 'New Shop', card_last4: '0465', type: 'PURCHASE' }
+  ] };
+  const first = c.reconcileAndStage(statement, ss, { append: true, fileId: 'first' });
+  assert.equal(first.stagedCount, 1);
+  assert.deepEqual(staging.data[1], before);
+  assert.equal(staging.data[2][3], 'Grandparents');
+  assert.match(staging.data[2][10], /^\[Drive:first\]/);
+  assert.equal(ledger.data.length, 2);
+  const second = c.reconcileAndStage(statement, ss, { append: true, fileId: 'overlap' });
+  assert.equal(second.stagedCount, 0);
+  assert.equal(second.matchedCount, 1);
+  assert.equal(staging.data.length, 3);
+  assert.equal(ss.archives.length, 0);
+});
+test('append rejects old staging layout without changing review', c => {
+  const { staging, ss } = storage(c);
+  staging.data[0] = ['old layout']; staging.data.push(staged('Keep me'));
+  const before = structuredClone(staging.data);
+  assert.throws(() => c.stageProposals([], [], ss, [], { append: true }), /layout is outdated/);
+  assert.deepEqual(staging.data, before);
+});
+test('menu import explicitly writes reviewed rows and moves them into history', c => {
+  const { staging, ledger, ss } = storage(c); ss.toast = () => {};
+  staging.data.push(staged('Menu Purchase', 50));
+  const result = c.importReviewedReconciliation();
+  assert.equal(result.committedCount, 1); assert.equal(ledger.data.length, 3);
+  assert.equal(staging.data.length, 1);
+  assert.equal(ss.getSheetByName('_ReconcileHistory').data[1][11], 'imported');
+  assert.equal(c.importReviewedReconciliation().committedCount, 0);
+});
+test('date repair preserves review, handles mixed cells, and is repeatable', c => {
+  const { staging, ss } = storage(c);
+  ss.getSpreadsheetTimeZone = () => 'Asia/Singapore';
+  const nativeDate = vm.runInContext("new Date('2026-08-31T16:00:00Z')", c);
+  for (const date of ['31.08.2026', nativeDate, '', '09.07.2026']) {
+    const row = staged('Keep edited merchant'); row[1] = date; staging.data.push(row);
+  }
+  const otherColumns = () => staging.data.map(row => row.filter((_, index) => index !== 1));
+  const before = structuredClone(otherColumns());
+  c.repairReconcileDates();
+  assert.deepEqual(otherColumns(), before);
+  assert.equal(staging.formats.get(2), 'dd.MM.yyyy');
+  assert.equal(staging.data[2][1], staging.data[1][1] + 1);
+  assert.equal(staging.data[3][1], '');
+  const repaired = structuredClone(staging.data);
+  c.repairReconcileDates();
+  assert.deepEqual(staging.data, repaired);
+  assert.equal(c.readPendingReconcileRows(ss)[1].date, '01.09.2026');
+});
+test('invalid repair changes no cells and releases the lock', c => {
+  const { staging, lock } = storage(c);
+  staging.data.push(staged('Keep'), staged('Invalid'));
+  staging.data[2][1] = '31.02.2026';
+  const before = structuredClone(staging.data);
+  assert.throws(() => c.repairReconcileDates(), /Row 3: Invalid staging date/);
+  assert.deepEqual(staging.data, before);
+  assert.equal(lock.held, false);
+});
+test('real date cells import with correct day and remain idempotent', c => {
+  const { staging, ledger, ss } = storage(c);
+  ss.getSpreadsheetTimeZone = () => 'Asia/Singapore';
+  const row = staged('September purchase', 30);
+  row[1] = vm.runInContext("new Date('2026-08-31T16:00:00Z')", c);
+  staging.data.push(row);
+  assert.equal(c.readPendingReconcileRows(ss)[0].date, '01.09.2026');
+  assert.equal(c.commitStaged(false, false, ss).committedCount, 1);
+  assert.equal(ledger.data[2][0], '01.09.2026');
+  assert.equal(c.commitStaged(false, false, ss).committedCount, 0);
+});
+for (const name of ['test_reviewQueueArchiveRecovery', 'test_reviewQueueDismissalMatching']) {
+  test(name, c => {
+    c[name]();
+    assert.equal(c.logs.filter(l => l.includes('❌ FAIL')).length, 0);
+    assertions += c.logs.filter(l => l.includes('✅ PASS')).length;
+  });
+}
+test('selected dismissal archives only the selection with reason and never imports', c => {
+  const { staging, ledger, ss } = storage(c);
+  staging.data.push(staged('Keep checked'), staged('Dismiss me'));
+  const ledgerBefore = structuredClone(ledger.data);
+  ss.getActiveSheet = () => staging;
+  ss.getActiveRangeList = () => ({ getRanges: () => [{ getRow: () => 3, getLastRow: () => 3 }] });
+  ss.toast = () => {};
+  c.SpreadsheetApp.getUi = () => ({ ButtonSet: { OK_CANCEL: 1 }, Button: { OK: 'OK' },
+    prompt: () => ({ getSelectedButton: () => 'OK', getResponseText: () => 'Recorded in another account' }) });
+  assert.equal(c.dismissSelectedReconcileRows(), 1);
+  assert.deepEqual(ledger.data, ledgerBefore);
+  assert.equal(staging.data.length, 2);
+  assert.equal(staging.data[1][6], 'Keep checked');
+  assert.equal(staging.data[1][0], true);
+  const archived = ss.getSheetByName('_ReconcileHistory').data[1];
+  assert.equal(archived[11], 'dismissed');
+  assert.equal(archived[12], 'Recorded in another account');
+});
+test('dismissal cancellation and concurrent review changes preserve pending rows', c => {
+  const { staging, ss } = storage(c);
+  staging.data.push(staged('Keep'));
+  ss.getActiveSheet = () => staging;
+  ss.getActiveRangeList = () => ({ getRanges: () => [{ getRow: () => 2, getLastRow: () => 2 }] });
+  const ui = { ButtonSet: { OK_CANCEL: 1 }, Button: { OK: 'OK' },
+    prompt: () => ({ getSelectedButton: () => 'CANCEL' }) };
+  c.SpreadsheetApp.getUi = () => ui;
+  assert.equal(c.dismissSelectedReconcileRows(), 0);
+  assert.equal(staging.data[1][11], 'proposed');
+  ui.prompt = () => {
+    staging.data[1][6] = 'Concurrent edit';
+    return { getSelectedButton: () => 'OK', getResponseText: () => '' };
+  };
+  assert.throws(() => c.dismissSelectedReconcileRows(), /review changed/);
+  assert.equal(staging.data[1][11], 'proposed');
+  assert.equal(ss.getSheetByName('_ReconcileHistory'), null);
+});
+test('dismissal survives edited fields and another upload through the actual pipeline', c => {
+  const { staging, ss } = storage(c);
+  const statement = { account: 'DBS CC SGD', rows: [
+    { date: '20.08.2026', amount: 31, merchant: 'New Shop', card_last4: '0465', type: 'PURCHASE' }
+  ] };
+  assert.equal(c.reconcileAndStage(statement, ss, { append: true, fileId: 'first' }).stagedCount, 1);
+  staging.data[1][6] = 'Reviewed name';
+  staging.data[1][5] = 32;
+  staging.data[1][11] = 'dismissed';
+  c.withBudgetWriteLock(() => c.archiveCompletedReconcileRowsUnlocked(ss));
+  const again = c.reconcileAndStage(statement, ss, { append: true, fileId: 'new-upload' });
+  assert.equal(again.stagedCount, 0);
+  assert.equal(again.reviewedExcludedCount, 1);
+  assert.equal(staging.data.length, 1);
+  assert.equal(c.stagingHasDriveFile(ss, 'first'), true);
+});
+test('archive write failure preserves completed rows for retry', c => {
+  const { staging, ss } = storage(c);
+  staging.data.push(staged('Completed'));
+  staging.data[1][11] = 'imported';
+  const insert = ss.insertSheet;
+  ss.insertSheet = name => {
+    const sheet = insert(name), getRange = sheet.getRange.bind(sheet);
+    sheet.getRange = (row, ...args) => {
+      const range = getRange(row, ...args);
+      if (row > 1) range.setValues = () => { throw new Error('Archive write failed'); };
+      return range;
+    };
+    return sheet;
+  };
+  assert.throws(() => c.withBudgetWriteLock(() => c.archiveCompletedReconcileRowsUnlocked(ss)), /Archive write failed/);
+  assert.equal(staging.data[1][6], 'Completed');
+  assert.equal(staging.data[1][11], 'imported');
+});
+test('dismissed rows are never imported even if ticked after archive failure', c => {
+  const { staging, ledger, ss } = storage(c);
+  staging.data.push(staged('Dismissed')); staging.data[1][11] = 'dismissed';
+  assert.equal(c.commitStaged(false, false, ss).committedCount, 0);
+  assert.equal(ledger.data.length, 2);
 });
 console.log(`${passed} tests passed; ${assertions} existing assertions checked; all .gs files parsed.`);

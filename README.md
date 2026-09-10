@@ -138,3 +138,32 @@ identified from the Cardholder field or the card-0465 source marker. To inspect
 actual would-be rows, tick the records of interest and run `previewReconcileCommit()`.
 It uses the real commit/writer path in dry-run mode, logs Notes, and leaves both
 Transactions and staging statuses unchanged.
+
+## Stage 3G: reconcile from Sheets or a Drive inbox
+
+See [Stage 3G setup and acceptance](docs/stage-3g-entry-points.md). After syncing and
+reloading the sheet, use **💰 Budget → Set up Drive inbox and automatic scan**,
+then drop original statements into the inbox. **Reconcile statements from Drive**
+runs immediately; **Review staging → Import ticked rows** completes the workflow.
+The scheduled scanner stages only and never automatically imports transactions.
+
+### Repair staging date sorting
+
+New proposals store real Sheets dates in column B, displayed as `DD.MM.YYYY`.
+After syncing this update, run `repairReconcileDates()` once in the Apps Script editor,
+or reload the sheet and choose **💰 Budget → Repair staging dates**. This converts
+existing text dates in place, preserving all other columns and row order. Then sort
+the entire review table by column B (ascending). Invalid dates are reported by row
+before any cells are changed. Import and pending-duplicate checks accept both legacy
+text dates and real dates using the spreadsheet timezone.
+
+### Active reconciliation queue and history
+
+After syncing and reloading Sheets, use **💰 Budget → Reviewed — do not import selected rows**
+for edge cases: highlight the rows, enter a reason, and they move to `_ReconcileHistory`.
+The import menu moves successfully imported rows there automatically. Ticking alone keeps
+a row in the queue until import succeeds; suspected duplicates remain for a decision.
+Use **Archive completed review rows** to clear old imported rows already in staging, and
+**Open review history** to see completed decisions. Dismissed occurrences with a known
+original statement identity are remembered on repeat uploads. See the
+[review queue guide](docs/stage-3g-entry-points.md#keeping-the-review-queue-clear).

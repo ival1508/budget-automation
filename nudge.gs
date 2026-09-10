@@ -419,6 +419,12 @@ function dispatch() {
     }
   }
 
+  // Drive statements share this heartbeat; no additional scheduler is needed.
+  if (typeof scanConfiguredStatementInbox === 'function') {
+    try { scanConfiguredStatementInbox(Math.max(0, 240000 - (Date.now() - now.getTime()))); }
+    catch (error) { Logger.log('Statement inbox scan failed: ' + error.message); }
+  }
+
   // 6. Month-Rollover Jobs (Last day of month at 23:30 SGT) - placeholder for Stages 3/5/6
   if (isLastDayOfMonth && isTimeInWindow('23:30')) {
     Logger.log('⏭️ [DISPATCH] Month-rollover jobs not yet implemented (Stages 3/5/6). Skipping.');

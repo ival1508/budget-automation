@@ -588,6 +588,7 @@ CRITICAL INSTRUCTIONS:
 3. Standardize payments/credits/refunds to NEGATIVE numbers (e.g. -500.00) or type "Получение денег".
 4. Determine account if mentioned (e.g. "DBS CC SGD", "Citibank CC", "DBS SGD"). If ambiguous, return null.
 5. Return clean JSON with "account" and "transactions" array.
+6. Include card_last4 on EACH transaction, copied from its main/supplementary card section. Preserve all sections. Never infer or invent a card number; return an empty string when absent.
 
 FILENAME: ${fileName || 'statement.csv'}
 CSV CONTENT:
@@ -625,6 +626,9 @@ ${csvText.slice(0, 50000)}
         where: item.where || item.merchant || '',
         type: isPayment ? 'Получение денег' : (item.type || 'Расходы'),
         currency: item.currency || 'SGD',
+        account: item.account || parsedData.account || '',
+        card_number: String(item.card_last4 || item.card_number || '').replace(/\D/g, '').slice(-4),
+        card_last4: String(item.card_last4 || item.card_number || '').replace(/\D/g, '').slice(-4),
         raw_row: item
       };
     });
@@ -657,7 +661,7 @@ ${csvText.slice(0, 50000)}
  * @param {Object} fileDetails - File details { text, bytes, mimeType, name }.
  * @return {Object} Parsed statement result { account, rows[], period, error? }.
  */
-function parsePdfStatement(fileDetails) {
+function parsePdfStatement(fileDetails, optApiKey) {
   // 1. Check for PDF password protection / encryption
   if (isPdfEncrypted(fileDetails.bytes, fileDetails.text)) {
     Logger.log('🔒 Encrypted PDF detected. Returning error without failing silently.');
@@ -671,7 +675,7 @@ function parsePdfStatement(fileDetails) {
   }
 
   // 2. Check API key for multimodal parsing
-  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  const apiKey = optApiKey === undefined ? PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY') : optApiKey;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is missing in Script Properties for PDF statement parsing.');
   }
@@ -700,8 +704,9 @@ RULES:
 2. Standardize purchase amounts to POSITIVE numbers (e.g., 14.87, 100.00).
 3. Standardize payments/credits/repayments to NEGATIVE numbers (e.g., -500.00).
 4. Identify the bank account issuer (e.g., "DBS CC SGD", "Citibank CC", "DBS SGD"). If ambiguous, return null.
-5. If the document cannot be read due to password encryption, return JSON with {"error": "encrypted"}.
-6. Output JSON with fields "account", "transactions": [{"date", "amount", "merchant", "type", "currency"}]`;
+5. Include card_last4 on EACH transaction from its main/supplementary card section. Preserve all sections and never invent card numbers.
+6. If the document cannot be read due to password encryption, return JSON with {"error": "encrypted"}.
+7. Output JSON with fields "account", "transactions": [{"date", "amount", "merchant", "type", "currency", "card_last4"}]`;
 
   const payload = {
     contents: [
@@ -755,6 +760,9 @@ RULES:
         where: item.where || item.merchant || '',
         type: isPayment ? 'Получение денег' : (item.type || 'Расходы'),
         currency: item.currency || 'SGD',
+        account: item.account || parsedData.account || '',
+        card_number: String(item.card_last4 || item.card_number || '').replace(/\D/g, '').slice(-4),
+        card_last4: String(item.card_last4 || item.card_number || '').replace(/\D/g, '').slice(-4),
         raw_row: item
       };
     });
@@ -2308,7 +2316,7 @@ function readLedgerRowsForReconciliation(optSpreadsheet) {
         date: dateStr,
         account: accountStr,
         type: typeStr,
-        amount: amountVal,
+        amount: ['Получение денег', 'Доходы', 'Доходы - премия', 'Доходы - лёгкие деньги'].includes(typeStr) ? -Math.abs(amountVal) : Math.abs(amountVal),
         category: categoryStr,
         where: whereStr,
         merchant: whereStr,
@@ -3221,16 +3229,67 @@ function repairReconcileDropdowns() {
   });
 }
 
-function stageProposals(proposals, ambiguous, optSpreadsheet, optLedgerRows) {
-  return withBudgetWriteLock(() => stageProposalsUnlocked(proposals, ambiguous, optSpreadsheet, optLedgerRows));
+/** Read date cells in the spreadsheet timezone, including legacy text dates. */
+function reconcileDateString(value, ss) {
+  if (value === '' || value === null || value === undefined) return '';
+  if (value instanceof Date) {
+    const timezone = ss && typeof ss.getSpreadsheetTimeZone === 'function'
+      ? ss.getSpreadsheetTimeZone() : 'Asia/Singapore';
+    return Utilities.formatDate(value, timezone, 'dd.MM.yyyy');
+  }
+  if (typeof value === 'number') {
+    const date = new Date(Date.UTC(1899, 11, 30) + Math.floor(value) * 86400000);
+    return Utilities.formatDate(date, 'UTC', 'dd.MM.yyyy');
+  }
+  return normalizeDateString(value);
 }
 
-function stageProposalsUnlocked(proposals, ambiguous, optSpreadsheet, optLedgerRows) {
+/** Sheets date serials preserve calendar days without script timezone conversion. */
+function reconcileDateSerial(value, ss) {
+  const text = reconcileDateString(value, ss);
+  if (!text) return '';
+  const parts = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(text);
+  if (!parts) throw new Error('Invalid staging date: ' + text);
+  const day = Number(parts[1]), month = Number(parts[2]), year = Number(parts[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    throw new Error('Invalid staging date: ' + text);
+  }
+  return (date.getTime() - Date.UTC(1899, 11, 30)) / 86400000;
+}
+
+/** Convert only column B; validate every date before changing the review. */
+function repairReconcileDates() {
+  return withBudgetWriteLock(() => {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(RECONCILE_STAGING_TAB_NAME);
+    if (!sheet) throw new Error('_Reconcile tab not found.');
+    assertCurrentReconcileSchema(sheet);
+    const count = sheet.getLastRow() - 1;
+    if (count < 1) return 0;
+    const range = sheet.getRange(2, 2, count, 1);
+    const dates = range.getValues().map((row, index) => {
+      try { return [reconcileDateSerial(row[0], ss)]; }
+      catch (error) { throw new Error('Row ' + (index + 2) + ': ' + error.message); }
+    });
+    range.setNumberFormat('dd.MM.yyyy');
+    range.setValues(dates);
+    Logger.log('Repaired staging dates. Sort the entire review by column B to order chronologically.');
+    return count;
+  });
+}
+
+function stageProposals(proposals, ambiguous, optSpreadsheet, optLedgerRows, optOptions) {
+  return withBudgetWriteLock(() => stageProposalsUnlocked(proposals, ambiguous, optSpreadsheet, optLedgerRows, optOptions));
+}
+
+function stageProposalsUnlocked(proposals, ambiguous, optSpreadsheet, optLedgerRows, optOptions) {
   const spreadsheet = optSpreadsheet || SpreadsheetApp.getActiveSpreadsheet();
   if (!spreadsheet) {
     throw new Error('stageProposals: No spreadsheet instance available.');
   }
 
+  const options = optOptions || {};
   const cleanProposals = Array.isArray(proposals) ? proposals : [];
   const ambiguousRows = Array.isArray(ambiguous) ? ambiguous : [];
 
@@ -3240,20 +3299,25 @@ function stageProposalsUnlocked(proposals, ambiguous, optSpreadsheet, optLedgerR
     sheet = spreadsheet.insertSheet(RECONCILE_STAGING_TAB_NAME);
   }
 
+  if (options.append) assertCurrentReconcileSchema(sheet);
+
   // Preserve the complete previous review (including edits, ticks and statuses).
   // Copy must succeed before clearing; a failed archive leaves the review intact.
-  if (sheet.getLastRow() > 1) {
+  const startRow = options.append ? Math.max(2, sheet.getLastRow() + 1) : 2;
+  if (!options.append && sheet.getLastRow() > 1) {
     const archive = sheet.copyTo(spreadsheet);
     archive.setName('_Reconcile_' + Utilities.getUuid());
     Logger.log('Previous reconciliation review preserved in ' + archive.getName());
   }
 
   // 2. Clear existing sheet contents and validations
-  sheet.clear();
-  sheet.clearConditionalFormatRules();
+  if (!options.append) {
+    sheet.clear();
+    sheet.clearConditionalFormatRules();
+  }
 
-  // Enforce plain text '@' format across entire Column B (date) so Sheets never coerces date strings to Date objects
-  sheet.getRange(1, 2, sheet.getMaxRows(), 1).setNumberFormat('@');
+  // Store numeric date values with a day-first display format.
+  sheet.getRange(1, 2, sheet.getMaxRows(), 1).setNumberFormat('dd.MM.yyyy');
   if (typeof SpreadsheetApp !== 'undefined' && typeof SpreadsheetApp.flush === 'function') {
     SpreadsheetApp.flush();
   }
@@ -3285,7 +3349,7 @@ function stageProposalsUnlocked(proposals, ambiguous, optSpreadsheet, optLedgerR
 
   if (cleanProposals.length === 0 && ambiguousRows.length === 0) {
     applyReconcileDropdowns(sheet, Object.keys(getCategoryBucketMap(spreadsheet)));
-    Logger.log(`ℹ️ stageProposals: No rows to stage. Initialized empty "${RECONCILE_STAGING_TAB_NAME}" tab.`);
+    Logger.log(`ℹ️ stageProposals: No rows to stage. Review retained in "${RECONCILE_STAGING_TAB_NAME}".`);
     return { stagedCount: 0, proposalsCount: 0, ambiguousCount: 0, sheet: sheet };
   }
 
@@ -3422,8 +3486,11 @@ function stageProposalsUnlocked(proposals, ambiguous, optSpreadsheet, optLedgerR
 
   // 8. Build 2D values and backgrounds for sheet staging
   const numRows = stagingQueue.length;
+  const requiredRows = startRow + numRows - 1;
+  if (requiredRows > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), requiredRows - sheet.getMaxRows());
   const rows2D = [];
   const backgrounds = [];
+  const reviewMetadata = [];
 
   for (let i = 0; i < numRows; i++) {
     const entry = stagingQueue[i];
@@ -3548,11 +3615,14 @@ function stageProposalsUnlocked(proposals, ambiguous, optSpreadsheet, optLedgerR
       r.notes = '';
     }
 
+    if (options.fileId) sourceRowStr = `[Drive:${options.fileId}] ` + sourceRowStr;
+    reviewMetadata.push(['', Utilities.getUuid(), reconcileReviewKey(dateStr, accountStr, cardholderStr, numAmt, rawMerchant)]);
+
     // Row layout (12 columns):
     // 1:✓, 2:date, 3:account, 4:Cardholder, 5:Тип, 6:amount, 7:merchant, 8:proposed category, 9:proposed bucket, 10:confidence, 11:source_row, 12:status
     rows2D.push([
       false,               // 1. ✓ (checkbox unchecked)
-      dateStr,             // 2. date
+      reconcileDateSerial(dateStr, spreadsheet), // 2. real Sheets date
       accountStr,          // 3. account
       cardholderStr,       // 4. Cardholder (Val / Rita / Grandparents)
       typeStr,             // 5. Тип
@@ -3602,7 +3672,7 @@ function stageProposalsUnlocked(proposals, ambiguous, optSpreadsheet, optLedgerR
       });
     }
     canonicalMap.get(normCanon).instances.push({
-      rowNum: i + 2,
+      rowNum: i + startRow,
       rawMerchant: entry.rawMerchant,
       category: r.category,
       source: (entry.catInference && entry.catInference.source) || 'unknown',
@@ -3623,33 +3693,36 @@ function stageProposalsUnlocked(proposals, ambiguous, optSpreadsheet, optLedgerR
     }
   });
 
-  // Set Date column (Col 2) format to plain text '@' BEFORE setValues to prevent Sheets date coercion
-  sheet.getRange(2, 2, numRows, 1).setNumberFormat('@');
+  // Apply the date format before writing numeric date serials.
+  sheet.getRange(startRow, 2, numRows, 1).setNumberFormat('dd.MM.yyyy');
 
   // 9. Batch write values and background colors
-  const dataRange = sheet.getRange(2, 1, numRows, headers.length);
+  const dataRange = sheet.getRange(startRow, 1, numRows, headers.length);
   dataRange.setValues(rows2D);
+  sheet.getRange(1, 13, 1, 3).setValues([['review_reason', 'review_id', 'statement_key']]);
+  sheet.getRange(startRow, 13, numRows, 3).setValues(reviewMetadata);
+  if (typeof sheet.hideColumns === 'function') sheet.hideColumns(14, 2);
   dataRange.setBackgrounds(backgrounds);
 
-  // Re-affirm plain text format on Date column
-  sheet.getRange(2, 2, numRows, 1).setNumberFormat('@');
+  // Keep the date display consistent.
+  sheet.getRange(startRow, 2, numRows, 1).setNumberFormat('dd.MM.yyyy');
 
   // 10. Checkbox validation on Column 1
-  sheet.getRange(2, 1, numRows, 1).insertCheckboxes();
+  sheet.getRange(startRow, 1, numRows, 1).insertCheckboxes();
 
   // 11. Number formatting on Column 6 (amount) and Column 10 (confidence)
-  sheet.getRange(2, 6, numRows, 1).setNumberFormat('#,##0.00;[Red]-#,##0.00');
-  sheet.getRange(2, 10, numRows, 1).setNumberFormat('0.0');
+  sheet.getRange(startRow, 6, numRows, 1).setNumberFormat('#,##0.00;[Red]-#,##0.00');
+  sheet.getRange(startRow, 10, numRows, 1).setNumberFormat('0.0');
 
   // 12. Alignments
-  sheet.getRange(2, 1, numRows, 1).setHorizontalAlignment('center'); // ✓
-  sheet.getRange(2, 2, numRows, 1).setHorizontalAlignment('center'); // date
-  sheet.getRange(2, 4, numRows, 1).setHorizontalAlignment('center'); // Cardholder
-  sheet.getRange(2, 5, numRows, 1).setHorizontalAlignment('center'); // Тип
-  sheet.getRange(2, 6, numRows, 1).setHorizontalAlignment('right');  // amount
-  sheet.getRange(2, 9, numRows, 1).setHorizontalAlignment('center'); // proposed bucket
-  sheet.getRange(2, 10, numRows, 1).setHorizontalAlignment('center'); // confidence
-  sheet.getRange(2, 12, numRows, 1).setHorizontalAlignment('center'); // status
+  sheet.getRange(startRow, 1, numRows, 1).setHorizontalAlignment('center'); // ✓
+  sheet.getRange(startRow, 2, numRows, 1).setHorizontalAlignment('center'); // date
+  sheet.getRange(startRow, 4, numRows, 1).setHorizontalAlignment('center'); // Cardholder
+  sheet.getRange(startRow, 5, numRows, 1).setHorizontalAlignment('center'); // Тип
+  sheet.getRange(startRow, 6, numRows, 1).setHorizontalAlignment('right');  // amount
+  sheet.getRange(startRow, 9, numRows, 1).setHorizontalAlignment('center'); // proposed bucket
+  sheet.getRange(startRow, 10, numRows, 1).setHorizontalAlignment('center'); // confidence
+  sheet.getRange(startRow, 12, numRows, 1).setHorizontalAlignment('center'); // status
 
   // Apply type/category dropdowns and remove obsolete merchant validation.
   applyReconcileDropdowns(sheet, validCategories);
@@ -3750,7 +3823,7 @@ function computeCardholderBreakdown(parsedRows, matchedRows, proposalRows, ambig
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSpreadsheet] - Target spreadsheet instance.
  * @return {Object} Reconciliation summary.
  */
-function reconcileAndStage(statementInput, optSpreadsheet) {
+function reconcileAndStage(statementInput, optSpreadsheet, optOptions) {
   const ss = optSpreadsheet || SpreadsheetApp.getActiveSpreadsheet();
   if (!ss) {
     throw new Error('reconcileAndStage: No spreadsheet available.');
@@ -3766,18 +3839,21 @@ function reconcileAndStage(statementInput, optSpreadsheet) {
   }
 
   // 3B: Normalize statement rows
-  const normalizedStatementRows = normalizeRows(parsed.rows || []);
+  const allNormalizedRows = normalizeRows((parsed.rows || []).map(row => ({ ...row, account: row.account || parsed.account })));
 
   // Never reconcile a household DBS statement after its card sections were lost.
-  const unidentifiedDbsRows = normalizedStatementRows.filter(row =>
+  const unidentifiedDbsRows = allNormalizedRows.filter(row =>
     (row.account || parsed.account) === 'DBS CC SGD' &&
     String(row.card_last4 || row.card_number || '').replace(/\D/g, '').slice(-4).length !== 4);
   if (unidentifiedDbsRows.length) {
     throw new Error(`${unidentifiedDbsRows.length} DBS row(s) have no card number. Import the original bank CSV with main/supplementary card sections; reconciliation stopped before staging.`);
   }
+  const reviewFilter = filterDismissedReconcileRows(allNormalizedRows, ss);
+  const normalizedStatementRows = reviewFilter.rows;
 
   // 3C: Read Transactions ledger and match (PURE READ)
-  const ledgerRows = readLedgerRowsForReconciliation(ss);
+  const committedLedgerRows = readLedgerRowsForReconciliation(ss);
+  const ledgerRows = committedLedgerRows.concat(optOptions && optOptions.append ? readPendingReconcileRows(ss) : []);
   const matchResult = findMissing(normalizedStatementRows, ledgerRows, getMerchantAliases());
   Logger.log(`[Reconcile input] Spreadsheet: ${ss.getName ? ss.getName() : 'unknown'} | ID: ${ss.getId ? ss.getId() : 'unknown'} | ledger rows: ${ledgerRows.length}`);
   for (const item of matchResult.ambiguous) {
@@ -3791,7 +3867,7 @@ function reconcileAndStage(statementInput, optSpreadsheet) {
   const filterResult = filterNonSpend(matchResult.missing);
 
   // 3E: Stage proposals & ambiguous rows
-  const stageResult = stageProposals(filterResult.proposals, matchResult.ambiguous, ss, ledgerRows);
+  const stageResult = stageProposals(filterResult.proposals, matchResult.ambiguous, ss, committedLedgerRows, optOptions);
 
   // Per-card breakdown (Task 5)
   const cardholderBreakdown = computeCardholderBreakdown(
@@ -3807,6 +3883,7 @@ function reconcileAndStage(statementInput, optSpreadsheet) {
     period: parsed.period,
     totalParsed: (parsed.rows || []).length,
     normalizedCount: normalizedStatementRows.length,
+    reviewedExcludedCount: reviewFilter.excludedCount,
     matchedCount: matchResult.matched.length,
     proposalsCount: filterResult.proposals.length,
     ambiguousCount: matchResult.ambiguous.length,
@@ -3905,7 +3982,7 @@ function commitStaged(useTestSheet, optDryRun, optSpreadsheet) {
 
       let dateStr, accountStr, cardholderStr, typeStr, rawAmt, rawMerchant, catStr, bucketStr, confVal, sourceRowStr, status;
       if (hasCardholderCol) {
-        dateStr = String(row[1] || '').trim();
+        dateStr = reconcileDateString(row[1], ss);
         accountStr = String(row[2] || (typeof DEFAULT_ACCOUNT !== 'undefined' ? DEFAULT_ACCOUNT : 'DBS CC SGD')).trim();
         cardholderStr = String(row[3] || '').trim();
         typeStr = String(row[4] || 'Расходы').trim();
@@ -3917,7 +3994,7 @@ function commitStaged(useTestSheet, optDryRun, optSpreadsheet) {
         sourceRowStr = String(row[10] || '');
         status = String(row[11] || '').trim().toLowerCase();
       } else {
-        dateStr = String(row[1] || '').trim();
+        dateStr = reconcileDateString(row[1], ss);
         accountStr = String(row[2] || (typeof DEFAULT_ACCOUNT !== 'undefined' ? DEFAULT_ACCOUNT : 'DBS CC SGD')).trim();
         cardholderStr = '';
         typeStr = String(row[3] || 'Расходы').trim();
@@ -3936,8 +4013,8 @@ function commitStaged(useTestSheet, optDryRun, optSpreadsheet) {
       }
 
       // Skip already imported rows (Idempotency safeguard)
-      if (status === 'imported') {
-        Logger.log(`[commitStaged] Row ${r + 2} skipped: already marked 'imported'.`);
+      if (status === 'imported' || status === 'dismissed') {
+        Logger.log(`[commitStaged] Row ${r + 2} skipped: already marked '${status}'.`);
         continue;
       }
 
@@ -4053,7 +4130,7 @@ function dryRunCommitSample(optSpreadsheet) {
       const isGrandparents = (cardholder === 'Grandparents' || /grandparents|0465/i.test(String(row[10] || '')));
       const notes = isGrandparents ? 'Grandparents' : '';
 
-      const colA_date = String(row[1] || '').trim();
+      const colA_date = reconcileDateString(row[1], ss);
       const colB_account = String(row[2] || '').trim();
       const colC_type = isCredit ? 'Получение денег' : 'Расходы';
       const colD_amount = finalAmt;
@@ -4876,3 +4953,418 @@ function runDiagnostic_GrabAndMerchants() {
 
 
 
+
+// ============================================================================
+// STAGE 3G — Sheets menu, Drive inbox and editor entry points (no Telegram I/O)
+// ============================================================================
+const RECONCILE_IMPORT_LOG = '_ReconcileFiles';
+
+function onOpen() {
+  buildBudgetMenu(SpreadsheetApp.getUi());
+}
+
+function buildBudgetMenu(ui) {
+  ui.createMenu('💰 Budget')
+    .addItem('Reconcile statements from Drive', 'reconcileFromDrive')
+    .addItem('Review staging', 'reviewReconcileStaging')
+    .addItem('Preview ticked rows', 'previewReconcileCommit')
+    .addItem('Import ticked rows from staging', 'importReviewedReconciliation')
+    .addItem('Reviewed — do not import selected rows', 'dismissSelectedReconcileRows')
+    .addItem('Archive completed review rows', 'archiveCompletedReconcileRows')
+    .addItem('Open review history', 'openReconcileHistory')
+    .addSeparator()
+    .addItem('Set up Drive inbox and automatic scan', 'setupStatementInbox')
+    .addItem('Pause automatic inbox scan', 'pauseStatementInbox')
+    .addItem('Retry failed inbox files', 'retryStatementInboxFailures')
+    .addItem('Repair staging dropdowns', 'repairReconcileDropdowns')
+    .addItem('Repair staging dates', 'repairReconcileDates')
+    .addSeparator()
+    .addItem('Run morning coach now', 'sendMorningCoach')
+    .addToUi();
+}
+
+function getStatementInboxConfig() {
+  const p = PropertiesService.getScriptProperties();
+  const config = {
+    spreadsheetId: p.getProperty('STATEMENT_SPREADSHEET_ID'),
+    inboxId: p.getProperty('STATEMENT_INBOX_ID'),
+    processedId: p.getProperty('STATEMENT_PROCESSED_ID'),
+    enabled: p.getProperty('STATEMENT_SCAN_ENABLED') === 'true'
+  };
+  if (!config.spreadsheetId || !config.inboxId || !config.processedId) {
+    throw new Error('Choose Budget → Set up Drive inbox and automatic scan first.');
+  }
+  return config;
+}
+
+function setupStatementInbox() {
+  return withBudgetWriteLock(() => {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const p = PropertiesService.getScriptProperties();
+    const configured = p.getProperty('STATEMENT_SPREADSHEET_ID');
+    if (configured && configured !== ss.getId()) throw new Error('This inbox is already linked to a different spreadsheet.');
+    function child(parent, name) {
+      const found = parent.getFoldersByName(name);
+      if (!found.hasNext()) return parent.createFolder(name);
+      const folder = found.next();
+      if (found.hasNext()) throw new Error(`Multiple ${name} folders found; set the statement folder IDs in Script Properties explicitly.`);
+      return folder;
+    }
+    let inbox, processed;
+    if (p.getProperty('STATEMENT_INBOX_ID') && p.getProperty('STATEMENT_PROCESSED_ID')) {
+      inbox = DriveApp.getFolderById(p.getProperty('STATEMENT_INBOX_ID'));
+      processed = DriveApp.getFolderById(p.getProperty('STATEMENT_PROCESSED_ID'));
+    } else {
+      const root = child(DriveApp.getRootFolder(), 'BudgetStatements');
+      inbox = child(root, 'inbox'); processed = child(root, 'processed');
+    }
+    if (inbox.getId() === processed.getId()) throw new Error('Inbox and processed folders must differ.');
+    p.setProperty('STATEMENT_SPREADSHEET_ID', ss.getId());
+    p.setProperty('STATEMENT_INBOX_ID', inbox.getId());
+    p.setProperty('STATEMENT_PROCESSED_ID', processed.getId());
+    // Reuse the master dispatcher. Do not delete or duplicate existing triggers.
+    ensureStatementDispatcher(ScriptApp);
+    p.setProperty('STATEMENT_SCAN_ENABLED', 'true');
+    const message = 'Drop original CSV/PDF statements into ' + inbox.getUrl();
+    Logger.log(message); ss.toast(message, 'Statement inbox ready', 15);
+    return { inboxUrl: inbox.getUrl(), processedUrl: processed.getUrl() };
+  });
+}
+
+function pauseStatementInbox() {
+  PropertiesService.getScriptProperties().setProperty('STATEMENT_SCAN_ENABLED', 'false');
+  SpreadsheetApp.getActiveSpreadsheet().toast('Automatic statement scans paused.', 'Budget');
+}
+
+function reviewReconcileStaging() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(RECONCILE_STAGING_TAB_NAME);
+  if (!sheet) throw new Error('No staging review yet. Reconcile a statement first.');
+  ss.setActiveSheet(sheet);
+}
+
+function importReviewedReconciliation() {
+  // The user explicitly selected Import. Editor/preview dry-run defaults remain intact.
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const result = commitStaged(false, false, ss);
+  const archived = withBudgetWriteLock(() => archiveCompletedReconcileRowsUnlocked(ss));
+  ss.toast(`${result.committedCount} imported; ${archived} completed rows moved to history; ${result.skippedCount} duplicates retained for review.`, 'Budget');
+  return result;
+}
+
+const RECONCILE_HISTORY_TAB = '_ReconcileHistory';
+
+/** Deliberately exact: no fuzzy aliases, date tolerance, or cross-card matching. */
+function reconcileReviewKey(date, account, cardholder, amount, descriptor) {
+  if (!date || !account || !descriptor || !cardholder || cardholder === 'Unknown') return '';
+  return JSON.stringify([normalizeDateString(date), String(account).trim(), String(cardholder).trim(),
+    Math.round(Number(amount) * 100), String(descriptor).trim().replace(/\s+/g, ' ').toUpperCase()]);
+}
+
+function reconcileReviewKeyFromCells(row, ss) {
+  if (row[14]) return String(row[14]);
+  // Legacy reviews can only be remembered when the original descriptor is available.
+  const source = /Statement: "([\s\S]*)"(?: \([^)]*\))?$/.exec(String(row[10] || ''));
+  if (!source) return '';
+  const credit = ['Получение денег', 'Доходы', 'Доходы - премия', 'Доходы - лёгкие деньги'].includes(row[4]);
+  return reconcileReviewKey(reconcileDateString(row[1], ss), row[2], row[3],
+    credit ? -Math.abs(Number(row[5])) : Math.abs(Number(row[5])), source[1]);
+}
+
+/** Consume one exclusion per occurrence, including records awaiting archive retry. */
+function filterDismissedReconcileRows(rows, ss) {
+  const counts = new Map(), seenIds = new Set();
+  for (const name of [RECONCILE_HISTORY_TAB, RECONCILE_STAGING_TAB_NAME]) {
+    const sheet = ss.getSheetByName(name);
+    if (!sheet || sheet.getLastRow() < 2) continue;
+    assertCurrentReconcileSchema(sheet);
+    const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 15).getValues();
+    for (const row of data) {
+      if (String(row[11]).toLowerCase() !== 'dismissed') continue;
+      const id = String(row[13] || '');
+      if (id && seenIds.has(id)) continue;
+      if (id) seenIds.add(id);
+      const key = reconcileReviewKeyFromCells(row, ss);
+      if (key) counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  const kept = rows.filter(row => {
+    const cardholder = row.cardholder || (row.card_last4 ? resolveCardholder(row.card_last4) : '');
+    const key = reconcileReviewKey(row.date, row.account, cardholder, row.amount, row.raw_merchant || row.merchant);
+    const count = counts.get(key) || 0;
+    if (!count) return true;
+    counts.set(key, count - 1);
+    return false;
+  });
+  return { rows: kept, excludedCount: rows.length - kept.length };
+}
+
+function openReconcileHistory() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(RECONCILE_HISTORY_TAB);
+  if (!sheet) throw new Error('No completed review history yet.');
+  ss.setActiveSheet(sheet);
+}
+
+function archiveCompletedReconcileRows() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const count = withBudgetWriteLock(() => archiveCompletedReconcileRowsUnlocked(ss));
+  ss.toast(`${count} completed rows moved to ${RECONCILE_HISTORY_TAB}.`, 'Budget');
+  return count;
+}
+
+/** Persist IDs and archive before deleting; interrupted runs safely resume by ID. */
+function archiveCompletedReconcileRowsUnlocked(ss) {
+  const sheet = ss.getSheetByName(RECONCILE_STAGING_TAB_NAME);
+  if (!sheet || sheet.getLastRow() < 2) return 0;
+  assertCurrentReconcileSchema(sheet);
+  const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 15).getValues();
+  const completed = data.map((row, index) => ({ row: row, index: index + 2 }))
+    .filter(item => ['imported', 'dismissed'].includes(String(item.row[11]).toLowerCase()));
+  if (!completed.length) return 0;
+  let history = ss.getSheetByName(RECONCILE_HISTORY_TAB);
+  if (!history) history = ss.insertSheet(RECONCILE_HISTORY_TAB);
+  if (history.getLastRow()) {
+    assertCurrentReconcileSchema(history);
+    const meta = history.getRange(1, 13, 1, 4).getValues()[0];
+    if (meta.join('|') !== 'review_reason|review_id|statement_key|reviewed_at') {
+      throw new Error('Unexpected review history layout; no rows were removed.');
+    }
+  } else {
+    history.getRange(1, 1, 1, 16).setValues([
+      sheet.getRange(1, 1, 1, 12).getValues()[0].concat(['review_reason', 'review_id', 'statement_key', 'reviewed_at'])
+    ]);
+    history.setFrozenRows(1);
+  }
+  const existingIds = new Set(history.getLastRow() > 1
+    ? history.getRange(2, 14, history.getLastRow() - 1, 1).getValues().map(row => String(row[0])) : []);
+  sheet.getRange(1, 13, 1, 3).setValues([['review_reason', 'review_id', 'statement_key']]);
+  const toArchive = [];
+  for (const item of completed) {
+    const row = item.row;
+    row[13] = row[13] || Utilities.getUuid();
+    row[14] = reconcileReviewKeyFromCells(row, ss);
+    // Only touch metadata in the queue until history is durably written.
+    sheet.getRange(item.index, 13, 1, 3).setValues([[row[12], row[13], row[14]]]);
+    if (!existingIds.has(String(row[13]))) {
+      const copy = row.slice(0, 15);
+      copy[1] = reconcileDateSerial(row[1], ss);
+      toArchive.push(copy.concat([new Date()]));
+      existingIds.add(String(row[13]));
+    }
+  }
+  SpreadsheetApp.flush();
+  if (toArchive.length) {
+    const start = history.getLastRow() + 1;
+    const required = start + toArchive.length - 1;
+    if (required > history.getMaxRows()) history.insertRowsAfter(history.getMaxRows(), required - history.getMaxRows());
+    history.getRange(start, 2, toArchive.length, 1).setNumberFormat('dd.MM.yyyy');
+    history.getRange(start, 16, toArchive.length, 1).setNumberFormat('dd.MM.yyyy HH:mm');
+    history.getRange(start, 1, toArchive.length, 16).setValues(toArchive);
+    SpreadsheetApp.flush();
+  }
+  // Bottom-up removal preserves pending rows, formatting and checkbox validation.
+  for (let i = completed.length - 1; i >= 0; i--) sheet.deleteRows(completed[i].index, 1);
+  return completed.length;
+}
+
+/** Selection, not import checkboxes, defines the rows being dismissed. */
+function dismissSelectedReconcileRows() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  if (!sheet || sheet.getName() !== RECONCILE_STAGING_TAB_NAME) throw new Error('Select rows in _Reconcile first.');
+  assertCurrentReconcileSchema(sheet);
+  const selection = ss.getActiveRangeList();
+  const indices = new Set();
+  for (const range of selection ? selection.getRanges() : []) {
+    for (let row = Math.max(2, range.getRow()); row <= Math.min(sheet.getLastRow(), range.getLastRow()); row++) indices.add(row);
+  }
+  const selected = Array.from(indices).sort((a, b) => a - b).map(index => ({
+    index: index, row: sheet.getRange(index, 1, 1, 15).getValues()[0]
+  })).filter(item => !['imported', 'dismissed'].includes(String(item.row[11]).toLowerCase()) && item.row[1]);
+  if (!selected.length) throw new Error('Select at least one pending data row in _Reconcile.');
+  const ui = SpreadsheetApp.getUi();
+  const reply = ui.prompt('Reviewed — do not import',
+    `${selected.length} selected row(s) will move to history without being imported. Enter a reason (optional).`, ui.ButtonSet.OK_CANCEL);
+  if (reply.getSelectedButton() !== ui.Button.OK) return 0;
+  const reason = reply.getResponseText().trim() || 'Reviewed — no import needed';
+  const count = withBudgetWriteLock(() => {
+    // A prompt releases execution while a scan or another reviewer may change rows.
+    for (const item of selected) {
+      const current = sheet.getRange(item.index, 1, 1, 15).getValues()[0];
+      if (JSON.stringify(current) !== JSON.stringify(item.row)) throw new Error('The review changed while the dialog was open. Select the rows again.');
+    }
+    sheet.getRange(1, 13, 1, 3).setValues([['review_reason', 'review_id', 'statement_key']]);
+    for (const item of selected) {
+      sheet.getRange(item.index, 13, 1, 3).setValues([[reason, item.row[13] || Utilities.getUuid(), reconcileReviewKeyFromCells(item.row, ss)]]);
+      sheet.getRange(item.index, 12).setValue('dismissed');
+      sheet.getRange(item.index, 1).setValue(false);
+    }
+    SpreadsheetApp.flush();
+    archiveCompletedReconcileRowsUnlocked(ss);
+    return selected.length;
+  });
+  ss.toast(`${count} rows reviewed without import. See ${RECONCILE_HISTORY_TAB}.`, 'Budget');
+  return count;
+}
+
+function assertCurrentReconcileSchema(sheet) {
+  if (!sheet || sheet.getLastRow() === 0) return;
+  const headers = sheet.getRange(1, 1, 1, 12).getValues()[0];
+  if (headers[3] !== 'Cardholder' || headers[4] !== 'Тип' || headers[10] !== 'source_row' || headers[11] !== 'status') {
+    throw new Error('Existing _Reconcile layout is outdated. Preserve your review and regenerate staging before using the inbox.');
+  }
+}
+
+function readPendingReconcileRows(ss) {
+  const sheet = ss.getSheetByName(RECONCILE_STAGING_TAB_NAME);
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  assertCurrentReconcileSchema(sheet);
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 12).getValues();
+  return rows.filter(row => !['imported', 'dismissed'].includes(String(row[11]).toLowerCase())).map(row => ({
+    date: reconcileDateString(row[1], ss), account: String(row[2]), amount: ['Получение денег', 'Доходы', 'Доходы - премия', 'Доходы - лёгкие деньги'].includes(row[4]) ? -Math.abs(Number(row[5])) : Math.abs(Number(row[5])), where: String(row[6]),
+    category: String(row[7]), notes: row[3] === 'Unknown' ? '' : String(row[3]),
+    row_index: 'staging ' + (rows.indexOf(row) + 2), pending_review: true
+  }));
+}
+
+function getReconcileFileLog(ss) {
+  let sheet = ss.getSheetByName(RECONCILE_IMPORT_LOG);
+  if (!sheet) {
+    sheet = ss.insertSheet(RECONCILE_IMPORT_LOG);
+    sheet.getRange(1, 1, 1, 6).setValues([['file_id', 'file_name', 'version', 'status', 'updated_at', 'result_or_error']]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function readReconcileFileState(log, fileId) {
+  if (log.getLastRow() < 2) return null;
+  const rows = log.getRange(2, 1, log.getLastRow() - 1, 6).getValues();
+  const i = rows.findIndex(row => row[0] === fileId);
+  return i < 0 ? null : { row: i + 2, version: String(rows[i][2]), status: rows[i][3] };
+}
+
+function writeReconcileFileState(log, file, status, detail) {
+  const existing = readReconcileFileState(log, file.getId());
+  log.getRange(existing ? existing.row : log.getLastRow() + 1, 1, 1, 6).setValues([[
+    file.getId(), file.getName(), String(file.getLastUpdated().getTime()), status, new Date(), String(detail || '').slice(0, 5000)
+  ]]);
+  SpreadsheetApp.flush();
+}
+
+function stagingHasDriveFile(ss, fileId) {
+  const token = `[Drive:${fileId}]`;
+  return [RECONCILE_STAGING_TAB_NAME, RECONCILE_HISTORY_TAB].some(name => {
+    const sheet = ss.getSheetByName(name);
+    return sheet && sheet.getLastRow() > 1 &&
+      sheet.getRange(2, 11, sheet.getLastRow() - 1, 1).getValues().some(row => String(row[0]).startsWith(token));
+  });
+}
+
+/** Process under one script lock so menu, heartbeat and commit cannot race. */
+function scanStatementInbox(ss, inbox, processed, optOptions) {
+  return withBudgetWriteLock(() => {
+    const options = optOptions || {};
+    const started = Date.now();
+    const summary = { processed: 0, staged: 0, failed: 0, skipped: 0, deferred: false };
+    const log = getReconcileFileLog(ss);
+    const files = inbox.getFiles();
+    let attempted = 0;
+    while (files.hasNext()) {
+      if (attempted >= (options.maxFiles || 5) || Date.now() - started >= (options.maxRuntimeMs === undefined ? 180000 : options.maxRuntimeMs)) {
+        summary.deferred = true; break;
+      }
+      const file = files.next();
+      const state = readReconcileFileState(log, file.getId());
+      // Imported file IDs are immutable source snapshots. Never quietly mark
+      // edited contents processed using an older review for the same Drive ID.
+      if (state && ['staged', 'processed'].includes(state.status) &&
+          state.version !== String(file.getLastUpdated().getTime())) {
+        summary.failed++;
+        Logger.log(`[Statement inbox] ${file.getName()} changed after staging. Upload the revised statement as a new file so the earlier review remains traceable.`);
+        continue;
+      }
+      if (state && state.status === 'error' && state.version === String(file.getLastUpdated().getTime())) {
+        summary.skipped++; continue; // Retry via menu or after file content changes.
+      }
+      attempted++;
+      let staged = Boolean(state && ['staged', 'processed'].includes(state.status));
+      try {
+        // A previous timeout may have written rows but not the journal/move.
+        staged = staged || stagingHasDriveFile(ss, file.getId());
+        if (!staged) {
+          assertStatementFileMime(file.getMimeType());
+          if (!/\.(csv|pdf)$/i.test(file.getName()) && !/^(text\/csv|application\/pdf)$/i.test(file.getMimeType())) {
+            throw new Error('Unsupported statement file; use an original CSV or PDF.');
+          }
+          const parsed = parseStatement(file.getBlob());
+          if (parsed.error || !parsed.rows || !parsed.rows.length) throw new Error(parsed.message || parsed.error || 'No transactions parsed.');
+          const result = reconcileAndStage(parsed, ss, { append: true, fileId: file.getId() });
+          summary.staged += result.stagedCount;
+          staged = true;
+          writeReconcileFileState(log, file, 'staged', JSON.stringify({ parsed: result.totalParsed, matched: result.matchedCount,
+            proposals: result.proposalsCount, ambiguous: result.ambiguousCount, excluded: result.excludedCount, staged: result.stagedCount }));
+        }
+        file.moveTo(processed);
+        writeReconcileFileState(log, file, 'processed', 'Staged successfully; ledger import requires reviewed checkboxes.');
+        summary.processed++;
+      } catch (error) {
+        // Recover complete setValues writes if later formatting/journaling failed.
+        staged = staged || stagingHasDriveFile(ss, file.getId());
+        writeReconcileFileState(log, file, staged ? 'staged' : 'error', error.message);
+        summary.failed++;
+        Logger.log(`[Statement inbox] ${file.getName()}: ${error.message}`);
+      }
+    }
+    return summary;
+  });
+}
+
+/** Menu/editor entry point. Automatically scanned files use this same core. */
+function reconcileFromDrive() {
+  const config = getStatementInboxConfig();
+  const ss = SpreadsheetApp.openById(config.spreadsheetId);
+  const result = scanStatementInbox(ss, DriveApp.getFolderById(config.inboxId), DriveApp.getFolderById(config.processedId));
+  ss.toast(`${result.processed} files processed; ${result.staged} rows staged; ${result.failed} errors. See ${RECONCILE_IMPORT_LOG}.${result.deferred ? ' More files will be picked up on the next scan.' : ''}`, 'Budget', 12);
+  return result;
+}
+
+function scanConfiguredStatementInbox(maxRuntimeMs) {
+  if (PropertiesService.getScriptProperties().getProperty('STATEMENT_SCAN_ENABLED') !== 'true') return;
+  const config = getStatementInboxConfig();
+  return scanStatementInbox(SpreadsheetApp.openById(config.spreadsheetId), DriveApp.getFolderById(config.inboxId),
+    DriveApp.getFolderById(config.processedId), { maxRuntimeMs: maxRuntimeMs });
+}
+
+function retryStatementInboxFailures() {
+  const config = getStatementInboxConfig();
+  const ss = SpreadsheetApp.openById(config.spreadsheetId);
+  withBudgetWriteLock(() => {
+    const log = getReconcileFileLog(ss);
+    if (log.getLastRow() < 2) return;
+    const statuses = log.getRange(2, 4, log.getLastRow() - 1, 1).getValues();
+    log.getRange(2, 4, statuses.length, 1).setValues(statuses.map(row => [row[0] === 'error' ? 'retry' : row[0]]));
+  });
+  return reconcileFromDrive();
+}
+
+/** Add an optional upload source to the same Drive inbox; scanning stays separate. */
+function enqueueStatementFile(blob, sourceId) {
+  return withBudgetWriteLock(() => {
+    const config = getStatementInboxConfig();
+    const p = PropertiesService.getScriptProperties();
+    const key = sourceId ? 'STATEMENT_UPLOAD_' + sourceId : '';
+    if (key && p.getProperty(key)) return { fileId: p.getProperty(key), alreadyQueued: true };
+    assertStatementFileMime(blob.getContentType());
+    const file = DriveApp.getFolderById(config.inboxId).createFile(blob);
+    if (key) p.setProperty(key, file.getId());
+    return { fileId: file.getId(), alreadyQueued: false };
+  });
+}
+
+function ensureStatementDispatcher(scriptApi) {
+  if (!scriptApi.getProjectTriggers().some(trigger => trigger.getHandlerFunction() === 'dispatch')) {
+    scriptApi.newTrigger('dispatch').timeBased().everyMinutes(15).create();
+  }
+}
