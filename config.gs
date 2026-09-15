@@ -32,20 +32,35 @@ const MONTH_TAB_NAMES = Object.assign({}, MONTH_TABS_EXISTING, MONTH_TABS_FUTURE
 
 // 2. SHEET_FACTS EXPORT
 const SHEET_FACTS = {
+  // Stage 3 Environment & Safety Flags
+  STATEMENT_FILE_ID: '1Omhwqr2q5kLfZCa51Mj6igN3TPX032k0',
+  DRY_RUN: true, // Default true for all Stage 3 sub-stages until 3F
+  TEST_SPREADSHEET_ID: '1SgV3M1RWtEKvqWEazv-3slduXPCEi7x2gJFElWbFA70', // Sandbox spreadsheet ID (to be filled by user)
+
   MONTH_TABS_EXISTING: MONTH_TABS_EXISTING,
   MONTH_TABS_FUTURE: MONTH_TABS_FUTURE,
   MONTH_TAB_NAMES: MONTH_TAB_NAMES,
   
+  NON_LEDGER_MANDATORY: ['CPF'],
+
   CORE_TABS: {
     TRANSACTIONS: 'Transactions',
     MERCHANTS: 'Merchants',
     BUDGET_50_30_20: '50/30/20',
-    REFERENCE: '-'
+    REFERENCE: '-',
+    TEST_FIXTURES: '_TestFixtures'
   },
   
   USERS: {
     VAL: { name: 'Val', chat_id: '96069960', morning_time: '08:00', active: true },
     RITA: { name: 'Rita', chat_id: '402188776', morning_time: '08:00', active: true }
+  },
+  
+  // Cardholder mapping (last 4 digits only — never store full card numbers)
+  CARDHOLDER_MAP: {
+    '4320': 'Val',          // Main card
+    '7509': 'Rita',         // Supplementary card
+    '0465': 'Grandparents'  // Supplementary card
   },
   
   MONTHLY_TAB_STRUCTURE: {
@@ -102,16 +117,35 @@ const SHEET_FACTS = {
    */
   getMonthTabName: function(input) {
     let monthNum;
+    let yearSuffix = '';
     if (typeof input === 'number') {
       monthNum = input;
     } else {
       const date = (input instanceof Date) ? input : new Date();
       const monthStr = Utilities.formatDate(date, 'Asia/Singapore', 'M');
       monthNum = parseInt(monthStr, 10);
+      yearSuffix = Utilities.formatDate(date, 'Asia/Singapore', 'yy');
     }
-    return this.MONTH_TAB_NAMES[monthNum] || '';
+    const name = this.MONTH_TAB_NAMES[monthNum] || '';
+    return yearSuffix ? name.replace(/'\d{2}$/, "'" + yearSuffix) : name;
   }
 };
+
+/**
+ * Resolves a cardholder name from the last 4 digits of a card number.
+ * Only accepts/evaluates last-4 digits — never full card numbers.
+ * 
+ * @param {string|number} last4 - Last 4 digits of the card (e.g. '4320', '7509', '0465').
+ * @return {string} Cardholder name ('Val', 'Rita', 'Grandparents', or '' if unknown).
+ */
+function resolveCardholder(last4) {
+  if (last4 === undefined || last4 === null || last4 === '') return '';
+  const cleanLast4 = String(last4).replace(/\D/g, '').slice(-4);
+  const map = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.CARDHOLDER_MAP)
+    ? SHEET_FACTS.CARDHOLDER_MAP
+    : { '4320': 'Val', '7509': 'Rita', '0465': 'Grandparents' };
+  return map[cleanLast4] || '';
+}
 
 /**
  * STAGE 0: One-off Discovery & Inspection Function.
@@ -270,4 +304,41 @@ function showReferenceTab() {
   values.forEach((row, i) => {
     Logger.log(`Row ${i+1}: A="${row[0]}" | B="${row[1]}" | C="${row[2]}" | D="${row[3]}"`);
   });
+}
+
+/**
+ * Returns the target Google Spreadsheet instance.
+ * When useTest is true, opens and returns the sandbox spreadsheet defined by
+ * SHEET_FACTS.TEST_SPREADSHEET_ID. Missing, inaccessible or mismatched sandbox
+ * targets throw before any sheet access; they never fall back to the active sheet.
+ * An explicit spreadsheet is validated without reopening it in sandbox mode.
+ * 
+ * @param {boolean} [useTest=false] - If true, returns the test sandbox spreadsheet.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSpreadsheet] - Already-resolved target.
+ * @return {GoogleAppsScript.Spreadsheet.Spreadsheet} Target spreadsheet instance.
+ */
+function getTargetSpreadsheet(useTest, optSpreadsheet) {
+  if (useTest) {
+    const testId = typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.TEST_SPREADSHEET_ID
+      ? String(SHEET_FACTS.TEST_SPREADSHEET_ID).trim()
+      : '';
+    if (!testId) {
+      throw new Error('TEST_SPREADSHEET_ID is required for sandbox runs. No spreadsheet was modified.');
+    }
+
+    let sandbox = optSpreadsheet;
+    if (!sandbox) {
+      try {
+        sandbox = SpreadsheetApp.openById(testId);
+      } catch (err) {
+        throw new Error(`Cannot open TEST_SPREADSHEET_ID for sandbox runs: ${err.message}. No spreadsheet was modified.`);
+      }
+    }
+
+    if (!sandbox || typeof sandbox.getId !== 'function' || sandbox.getId() !== testId) {
+      throw new Error('Sandbox spreadsheet identity does not match TEST_SPREADSHEET_ID. No spreadsheet was modified.');
+    }
+    return sandbox;
+  }
+  return optSpreadsheet || SpreadsheetApp.getActiveSpreadsheet();
 }

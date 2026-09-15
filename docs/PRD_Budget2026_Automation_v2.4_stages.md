@@ -1,12 +1,40 @@
 # PRD — Budget 2026 Automation · Phase 2 (v2.4, staged by cadence)
 
-**Owner:** Val · **Users:** Val & Rita (two‑user household) · **Version:** v2.4 (reconciler split + test harness; UC‑4 before UC‑6) · **Date:** 29 Aug 2026
+**Owner:** Val · **Users:** Val & Rita (two‑user household) · **Version:** v2.4 (reconciler split + test harness; UC‑4 before UC‑6) · **Spec date:** 29 Aug 2026 · **Progress updated:** 16 Sep 2026
 **Build environment:** Antigravity (Gemini agent) → Google Apps Script + Telegram
 **Data source:** Google Sheet `Budget 2026` (Phase‑1 live: `Transactions`, `Merchants`; users configured in `SHEET_FACTS.USERS` in `config.gs`, not a sheet tab. Read targets: monthly `<Month>'26` tabs, `50/30/20`, `-` reference)
-**Model:** **`gemini-3.7-flash`** (default; GA 13 Aug 2026 — an algorithmic refinement of 3.6 Flash at the **same price**, with better coding, agent and **document‑comprehension** performance; 1M context, native PDF/image/audio). `gemini-3.5-flash-lite` remains available for high‑volume sub‑tasks.
-> Note the document‑comprehension gain is directly relevant to Stage 3's PDF/CSV statement parsing. Introductory pricing ($0.75/$3.75 per 1M tokens) runs to 31 Dec 2026, then doubles — worth re‑checking before Phase 3.
+**Model routing in source:** transaction ingestion uses `GEMINI_MODEL_ID = gemini-3.5-flash-lite`; daily/monthly coaching uses `COACH_MODEL_ID = gemini-3.8-flash`; statement model parsing prefers `gemini-3.7-flash`, with configured fallbacks. These are code settings, not a verification of external availability, release dates or pricing. Preserve per-feature routing rather than reverting every caller to one model.
 
 > **Supersedes v2.1.** Same content, reorganized around **cadence** (daily → weekly → monthly) per Val's direction, with UC‑6 expanded into a weekly payment‑calendar feature and a new month‑tab‑creation use case added.
+
+---
+
+## Implementation progress — 16 September 2026
+
+**The five reproduced reliability findings are corrected in source and regression-tested.** The configured Apps Script editor project has received the source fixes. The PRD now records the implemented matching, credit and additional-occurrence policies below. Item 1 of the [implementation review](implementation-review-2026-09-16.md) is closed in source/documentation. **Item 2's real sandbox acceptance and the live webhook deployment update are also complete, confirmed by Val on 16 September 2026.** This completion record uses Val's explicit confirmation; no new cloud execution or independent evidence review was performed while recording it.
+
+| Reliability gap | Implemented outcome |
+|---|---|
+| Sandbox target | Missing/inaccessible sandbox IDs and mismatched spreadsheet identities throw before test mutations. The commit test resolves one verified workbook and passes it through every commit. |
+| Fee/reversal pairing | Only mutually unique pairs with corroborated fee identity, opposite signs, cancelling amounts, compatible account/currency/cardholder/card identity and a 0–7-day relationship are excluded. Uncertain reversals remain reviewable. |
+| Monthly reporting | One explicit report date selects the closing month throughout the readers and coach payload. Full-month figures, paid/unpaid results, target header and grounded monthly narration replace current-month/daily fields. Last-day reminder precedes coach per user, including catch-up across midnight. |
+| Delivery failures | HTTP rejection, Telegram `ok:false`, malformed replies and network failure throw. Scheduled acceptance, claims and retry state are per user/period, with bounded catch-up and server retry delays. |
+| Authorization | Missing/invalid required settings reject processing. Inbound chats must belong to both the allowlist and active configured users; authorization precedes caching, recipient capture and all handlers. Registration requires the same policy and encoded secret. |
+
+**Validation:** 136 offline tests pass, including 555 native assertion checks plus Node assertions; all `.gs` files parse. This includes regressions for the five reproduced failures and the new Sheets-visible, read-only commit preview. Offline tests use service doubles; they do not establish real statement extraction, formula evaluation, delivery or trigger behavior.
+
+| Stage | Current progress | Remaining acceptance/work |
+|---|---|---|
+| 0 — Discovery | Recorded live discovery exists. | Confirm mandatory G formula/checkbox semantics and the structural/reset month-template ranges; discovery is not fully closed. |
+| 1 — Readers | Core readers and explicit monthly reporting period exist. Monthly required inputs fail visibly. | Daily 50/30/20 and category-map fallback behavior still needs an unavailable-data contract. |
+| 2 — Daily coach | Payload, model/fallback grounding, per-user scheduling and delivery retries exist. | Real delivery/catch-up and several days of sheet/tone comparison remain unverified; target-header visibility is not guaranteed in the daily brief. |
+| 3 — Reconciler | 3A–3G source paths exist: parsing, matching/filtering, retained sheet review, preview, explicit import, history/dismissal/refresh and journaled Drive pickup. **Real sandbox acceptance complete — Val confirmed 16 Sep 2026.** | [Acceptance record](sandbox-acceptance-checklist.md). Additional same-key purchases use the explicit manual policy below; a dedicated approval action remains future work. |
+| 4 — Payment calendar | Legacy AI weekly audit exists. | Editable seeded calendar, confirmed due dates/EOM, deterministic overdue/upcoming sets, menu and daily warnings are not built. |
+| 5 — Monthly coach | Reporting period, full-month payload, paid/unpaid counts, grounding and reminder → coach schedule are implemented. | Real month-end delivery and sheet comparison remain pending. Date-based missed/late reporting awaits Stage 4. |
+| 6 — Month creation | Date-based tab naming handles year rollover. | Template discovery and safe clone/reset/ensure functions are not built. |
+| 7 — Receipt items | Transaction capture exists. | LineItems/Products storage, item capture and Basket Review are not built. |
+
+**Editor sync:** `clasp push` succeeded, uploading 24 files including the Sheets preview. **Live webhook deployment update: complete — Val confirmed the existing deployment was updated to a new version on 16 September 2026.** Required secret/allowlist settings and both enabled users' membership remain operational requirements. The deployed version number and cloud artifacts were not inspected during this documentation update. Actual daily/monthly coaching delivery acceptance remains separate Stage 2/5 work.
 
 ---
 
@@ -14,7 +42,7 @@
 
 A **staged build spec**. Each stage is self‑contained: **Objective → Build → Acceptance criteria → Checkpoint**. Feed the stages to the agent **one at a time, in order**. Don't start a stage until the previous checkpoint passes.
 
-Two hard rules for the agent:
+Four hard rules for the agent:
 1. **Stage 0 is a discovery gate.** Later stages depend on facts about the live sheet that must be *read*, not assumed (exact cells, whether a column is a formula or a checkbox, real tab names, the monthly‑tab template). Stage 0 freezes these into `SHEET_FACTS`. Unknown fact ⇒ stop and ask Val; never guess.
 2. **Read the sheet's own numbers; never recompute them.** The sheet already computes saldo, 50/30/20 ratios, and paid/unpaid state. The bot reads and narrates them so the brief and the sheet always agree.
 3. **One sub‑stage per prompt; test before advancing.** Large stages fed to the agent wholesale have produced poor results (Stage 3 especially). Where a stage is split into sub‑stages, each is a **separate prompt** with its own test that must pass before the next begins.
@@ -88,7 +116,7 @@ These are *planned* ahead of the month, but the same categories can also carry o
 | Cadence | UC | Name | Stage | Priority |
 |---|---|---|---|---|
 | **Daily** | UC‑3 | Daily Budget Coach (morning brief: saldo, pacing, advice) | Stage 2 | **P0** |
-| **Anytime** | UC‑4 | Statement Reconciler — upload any time (PDF/CSV), runnable **without Telegram**; split into 6 testable sub‑stages | Stage 3 | P1 |
+| **Anytime** | UC‑4 | Statement Reconciler — upload any time (PDF/CSV), runnable **without Telegram**; split into 7 testable sub‑stages | Stage 3 | P1 |
 | **Weekly** | UC‑6 | Mandatory‑payment calendar + weekly reminder + missed‑date alerts | Stage 4 | P1 |
 | **Monthly** | UC‑5 | Monthly Budget Coach | Stage 5 | P2 |
 | **Monthly** | UC‑7 | Auto‑create next month's tab (rollover) | Stage 6 | P2 |
@@ -98,21 +126,23 @@ These are *planned* ahead of the month, but the same categories can also carry o
 - **Daily:** morning coach at each user's `morning_time` (both currently **08:00 SGT**) (P0); 21:00 SGT nudge (Phase‑1, existing).
 - **Weekly:** Mon 09:00 SGT mandatory‑payment brief (configurable day/time).
 - **Anytime (event‑driven, no schedule):** statement upload → reconciliation. Accepted from either user on any date; the month‑end message is only a reminder.
-- **Monthly (on month rollover):** reconciler *prompt* → monthly coach → next‑month‑tab creation, sequenced off one daily trigger that checks `tomorrow.getMonth() !== today.getMonth()` (Apps Script has no native "last day of month" trigger).
+- **Monthly:** reconciler *prompt* → monthly coach, starting **23:30 SGT on the last day**, through the shared 15-minute heartbeat; catch-up ends **02:30 the next day**, retaining the closing month. Next-month-tab creation remains Stage 6 work.
 
 **Non‑goals (Phase 2):** assets/NAV/investment tracking (V3); bill‑*paying* (read/track only); rewriting sheet calculation formulas (we read/append; the only writes are appended transactions, the optional mandatory‑checkbox flip in Stage 3, and the new‑tab clone in Stage 6).
 
 **Success metrics:** reconciliation ≤ 5 min/account · missing‑transaction catch 100% · fixed‑payment late rate 0% · morning‑brief read rate ≥ 90% · zero forgotten mandatory payments.
 
-**Multi‑user (from v0.3):** daily/weekly/monthly briefs go to **both** Val and Rita; **either** can run a reconciliation. Per‑user times apply (`morning_time` in `SHEET_FACTS.USERS`; both currently 08:00 SGT). The allowlist gate is `SHEET_FACTS.USERS` + the `AUTHORIZED_CHAT_IDS` script property.
+**Multi‑user (from v0.3):** daily/weekly/monthly briefs go to active Val/Rita entries in `SHEET_FACTS.USERS`; **either** can run a reconciliation when authorized. Inbound authorization requires nonblank `WEBHOOK_SECRET`, a valid nonempty `AUTHORIZED_CHAT_IDS` list, and membership in the **intersection** of that list and active configured users. Neither gate is optional or bypasses the other. Both enabled users must be listed. Missing configuration rejects before processing or remembering a fallback recipient.
+
+**Scheduled-delivery policy:** record Telegram acceptance only after HTTP 200 plus `ok:true`, separately for each user and period. Retry on eligible heartbeats with 1/2/4/8/15-minute backoff or a longer server `retry_after`. Morning catch-up lasts three hours after each user's time (capped at midnight); nudge 21:00–22:00; recap 22:00–23:30; weekly Monday 09:00–12:00; monthly last-day 23:30–next-day 02:30. Deadlines are exclusive. Expired jobs are not delivered or marked accepted; accepted recipients are skipped while failed recipients retry. Reminder acceptance precedes that user's monthly coach. Acceptance does not establish that the user read the message.
 
 ---
 
 # FOUNDATION
 
-## STAGE 0 — Discovery & `SHEET_FACTS` ✅ **COMPLETE (23 Aug 2026)**
+## STAGE 0 — Discovery & `SHEET_FACTS` — recorded 23 Aug; open facts remain
 
-> **Status: closed.** `config.gs` + `runDiscovery()` are built and have been run against the live sheet. Verified: all 8 month tabs (incl. `Август'26`, confirming the Jan–Apr letters / May+ full-names convention, Sep–Dec correctly absent); `Transactions` 11 cols with J=Notes, K=50/30/20; mandatory range `D3:G13` (11 items); daily tracker H/J/K/L; `D19` saldo cell. The taxonomy and coach math are captured in **Verified data model** above. **Remaining open item:** whether mandatory column **G** is a formula or a manual checkbox — run `showMandatory()` (below) before Stage 3, since Stage 3 branches on it.
+> **Status: discovery recorded, not fully closed.** `config.gs` + `runDiscovery()` were run against the live sheet. Verified at that checkpoint: 8 month tabs (incl. `Август'26`, confirming the Jan–Apr letters / May+ full-names convention; Sep–Dec absent then); `Transactions` 11 cols with J=Notes, K=50/30/20; mandatory range `D3:G13` (11 items); daily tracker H/J/K/L; `D19` saldo cell. The taxonomy and coach math are captured above. **Open:** whether mandatory **G** is a formula or manual checkbox, and the Stage 6 month-template structural/reset ranges. Run `showMandatory()` below to resolve G before any optional write-back; implemented reconciliation appends transactions without flipping G.
 
 ```javascript
 function showMandatory() {
@@ -145,11 +175,11 @@ Empty `G-formula` ⇒ manual checkbox ⇒ Stage 3 **Path B**. A formula ⇒ Stag
    - `runDiscovery()` verifies the existing tabs, reports which months are present, and asks Val to **confirm the future‑month naming convention** — not the future tabs themselves, which may not exist yet.
 3. **Mandatory block location & semantics.** Per monthly tab, the fixed‑cost block is **D (label) · E (amount) · F (%) · G (TRUE/FALSE)** over ~rows 3–13. Report, for the active tab: the exact D‑label row range, and **whether column G is a formula or a manual checkbox** (`getFormula()` on a G cell — non‑empty ⇒ formula). This one fact decides Stage 3's paid/unpaid approach.
 4. **Daily‑saldo cell.** Locate the exact cell holding the *current* daily allowance (`Текущий бюджет на день`) and the running `Сальдо` in the monthly tab. Store `SHEET_FACTS.saldoCell`. **Read it; never recompute.**
-5. **50/30/20 read map.** In the `50/30/20` tab, locate **actual** and **target** cells for **Needs / Wants / Savings / Taxes** (four buckets — the `-` sheet maps `Налоги`→Taxes, `Отложения`→Savings). Store A1 refs.
+5. **50/30/20 read map.** In the `50/30/20` tab, locate **actual** and **target** cells for **Needs / Wants / Savings** (three reported buckets). `Налоги`→Taxes remains a Transactions K mapping, not a fourth summary bucket. Store A1 refs.
 6. **Category canon.** Import the `-` tab's `Категория → 50/30/20` map into `SHEET_FACTS.categoryBucket` at runtime.
 7. **Monthly‑tab template map (for Stage 6).** For a representative monthly tab, enumerate which ranges are **structural / carry‑forward** (income rows e.g. `Зарплата В/Р`, mandatory D/E labels+amounts, budget‑per‑day formulas, the right‑hand `Date Increment` helper table) vs **transient / reset** (the daily table's траты/сальдо cells, the mandatory **G** flags, the `01.MM.YYYY … end‑of‑month` date range in the header). Store `SHEET_FACTS.monthTemplate = {structuralRanges, transientRanges, dateHeaderCells}`.
 
-**Acceptance.** `SHEET_FACTS` holds: verified `MONTH_TABS_EXISTING` (present months only), the confirmed **future‑month naming convention**, mandatory block range, `mandatoryColumnGType ∈ {formula, checkbox}`, `saldoCell`, 50/30/20 actual+target refs (incl. Taxes), `categoryBucket`, and `monthTemplate`. `runDiscovery()` prints findings and **lists unconfirmed values**; a missing *future* tab is reported as normal, not an error.
+**Acceptance.** `SHEET_FACTS` holds: verified `MONTH_TABS_EXISTING` (present months only), the confirmed **future‑month naming convention**, mandatory block range, `mandatoryColumnGType ∈ {formula, checkbox}`, `saldoCell`, three-bucket 50/30/20 actual+target refs, `categoryBucket`, and `monthTemplate`. `runDiscovery()` prints findings and **lists unconfirmed values**; a missing *future* tab is reported as normal, not an error.
 
 **Checkpoint (ask Val):** the **future‑month naming convention** — since future tabs usually don't exist yet, confirm the forms (`Август'26 … Декабрь'26`) rather than the tabs; is **column G** a formula or checkbox; the exact **daily‑saldo cell** and **50/30/20 target cells**; a quick sanity‑check of the `monthTemplate` transient‑vs‑structural split.
 
@@ -202,11 +232,11 @@ Empty `G-formula` ⇒ manual checkbox ⇒ Stage 3 **Path B**. A formula ⇒ Stag
    }
    ```
    **Include both `actual` and `target`** — the model needs both to say "over on Wants."
-2. Call `gemini-3.7-flash` with a persona prompt: *"You are a sharp, warm financial coach for a Singapore family. From this JSON write a ≤3‑sentence Telegram brief. Lead with the cumulative position (`cumulative_today`) as the reality check, then state plainly what's realistically spendable per day (`realistic_daily`). If `cumulative_today` is negative, mention the recovery path — `days_to_positive` zero‑spend days, or the softer 'stay under S$X/day' equivalent. Reference at most one category. No tables, no markdown headers — short conversational sentences."*
+2. Call the configured `COACH_MODEL_ID` through the shared adapter. **Recorded daily presentation policy:** up to three short bullet sentences labelled Pace / Watch / Action; at most two categories. Rank watch candidates across all reported buckets by discretionary spending, require a positive target and at least S$100 above target, and omit committed-only categories. Explain committed versus discretionary amounts without suggesting a committed cost can be cut. If the daily allowance is negative, say the budget is spent and give the remaining days; do not turn that daily figure into a monthly overspend. A nonempty filtered list does not justify claims about all other categories. Figures must trace to the payload; invented monetary values trigger deterministic fallback.
 3. Deliver to **both users'** chats from **`SHEET_FACTS.USERS`** (`config.gs`) — each entry already carries `chat_id`, `morning_time` (both 08:00 SGT) and `active`. Skip users with `active: false`. Reuse `sendTelegramMessage()` from `nudge.gs`, which already iterates `SHEET_FACTS.USERS`.
 4. **Scheduler:** prefer a **single 15‑minute heartbeat trigger** that dispatches by clock time rather than one trigger per send — Apps Script's `.atHour()` only guarantees the hour (a 09:00 trigger can fire at 09:47), and per‑user times can't be expressed as shared fixed‑hour triggers. The dispatcher also hosts the weekly Monday check and the month‑rollover check. Guard each send with a once‑per‑day key in Script Properties (`sent_<key>=<yyyy-MM-dd>`) so the heartbeat can't re‑send. Set the project timezone to `Asia/Singapore` in `appsscript.json`.
 
-**Tone (hard).** Concise, Telegram‑native, no tables, ≤3 sentences, explicit spend/pull‑back instruction, never invent numbers absent from the payload.
+**Tone (hard).** Concise, Telegram‑native bullet points, no tables/headings, ≤3 sentences, at most two category references, one concrete action, never invent numbers absent from the payload. This records the current daily format; monthly uses its own conversational variant.
 
 **Acceptance.** Morning brief sends to both users at their configured `morning_time` (08:00 SGT), once per day; every figure traces to the payload; saldo equals the sheet's value; tone holds across several days of data.
 
@@ -218,7 +248,7 @@ Empty `G-formula` ⇒ manual checkbox ⇒ Stage 3 **Path B**. A formula ⇒ Stag
 
 > **Reordered (v2.4):** UC‑4 (Reconciler) now comes **before** UC‑6 (Mandatory calendar). The reconciler is the highest‑value, most independent piece and must not be blocked by the mandatory‑calendar details. It shares nothing with UC‑6 beyond the Stage 1 reader.
 
-## STAGE 3 — UC‑4 Statement Reconciler — **split into 6 testable sub‑stages**
+## STAGE 3 — UC‑4 Statement Reconciler — **split into 7 testable sub‑stages**
 
 **Why split:** dumping the whole reconciler into an agent at once produced poor results. Each sub‑stage below is a **separate Antigravity prompt** with its own test and its own definition of done. **Do not proceed to the next sub‑stage until the current one's test passes.** Every sub‑stage is a pure function where possible — no Telegram, no sheet writes — so it can be run and inspected in isolation from the Apps Script editor.
 
@@ -242,7 +272,7 @@ Before any reconciler logic, build the safety net. This is a one‑off ~30 minut
    function runAllTests() { /* calls each test_*() and prints a summary count */ }
    ```
 3. **`DRY_RUN` flag** in `SHEET_FACTS`. When true, the writer logs the exact rows it *would* append and returns them, without touching the sheet. **Default it to true** for the whole of Stage 3; flip to false only in 3F after you've read the log.
-4. **A sandbox copy of the sheet.** Duplicate `Budget 2026` → `Budget 2026 TEST`, and point a `TEST_SPREADSHEET_ID` at it. Any sub‑stage that writes runs against the sandbox first. This is the real safety net: the live ledger is never the test target.
+4. **A sandbox copy of the sheet.** Duplicate `Budget 2026` → `Budget 2026 TEST`, use a separate bound script configuration, and set `SHEET_FACTS.TEST_SPREADSHEET_ID` to that copy. Requested sandbox access must fail before mutations if the ID is empty, cannot be opened, or does not match the returned spreadsheet. Resolve once and pass the verified instance through test commits. The menu/inbox targets its bound/configured workbook independently of this test flag: configure separate sandbox folders and `STATEMENT_SPREADSHEET_ID` as described in the [acceptance checklist](sandbox-acceptance-checklist.md).
 
 **Test:** `runAllTests()` executes and prints a pass/fail summary with zero real tests. Harness is green before any feature code exists.
 
@@ -271,25 +301,28 @@ Before any reconciler logic, build the safety net. This is a one‑off ~30 minut
 ### Stage 3C — Matching engine (the core — keep it pure)
 
 **Scope:** `findMissing(statementRows, ledgerRows) → {matched[], missing[], ambiguous[]}`. A **pure function** — takes two arrays, returns a result. No sheet reads, no I/O. This is what makes it testable and is where the previous attempt went wrong.
-- Fast path: exact `dedupe_key` hit.
-- Fuzzy: amount exact **and** date within **±3 days** **and** merchant similarity above threshold.
-- Return `ambiguous` separately (multiple plausible matches) rather than guessing.
+- **Exact path:** group by `dedupe_key`, allocating each ledger occurrence at most once. Prefer an exact named-cardholder match; explicitly different named holders cannot match. An untagged ledger row is neutral, with main-card/Val preference when resolving one household row against competing exact occurrences. Equal-count compatible groups match one-to-one; unresolved count/identity conflicts remain ambiguous.
+- **Fuzzy policy (implemented):** same normalized account, compatible named cardholders, signed amounts differing by **less than S$0.005**, and ledger date within **±4 days of transaction or posting date**. Merchant corroboration can use a supplied alias snapshot, canonical brand identity, raw similarity or composite date/merchant/cardholder/category score. Same-day user-confirmed Food Republic stall, vending-operator and FairPrice-app-at-Unity relationships are pairwise evidence, not global aliases.
+- Candidate admission: canonical evidence, raw merchant similarity ≥0.55, or composite score ≥0.55. A unique one-to-one candidate may match; competing statement rows require a ≥0.10 score lead or unique explicit holder corroboration. For multiple ledger candidates, use a top score ≥0.70 with ≥0.15 lead, a unique named-holder candidate, or an equal-count identical occurrence group. Otherwise return `ambiguous` for review.
+- **Preservation:** same-day/account/amount with uncertain merchant identity remains ambiguous; it is not automatically matched on amount/date alone. Already allocated ledger rows cannot silently satisfy another occurrence. Every input occurrence must appear exactly once in `matched`, `missing` or `ambiguous`, independent of input order. Keep the matcher pure; callers provide aliases rather than having it read properties.
 
-**Test (`test_findMissing`):** construct fixtures that force each branch — an exact match, a match 2 days off, a match with `NETS*FAIRPRICE` vs `Fair Price`, a genuine miss, a same‑amount‑same‑day pair (ambiguous), and a duplicate‑amount case. Assert exact bucket counts. **Done when:** every branch is covered and no already‑logged row lands in `missing`. This is the most important test in the project — false "missing" is the failure mode that destroys trust.
+**Test (`test_findMissing`):** construct fixtures that force each branch — an exact match, a match 2 days off, transaction/posting-date boundaries at 4/5 days, `NETS*FAIRPRICE` vs `Fair Price`, a genuine miss, same-day/amount uncertain identity, card/account conflicts and competing occurrences in both input orders. Assert exact source identities and ledger allocations as well as counts. **Done when:** every branch is covered, no already-logged row becomes a clean miss, and no ledger occurrence silently consumes an additional purchase.
 
 ---
 
 ### Stage 3D — Non‑spend filtering
 
-**Scope:** `filterNonSpend(missing) → {proposals[], excluded[]}`. Drop CC autopay/repayment, reimbursements/credits, internal transfers, FX/interest — they map to the Phase‑1 reconciliation patterns, not new expenses. Return `excluded` **with reasons** so you can audit what it dropped.
+**Scope:** `filterNonSpend(missing) → {proposals[], excluded[]}`. **Recorded dual-sided credit policy:** preserve genuine positive `Расходы`, even when a descriptor contains BILL PAYMENT/GIRO/AUTOPAY. Recognized credit-side card repayments, own-account transfers, transit reload adjustments and interest-credit lines are excluded with reasons. External merchant refunds, reimbursements and sales credits remain proposals as negative amounts with `Тип = Получение денег`; reviewers confirm the final type/category. Do not drop every credit or every descriptor containing REVERSAL/WAIVER.
 
-**Test (`test_filterNonSpend`):** feed a fixture containing one of each non‑spend type plus two genuine expenses; assert exactly two proposals survive and each exclusion carries the right reason. **Done when:** no genuine expense is ever excluded (false exclusion is worse than a false proposal — you'd never know).
+**Fee cancellation:** exclude only a mutually unique fee/reversal pair with the same specific fee identity, positive expense versus negative received-money credit, cancelling amounts (<S$0.005), same nonempty account/currency, matching card identity and compatible holder identity, and a valid reversal date on the same day or within the next seven days. One unknown card versus a known card is incompatible; both absent card/holder fields can agree for an account-level pair. Generic FEE or equal absolute amounts alone are insufficient. Unrelated tuition and bank late-fee reversal must both survive as proposals. Unpaired, ambiguous or older reversals stay reviewable.
+
+**Test (`test_filterNonSpend` / `test_feeReversalPairing`):** cover each recognized credit exclusion, external credits and genuine expenses, plus unrelated tuition/reversal, corroborated fee cancellation, ambiguous pairs and sign/date/account/card/currency/holder boundaries in both input orders. Assert exact surviving/excluded identities and reasons. **Done when:** no genuine expense is excluded without the documented corroborated cancellation and external credits remain reviewable.
 
 ---
 
 ### Stage 3E — Staging review (no writes yet)
 
-**Scope:** write proposals to a **`_Reconcile` staging tab**, not to `Transactions`. Columns: `✓ (checkbox) · date · account · amount · merchant · proposed category · proposed bucket · confidence · source_row · status`.
+**Scope:** write proposals to **`_Reconcile`**, not to `Transactions`. Current visible columns: `✓ · date · account · Cardholder · Тип · amount · merchant · proposed category · proposed bucket · confidence · source_row · status`; metadata adds `review_reason · review_id · statement_key`. Preserve earlier edits/ticks when appending files. **Preview ticked rows** opens a read-only Sheets dialog with exact writer A–K rows and skipped duplicate identities; it changes no ledger/status/history. E/K formulas are shown; F:G balance values must be checked after real sandbox import because preview does not evaluate them.
 
 This staging tab is deliberately **better than the Telegram wizard for this job**: reviewing 45 rows one at a time in chat is miserable; a sheet lets you scan them all, sort, bulk‑tick, and fix a category inline with the existing dropdown.
 
@@ -299,9 +332,11 @@ This staging tab is deliberately **better than the Telegram wizard for this job*
 
 ### Stage 3F — Commit (the only writing step)
 
-**Scope:** `commitStaged()` reads ticked rows from `_Reconcile` and appends them via the **existing Phase‑1 writer** (11 columns, formula copy‑down for F:G, `LockService`, dedupe). Mark committed rows `status = imported` so a re‑run can't double‑import.
+**Scope:** `commitStaged()` reads eligible ticked rows and appends them through the **existing Phase‑1 writer** (11 columns, E derives from D, K derives from H and `-!B:C`, F:G copy-down, shared lock, dedupe). Preserve the reviewed type. Credits use the magnitude/sign required by the workbook's existing type-aware or subtract-only G formula. J is `Grandparents` for those identified rows; Val/Rita J remains empty, while staging/history retain their source identity. Mark only written rows `imported`; keep skipped rows `duplicate_review`. Explicit menu import writes even with the default `DRY_RUN = true`, then archives completed rows; preview always overrides to dry-run.
 
-**Test:** with `DRY_RUN = true`, run against the **sandbox** sheet and read the logged would‑be rows. Then flip `DRY_RUN = false` on the sandbox and verify: correct columns (J Notes empty, K bucket), balances chain correctly, re‑running imports nothing. **Only then** point at the live sheet.
+**Additional-occurrence policy:** the existing writer key omits cardholder and multiplicity. A verified separate purchase may share that key, but a normal checkbox is **not** permission to bypass dedupe. Require explicit human confirmation plus durable reason/source for an additional occurrence; never alter accurate date/amount/merchant just to evade the key. The Phase-1 force-add path requires an explicit `force_add` flag and records it in Notes. **Current Sheets limitation:** staging commit supplies no force flag and retains same-key purchases as `duplicate_review`. For acceptance now, either dismiss a confirmed duplicate with a reason, or accurately enter a confirmed additional purchase manually with a supporting Note and refresh pending review. A dedicated audited additional-occurrence approval action in Sheets remains future work; do not claim it is implemented.
+
+**Test:** on the isolated **sandbox**, preview checked rows and compare their identities and exact values with the reviewed source. Use explicit menu import; verify J identity notes, numeric D, recalculated E/K, and F:G balances by account. Re-running imports nothing. Preview alone must leave every value/tick/status/history unchanged. **Only after the full [sandbox checklist](sandbox-acceptance-checklist.md) passes** consider live acceptance.
 
 **Done when:** a real statement flows 3A→3F on the sandbox with correct results, and a second run is a clean no‑op.
 
@@ -311,7 +346,7 @@ This staging tab is deliberately **better than the Telegram wizard for this job*
 
 Wire the pipeline to the triggers in §"Running the reconciler without Telegram". Telegram upload becomes **one of several** entry points, not the only one.
 
-**Acceptance (whole stage).** A statement in either format, from any date window, produces exactly the right missing set; non‑spend excluded; staging reviewed; committed rows correct and idempotent; every sub‑stage has a passing test in `runAllTests()`.
+**Acceptance (whole stage).** Real DBS and Citi CSV/PDF, overlapping windows and all applicable card sections produce the exact expected occurrence set; credit/exclusion policies hold; retained review edits, failures/retries, file journal/moves, preview/import values, history/dismissal/manual refresh and scheduled pickup pass. Compare row identities and values, not summary counts. Offline regressions and native harness checks pass, and real Sheets E/K and F:G recalculate correctly. **Current status: source implemented; real sandbox acceptance complete, confirmed by Val on 16 September 2026.** See the [acceptance record](sandbox-acceptance-checklist.md).
 
 ---
 
@@ -341,7 +376,7 @@ function onOpen() {
 }
 ```
 
-`reconcileFromDrive()` reads every new file in the inbox folder, runs 3A→3E, and drops proposals into `_Reconcile`. You tick rows and click *Import*. **No Telegram involved anywhere in the monthly flow.**
+`reconcileFromDrive()` attempts up to five files per bounded scan, runs 3A→3E, and appends proposals into `_Reconcile`. Successful staging moves the original file to `processed`; that means **staged, not imported**. `_ReconcileFiles` journals identity/status/error and retries/recovery prevent restaging. Failed files remain in inbox. You review, preview, tick and explicitly import; no file drop automatically writes Transactions. Telegram is optional.
 
 > **Design consequence:** keep all reconciler logic in **`reconciler.gs` with no Telegram dependencies**. `webhook.gs` may *call* it; it must never *contain* it. That separation is what makes every entry point above possible — and it is also what makes the sub‑stage tests possible.
 
@@ -350,6 +385,8 @@ function onOpen() {
 # WEEKLY USE CASES
 
 ## STAGE 4 — UC‑6 Mandatory‑payment calendar + weekly reminder + missed‑date alerts
+
+**Progress:** not complete. The existing AI weekly audit is a precursor; the editable Calendar, deterministic due-date rules and alerts below remain to be built. Mandatory G semantics are still unconfirmed; no G write-back is implemented.
 
 **Objective.** Never forget a fixed payment. Build a **calendar of expected payment dates**, then a **weekly** reminder of what's still unpaid this month, with **prominent alerts for expected dates that have already passed** without a matching payment.
 
@@ -405,11 +442,13 @@ The 11 actual `Обязательные расходы` labels (from `D3:D13`, v
 **Objective.** A month‑end results brief — same coach engine, different window and framing.
 
 **Build.**
-- Add `period:"monthly"` to `buildCoachPayload()`: full‑month actuals vs targets for all four buckets, final `Рестораны/Развлечения/Дом/Подарки` totals, count of mandatory items paid vs missed (from Stage 4), and month‑over‑month deltas if easily read.
+- Use `buildCoachPayload('monthly', spreadsheet, reportDate)` with one explicit reporting anchor passed through every reader. Read full-month actual/target amounts and percentages for **Needs/Wants/Savings**, target-header text, full-month `Рестораны/Развлечения/Дом/Подарки` ordinary-spend totals, and at most one discretionary category focus. Do not relabel daily/current-month fields as monthly or recompute summary bucket totals. Default manual reporting selects the latest completed month; the last-day closing window selects that closing month. Missing/formula-error required data produces an unavailable-data brief, not valid-looking zero results.
+- **Current payment results:** paid if the selected month's existing paid flag is true or logged mandatory category total meets planned amount; partial payments count unpaid. Exclude CPF and zero-planned lines from completion counts. Say **paid/unpaid**, not overdue/missed dates: date-based missed results require the Stage 4 calendar. Month-over-month deltas remain optional future data, never inferred by the model.
 - Persona variant: *"Write a ≤4‑sentence month‑in‑review for the family: how the month landed vs the 50/30/20 targets, the one category that drove overspend or the win, and one concrete focus for next month. Warm, specific, no tables."*
-- **Scheduler:** fire on month rollover (the daily trigger + `tomorrow.getMonth() !== today.getMonth()`), sequenced with the reconciler prompt.
+- **Grounding:** use the shared coach engine and monetary whitelist plus monthly validation of month, bucket labels/amounts/percentages, completion counts, supported HTML and ≤4 sentences; invalid output gets deterministic grounded fallback. Show the target-header basis in the brief.
+- **Scheduler:** shared heartbeat starts last-day **23:30 SGT**, with **reconciler reminder → monthly coach** acceptance per active user, and catch-up until **02:30 next day**. Freeze the closing reporting month across midnight and year rollover. The brief reflects ledger data at generation; sequencing does not wait for the user to finish statement imports.
 
-**Acceptance.** Fires once, last day of month, to both users; numbers reconcile with the month's `50/30/20` tab.
+**Acceptance.** Each active user receives the closing-month reminder then coach once per reporting month, or retries only within the defined window; acceptance follows Telegram success. Figures agree with that month's sheet, including a first-of-next-month retry and year rollover; no new-month or daily fields leak into the retrospective. **Progress:** source and offline regressions pass; real delivery/sheet comparison is pending, and date-based missed results remain Stage 4 work.
 
 **Checkpoint.** Force‑run with a month's data; totals match the sheet.
 
@@ -469,7 +508,7 @@ The 11 actual `Обязательные расходы` labels (from `D3:D13`, v
    **Brand capture matters** — it's what powers tier‑drift and splurge detection in Part B. Receipts often abbreviate or omit brands; when absent, set `brand: null` rather than guessing, and let `brand_tier` fall back to the merchant/price context.
 3. **Storage — new `LineItems` tab** (bootstrapped automatically like `Merchants`):
    `dedupe_key · date · merchant · account · raw_text · item_name · product_key · brand · brand_tier · qty · unit · size · unit_price · line_total · discount · item_category · is_discretionary`
-   - **Link to the parent transaction via the existing `dedupe_key`** — do **not** add columns to `Transactions`; its 10‑column schema and balance formulas stay untouched.
+   - **Link to the parent transaction via the existing `dedupe_key`** — do **not** add columns to `Transactions`; its verified 11‑column schema and balance formulas stay untouched.
    - **`Products` catalog tab** (auto‑created): `product_key · canonical_name · typical_unit · category · is_discretionary · known_brands · baseline_unit_price · baseline_set_date · last_seen`. Grows as new items appear; the LLM matches new `raw_text` against existing keys first so `BRC CHKN BRST` and `CHICKEN BREAST 2KG` collapse to one product. The **baseline unit price** (first reliable observation, or a rolling early‑period median) is what later price movement is measured against.
 4. **No per‑item confirmation.** The user confirms the **transaction** as today (that's what touches balances); line items are written without a 40‑item approval wizard. They're analysis‑only data, so a wrong item costs nothing — friction here would kill the feature.
    - Sanity check: if `sum(line_total) − discounts` differs from the transaction amount by more than ~2%, store the items but set a `reconciled:false` flag and exclude that receipt from price analysis.
@@ -520,8 +559,8 @@ Report as: *"Cheese: S$41/mo → S$96/mo. Driver: switched from mainstream to sp
 1. **Stage 0** (discovery gate) — unblocks everything; prevents silent corruption.
 2. **Stage 1** (read layer) — shared dependency.
 3. **Stage 2 — UC‑3 Daily Coach (P0)** — the headline daily value; read‑only, low‑risk, ships the daily‑saldo brief fast. Concludes the daily use cases.
-4. **Stage 4 — UC‑6 Weekly mandatory calendar** — the weekly cadence; ensures no forgotten fixed payment. Small‑to‑medium once Stage 0 says what column G is; the calendar seed is the new work.
-5. **Stage 3 — UC‑4 Reconciler** — the meatiest/most failure‑prone piece; **upload works any time** (PDF or CSV), with only the prompt tied to month‑end. Isolate it with its own focused build and real‑statement tests.
+4. **Stage 3 — UC‑4 Reconciler** — the meatiest/most failure‑prone piece; **upload works any time** (PDF or CSV), with only the prompt tied to month‑end. Isolate it with its own focused build and real‑statement tests.
+5. **Stage 4 — UC‑6 Weekly mandatory calendar** — the weekly cadence; ensures no forgotten fixed payment. Small‑to‑medium once Stage 0 says what column G is; the calendar seed is the new work.
 6. **Stage 5 — UC‑5 Monthly Coach** — thin reuse of the Stage 2 engine.
 7. **Stage 6 — UC‑7 New‑month tab** — most structure‑sensitive; tested on a copy before going live.
 8. **Stage 7 — UC‑8 Line‑item receipt intelligence** — **split it**: ship **Part A (capture)** early, alongside Stage 2, so item history starts accumulating immediately; build **Part B (analysis)** here, once there are ~4–8 weeks of data to find patterns in.

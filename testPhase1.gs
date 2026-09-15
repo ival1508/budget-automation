@@ -67,8 +67,9 @@ function runPhase1Tests() {
   Logger.log('Please open your Google Sheet ("Budget 2026") and verify the following:');
   Logger.log('  1. Check tab "Merchants": Must be created and hidden with headers ["merchant", "category", "count", "last_seen"].');
   Logger.log('  2. Check tab "Transactions" new rows:');
-  Logger.log('     - Columns D (Сумма) and E (Сумма в SGD) MUST contain numeric values (e.g. 14.87, 22, 100).');
+  Logger.log('     - Column D (Сумма) contains the numeric value; E (Сумма в SGD) is a same-row formula reading D.');
   Logger.log('     - Formulas in F (На счете до) and G (На счете после) copied down from the row above.');
+  Logger.log('     - Column K is a same-row formula looking up category H in the "-" tab B:C mapping.');
   Logger.log('     - Check Row 3 ("Citibank CC"): Column F MUST have literal value 0 (seed balance) instead of formula, and Column G MUST have a valid formula.');
   Logger.log('  3. Re-run runPhase1Tests(): Verification that idempotency skips all 3 rows (Written: 0, Skipped: 3).');
 }

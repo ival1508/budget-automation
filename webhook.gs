@@ -6,21 +6,62 @@
  */
 
 /**
+ * Web App HTTP GET entry point.
+ * 
+ * @param {Object} e - Event object containing query parameters.
+ * @return {GoogleAppsScript.Content.TextOutput} JSON response.
+ */
+function doGet(e) {
+  // Health check only. Run diagnostics/tests from the Apps Script editor;
+  // this web app is publicly accessible and executes with the owner's access.
+  return ContentService.createTextOutput(JSON.stringify({ status: 'OK', message: 'Ready' }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/** Both configured user membership and the explicit allowlist are required. */
+function getWebhookAccessPolicy(optProps) {
+  const props = optProps || PropertiesService.getScriptProperties();
+  const secret = props.getProperty('WEBHOOK_SECRET');
+  if (typeof secret !== 'string' || !secret.trim()) throw new Error('WEBHOOK_SECRET is required.');
+  const rawIds = String(props.getProperty('AUTHORIZED_CHAT_IDS') || '').trim();
+  const ids = rawIds.split(',').map(id => id.trim()).filter(Boolean);
+  if (!ids.length || ids.some(id => !/^-?[1-9]\d*$/.test(id))) {
+    throw new Error('AUTHORIZED_CHAT_IDS must contain valid Telegram chat IDs.');
+  }
+  const allowed = new Set(ids);
+  const chatIds = new Set(getActiveTelegramUsers().map(user => user.chat_id).filter(id => allowed.has(id)));
+  if (!chatIds.size) throw new Error('At least one active configured user must appear in AUTHORIZED_CHAT_IDS.');
+  return { secret: secret, chatIds: chatIds };
+}
+
+function getWebhookChatId(update) {
+  if (!update || typeof update !== 'object' || Array.isArray(update)) return null;
+  // A Telegram update carries one event. Reject conflicting event identities.
+  if (update.message && update.callback_query) return null;
+  const message = update.message || (update.callback_query && update.callback_query.message);
+  const id = message && message.chat && message.chat.id;
+  if (typeof id === 'number' && !Number.isSafeInteger(id)) return null;
+  if (typeof id !== 'number' && typeof id !== 'string') return null;
+  return /^-?[1-9]\d*$/.test(String(id)) ? String(id) : null;
+}
+
+/**
  * Main Web App HTTP POST entry point for Telegram webhook.
  * 
  * @param {Object} e - Event object containing postData and query parameters.
  * @return {GoogleAppsScript.HTML.HtmlOutput} Standard HTML output response.
  */
 function doPost(e) {
+  const requestStarted = Date.now();
+  let authorizedChatId = null;
   try {
     // 1. Security Check: Validate webhook secret parameter (§5.2)
-    const expectedSecret = PropertiesService.getScriptProperties().getProperty('WEBHOOK_SECRET');
-    if (expectedSecret) {
-      const incomingSecret = e && e.parameter && e.parameter.secret;
-      if (incomingSecret !== expectedSecret) {
-        Logger.log('Unauthorized webhook access attempt.');
-        return HtmlService.createHtmlOutput('Unauthorized');
-      }
+    const props = PropertiesService.getScriptProperties();
+    const policy = getWebhookAccessPolicy(props);
+    const incomingSecret = e && e.parameter && e.parameter.secret;
+    if (incomingSecret !== policy.secret) {
+      Logger.log('Unauthorized webhook access attempt.');
+      return HtmlService.createHtmlOutput('Unauthorized');
     }
 
     if (!e || !e.postData || !e.postData.contents) {
@@ -29,7 +70,13 @@ function doPost(e) {
 
     // 2. Parse Telegram Update Payload
     const update = JSON.parse(e.postData.contents);
-    const botToken = PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
+    const incomingChatId = getWebhookChatId(update);
+    if (!incomingChatId || !policy.chatIds.has(incomingChatId)) {
+      Logger.log('Unauthorized Telegram chat or unsupported update.');
+      return HtmlService.createHtmlOutput('Unauthorized');
+    }
+    authorizedChatId = incomingChatId;
+    const botToken = props.getProperty('TELEGRAM_BOT_TOKEN');
 
     // 2a. Anti-Loop Guard: Prevent Telegram retry loop on long-running updates
     if (update && update.update_id) {
@@ -42,39 +89,10 @@ function doPost(e) {
       cache.put(lockKey, '1', 600); // Lock for 10 minutes
     }
 
-    // Automatically capture TELEGRAM_CHAT_ID for daily cron nudges (§6.5)
-    let incomingChatId = null;
-    if (update.message && update.message.chat) {
-      incomingChatId = update.message.chat.id;
-    } else if (update.callback_query && update.callback_query.message && update.callback_query.message.chat) {
-      incomingChatId = update.callback_query.message.chat.id;
-    }
-
-    if (incomingChatId) {
-      const props = PropertiesService.getScriptProperties();
-      if (!props.getProperty('TELEGRAM_CHAT_ID')) {
-        props.setProperty('TELEGRAM_CHAT_ID', String(incomingChatId));
-        Logger.log('✅ New Telegram Chat ID locked in permanently: ' + incomingChatId);
-      }
-    }
-
-    // 2b. Security Check: Validate Authorized Chat IDs allowlist (if configured)
-    const authorizedIdsString = String(PropertiesService.getScriptProperties().getProperty('AUTHORIZED_CHAT_IDS') || '').trim();
-    const strChatId = String(incomingChatId || '').trim();
-    let isUserInConfig = false;
-    if (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.USERS) {
-      Object.values(SHEET_FACTS.USERS).forEach(user => {
-        if (user && user.active && String(user.chat_id || '').trim() === strChatId) {
-          isUserInConfig = true;
-        }
-      });
-    }
-    if (authorizedIdsString && !isUserInConfig) {
-      const authorizedIds = authorizedIdsString.split(',').map(id => id.trim());
-      if (!strChatId || authorizedIds.indexOf(strChatId) === -1) {
-        Logger.log('🚨 Unauthorized access attempt from Chat ID: ' + strChatId);
-        return HtmlService.createHtmlOutput('Unauthorized');
-      }
+    // Retain the legacy fallback only after authorization; broadcasts use USERS.
+    if (!props.getProperty('TELEGRAM_CHAT_ID')) {
+      props.setProperty('TELEGRAM_CHAT_ID', authorizedChatId);
+      Logger.log('✅ Authorized Telegram Chat ID captured: ' + authorizedChatId);
     }
 
     // 3. Handle Callback Query (Button taps - Step 3)
@@ -151,14 +169,14 @@ function doPost(e) {
         inputs.push({ text: message.caption });
       }
 
-      let isDocumentInput = false;
-
       // Case B: Photo input (Receipt / Bank Screenshot)
       if (Array.isArray(message.photo) && message.photo.length > 0) {
+        const downloadStarted = Date.now();
         const largestPhoto = message.photo[message.photo.length - 1];
         const filePath = getTelegramFilePath(largestPhoto.file_id, botToken);
         const photoMediaObj = fetchTelegramFileAsBase64(filePath, botToken);
         inputs.push(photoMediaObj);
+        logProposalTiming('photo_download', downloadStarted);
       }
 
       // Case C: Voice input (Voice Note)
@@ -178,11 +196,13 @@ function doPost(e) {
         const isCsv = mimeType.includes('csv') || mimeType.includes('excel') || mimeType.includes('plain') || fileName.endsWith('.csv');
 
         if (isPdf || isCsv) {
-          isDocumentInput = true;
           const targetMime = isPdf ? 'application/pdf' : 'text/csv';
           const filePath = getTelegramFilePath(doc.file_id, botToken);
           const docMediaObj = fetchTelegramFileAsBase64(filePath, botToken, targetMime);
-          inputs.push(docMediaObj);
+          const blob = Utilities.newBlob(Utilities.base64Decode(docMediaObj.inlineData.data), targetMime, doc.file_name || (isPdf ? 'statement.pdf' : 'statement.csv'));
+          enqueueStatementFile(blob, doc.file_unique_id || doc.file_id);
+          sendTelegramMessage('📥 Statement queued in the Drive inbox. Use 💰 Budget → Reconcile statements from Drive, or wait for the automatic scan; review the results in _Reconcile.', chatId);
+          return HtmlService.createHtmlOutput('OK');
         } else {
           const warningUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
           fetchWithRetry(warningUrl, {
@@ -198,50 +218,29 @@ function doPost(e) {
         }
       }
 
-      // === ALBUM GATHERING LOGIC ===
-      // If part of an album, gather all inputs into one batch and only let the first webhook proceed.
-      if (message.media_group_id && inputs.length > 0) {
-        const albumLock = LockService.getScriptLock();
-        let isFirst = false;
-        try {
-          albumLock.waitLock(10000);
-          const cache = CacheService.getScriptCache();
-          const cacheKey = 'album_' + message.media_group_id;
-          let albumData = cache.get(cacheKey);
-          let album = albumData ? JSON.parse(albumData) : [];
-          
-          isFirst = (album.length === 0);
-          
-          // Append current inputs
-          inputs.forEach(inp => album.push(inp));
-          cache.put(cacheKey, JSON.stringify(album), 300);
-        } catch (e) {
-          Logger.log("Album lock error: " + e.message);
-        } finally {
-          albumLock.releaseLock();
-        }
-
-        if (!isFirst) {
-          // If not the first message in the album, simply return to avoid duplicative processing
-          return HtmlService.createHtmlOutput('OK');
-        } else {
-          // If first, wait a few seconds for Telegram to deliver the rest of the album
-          Utilities.sleep(4000);
-          const cache = CacheService.getScriptCache();
-          const finalAlbumData = cache.get('album_' + message.media_group_id);
-          if (finalAlbumData) {
-            inputs = JSON.parse(finalAlbumData);
-          }
-        }
-      }
-      // === END ALBUM GATHERING LOGIC ===
+      // Telegram delivers one update per album photo. Process every update;
+      // neither cache image bytes nor guess when an album has finished arriving.
+      // Plain photos merge under the proposal lock below, even if they finish late.
 
       // Process inputs through AI Extraction & Confirmation Pipeline
       if (inputs.length > 0) {
-        const sequentialLock = LockService.getScriptLock();
+        // Plain photos are independent extraction jobs. Merge with the latest state
+        // after extraction, so model latency never holds up other photo requests.
+        const independentPhoto = Boolean(message.photo && !message.caption && !message.text && !message.voice &&
+          !inputs.some(input => typeof input === 'string' || (input && input.text)));
+        let photoTransactions = null;
+        if (independentPhoto) {
+          const extractionStarted = Date.now();
+          photoTransactions = extractTransactions(inputs, { defaultAccount: DEFAULT_ACCOUNT });
+          logProposalTiming('photo_extraction', extractionStarted);
+        }
+        // Proposal state uses the user lock; statement scans / ledger writes keep
+        // the separate script lock. The web app executes as the owning user.
+        const sequentialLock = LockService.getUserLock();
         try {
-          // Wait up to 30 seconds for the lock (enough time for prior images to finish)
+          const lockStarted = Date.now();
           sequentialLock.waitLock(30000);
+          logProposalTiming('proposal_lock_wait', lockStarted);
 
           const userProperties = PropertiesService.getUserProperties();
           const activeTokenKey = `latest_token_${chatId}`;
@@ -261,29 +260,13 @@ function doPost(e) {
           };
 
           // Phase 2: AI Multimodal Extraction & Phase 1 Enrichment
-          const enrichedTransactions = extractTransactions(inputs, context);
+          const enrichedTransactions = independentPhoto ? photoTransactions : extractTransactions(inputs, context);
 
-          let finalTransactionsToConfirm = enrichedTransactions;
+          const finalTransactionsToConfirm = independentPhoto
+            ? mergeScreenshotProposals(previousProposal || [], enrichedTransactions)
+            : enrichedTransactions;
 
-          // Smart PDF Classification: Individual Receipt PDF vs. Bank Statement PDF
-          if (isDocumentInput) {
-            // Check if Gemini extracted multiple transactions (>1) indicating a multi-item Bank Statement
-            const isBankStatement = enrichedTransactions.length > 1;
-
-            if (isBankStatement) {
-              // Bank Statement Matching Exercise: compare against existing ledger
-              const missingTransactions = getMissingTransactions(enrichedTransactions);
-              if (missingTransactions.length === 0) {
-                sendTelegramMessage("📊 <b>Bank Statement Reconciled!</b> 100% of transactions in this statement are already logged in your sheet.", chatId);
-                return HtmlService.createHtmlOutput('OK');
-              }
-              finalTransactionsToConfirm = missingTransactions;
-            } else if (enrichedTransactions.length === 0) {
-              sendTelegramMessage("ℹ️ No financial transactions detected in your PDF. Please ensure it is a valid receipt or bank statement.", chatId);
-              return HtmlService.createHtmlOutput('OK');
-            }
-            // Note: Single-item PDF Receipts (length === 1) proceed directly to standard transaction proposal confirmation
-          } else if (finalTransactionsToConfirm.length === 0) {
+          if (finalTransactionsToConfirm.length === 0) {
             sendTelegramMessage("ℹ️ No financial transactions detected in your input. Try sending a receipt photo, voice note, or text spend (e.g., 'lunch 12.50').", chatId);
             return HtmlService.createHtmlOutput('OK');
           }
@@ -292,16 +275,23 @@ function doPost(e) {
           const tokenToSave = (previousProposal && previousProposal.length > 0) ? activeToken : null;
           const token = savePendingTransactions(finalTransactionsToConfirm, tokenToSave);
           userProperties.setProperty(activeTokenKey, token);
+          if (message.media_group_id) {
+            Logger.log(`[Album photo] group=${message.media_group_id}; message=${message.message_id}; extracted=${enrichedTransactions.length}; proposal_rows=${finalTransactionsToConfirm.length}`);
+          }
 
           if (typeof sendConfirmationMessage === 'function') {
             // Check if we are appending/updating an existing proposal
             const isUpdate = (previousProposal && previousProposal.length > 0 && activeToken);
+            const confirmationStarted = Date.now();
             sendConfirmationMessage(chatId, token, finalTransactionsToConfirm, isUpdate);
+            logProposalTiming('confirmation_delivery', confirmationStarted);
+            logProposalTiming('proposal_total', requestStarted);
           } else {
             Logger.log(`Confirmation message helper not yet attached. Token: ${token}`);
           }
         } catch (lockOrProcessErr) {
           Logger.log('Sequential processing error: ' + lockOrProcessErr.message);
+          throw lockOrProcessErr;
         } finally {
           try { sequentialLock.releaseLock(); } catch (e) {}
         }
@@ -309,25 +299,22 @@ function doPost(e) {
     }
   } catch (err) {
     Logger.log(`Error processing webhook update: ${err.message}\nStack: ${err.stack}`);
-    // Notify user in Telegram if chatId is known so errors are never silent
+    // Authentication/config/parse failures must never notify a body-supplied chat.
+    if (!authorizedChatId) return HtmlService.createHtmlOutput('Unauthorized');
+    // Processing errors can notify only the identity that already passed both gates.
     try {
-      if (e && e.postData && e.postData.contents) {
-        const updateObj = JSON.parse(e.postData.contents);
-        const errChatId = (updateObj.message && updateObj.message.chat && updateObj.message.chat.id) ||
-                          (updateObj.callback_query && updateObj.callback_query.message && updateObj.callback_query.message.chat && updateObj.callback_query.message.chat.id);
-        const botToken = PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
-        if (errChatId && botToken) {
-          const errUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
-          fetchWithRetry(errUrl, {
-            method: 'post',
-            contentType: 'application/json',
-            payload: JSON.stringify({
-              chat_id: errChatId,
-              text: `⚠️ Bot Error: ${err.message}`
-            }),
-            muteHttpExceptions: true
-          });
-        }
+      const botToken = PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
+      if (botToken) {
+        const errUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+        fetchWithRetry(errUrl, {
+          method: 'post',
+          contentType: 'application/json',
+          payload: JSON.stringify({
+            chat_id: authorizedChatId,
+            text: `⚠️ Bot Error: ${err.message}`
+          }),
+          muteHttpExceptions: true
+        });
       }
     } catch (notifyErr) {
       Logger.log('Failed to send error notification to Telegram: ' + notifyErr.message);
@@ -336,6 +323,28 @@ function doPost(e) {
 
   // 5. Always return "OK" fast to acknowledge Telegram webhook delivery (§5.3)
   return HtmlService.createHtmlOutput('OK');
+}
+
+/** Log timing only, never screenshot content, transaction details or credentials. */
+function logProposalTiming(phase, started) {
+  Logger.log(`[Proposal timing] ${phase}: ${Date.now() - started}ms`);
+}
+
+/** Preserve reviewed fields and occurrence counts when screenshots overlap. */
+function mergeScreenshotProposals(previous, incoming) {
+  const key = txn => JSON.stringify([normalizeDateString(txn.date), String(txn.account || '').trim(),
+    String(txn.currency || 'SGD').toUpperCase(), Number(txn.amount).toFixed(2),
+    normaliseWhere(txn.where || ''), String(txn.type || ''), String(txn.card_last4 || txn.cardholder || ''),
+    (txn.flags || []).includes('papa_charge') || /grandparents/i.test(String(txn.notes || ''))]);
+  const remaining = new Map();
+  previous.forEach(txn => { const id = key(txn); remaining.set(id, (remaining.get(id) || 0) + 1); });
+  const merged = previous.slice();
+  incoming.forEach(txn => {
+    const id = key(txn), count = remaining.get(id) || 0;
+    if (count) remaining.set(id, count - 1);
+    else merged.push(txn);
+  });
+  return merged;
 }
 
 /**

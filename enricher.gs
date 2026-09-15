@@ -4,8 +4,10 @@
  */
 
 /**
- * Normalises a merchant/location string for consistent deduplication.
- * Converts string to lowercase, trims leading/trailing whitespace, and collapses multiple spaces.
+ * Normalises a merchant/location string for consistent deduplication and reconciler matching.
+ * Converts string to lowercase, strips terminal/bank prefixes, normalizes Grab transaction IDs,
+ * strips trailing location/country markers, and collapses whitespace.
+ * Shared directly across Phase 1 enricher and Stage 3 reconciler.
  * 
  * @param {string} where - Raw or extracted merchant/location string.
  * @return {string} Normalised merchant string.
@@ -14,10 +16,128 @@ function normaliseWhere(where) {
   if (!where || typeof where !== 'string') {
     return '';
   }
-  return where
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, ' ');
+  let s = where.toLowerCase().trim().replace(/\s+/g, ' ');
+
+  // Strip leading/trailing quotes or apostrophes
+  s = s.replace(/^['"\s]+|['"\s]+$/g, '');
+
+  // Strip common bank/card/POS terminal and gateway prefixes (e.g., "NETS*", "VISA*", "SQ*", "2C2*", "PAYPAL*", "STRIPE*", "SPL ", "GOPAY-", "GRABPAY*", "PAYNOW*")
+  s = s.replace(/^(nets|visa|mastercard|sq|2c2|2c2p|paypal|stripe|adyen|spl|gopay|grabpay|paynow)\s*[*:-]?\s*/i, '');
+
+  // Normalize Grab variants into three distinct keys:
+  // - Descriptor contains "GRABFOOD" or "GRAB FOOD" -> "grab food"
+  // - Descriptor contains "GRAB SUBSCRIPTION" -> "grab subscription"
+  // - Otherwise (GRAB* A-..., WWW.GRAB.COM, Grab rides) -> "grab"
+  if (/grab[\s*_\-]*food/i.test(s) || /grabfood/i.test(s)) {
+    return 'grab food';
+  }
+  if (/grab[\s*_\-]*subscription/i.test(s)) {
+    return 'grab subscription';
+  }
+  if (/^grab(\*.*|\s+.*)?$/i.test(s) || /www\.grab\.com/i.test(s)) {
+    return 'grab';
+  }
+
+  // Normalize FairPrice variants ("Fair Price", "NTUC FairPrice", "NETS*FAIRPRICE", "FAIRPRICE FINEST") -> "fairprice"
+  s = s.replace(/^(ntuc\s*)?fair\s*price(\b.*)?$/i, 'fairprice');
+
+  // Strip trailing transaction/order noise with digits (e.g., "*12345678" or trailing "*1234")
+  s = s.replace(/\*[a-z0-9\-]*\d+[a-z0-9\-]*$/i, '').trim();
+
+  // Strip trailing country and city/country combinations (e.g. "singapore sg", "stockholm se", "sg", "th", "au", "cn", "ie", "us", "se")
+  if (s !== 'toys r us') {
+    const cityTokens = '(?:singapore|stockholm|bangkok|beijing|dublin|london|sydney|melbourne|tokyo|hong\\s*kong|kuala\\s*lumpur|jakarta|paris|berlin|amsterdam|new\\s*york|seattle)';
+    const countryTokens = '(?:singapore|sgp|sg|thailand|tha|th|australia|aus|au|china|chn|cn|ireland|irl|ie|usa|us|sweden|swe|se|united\\s*kingdom|uk|gb|gbr|hong\\s*kong|hkg|hk|malaysia|mys|my|japan|jpn|jp|canada|can|ca|germany|deu|de|france|fra|fr|new\\s*zealand|nzl|nz|indonesia|idn|id|vietnam|vnm|vn|netherlands|nld|nl|taiwan|twn|tw|korea|kor|kr|philippines|phl|ph|india|ind)';
+    const locRegex = new RegExp('\\s+(?:' + cityTokens + '\\s+)?' + countryTokens + '$', 'i');
+    
+    // Loop up to 2 times to strip stacked suffixes like "SINGAPORE SGP" or "SINGAPORE SG"
+    for (let iter = 0; iter < 2; iter++) {
+      if (locRegex.test(s) && s !== 'toys r us') {
+        s = s.replace(locRegex, '').trim();
+      } else {
+        break;
+      }
+    }
+  }
+
+  return s;
+}
+
+/**
+ * Resolves a clean, human-readable display name for a merchant for Column I (Где).
+ * 1. Checks MERCHANT_ALIASES for a canonical name.
+ * 2. Falls back to smart title-casing of the merchant string.
+ * 
+ * @param {string} rawOrNormMerchant - Raw or normalized merchant string.
+ * @return {string} Properly capitalized, clean display name.
+ */
+function cleanMerchantDisplayName(rawOrNormMerchant) {
+  const str = String(rawOrNormMerchant || '').trim();
+  if (!str) return '';
+
+  // 1. Check MERCHANT_ALIASES
+  const normKey = typeof normaliseWhere === 'function' ? normaliseWhere(str) : str.toLowerCase();
+  if (typeof getMerchantAliases === 'function') {
+    try {
+      const aliases = getMerchantAliases();
+      if (aliases && aliases[normKey] && aliases[normKey].canonical) {
+        return aliases[normKey].canonical;
+      }
+    } catch (e) {
+      // Ignore alias lookup errors and proceed to title-case fallback
+    }
+  }
+
+  // 2. Fallback: Smart Title-Casing of the normalised string
+  return toSmartTitleCase(normKey || str);
+}
+
+/**
+ * Converts a merchant string into title case while respecting common brand names and acronyms.
+ * 
+ * @param {string} str - Raw or normalized merchant string.
+ * @return {string} Title-cased merchant string.
+ */
+function toSmartTitleCase(str) {
+  if (!str) return '';
+
+  const brandMap = {
+    'dbs': 'DBS',
+    'posb': 'POSB',
+    'citi': 'Citibank',
+    'citibank': 'Citibank',
+    'simplygo': 'SimplyGo',
+    'fairprice': 'Fair Price',
+    'ntuc': 'NTUC',
+    'sp': 'SP',
+    'mrt': 'MRT',
+    'nets': 'NETS',
+    'sgd': 'SGD',
+    'sg': 'SG',
+    'f&b': 'F&B',
+    'app': 'App',
+    'amazon': 'Amazon',
+    'grab': 'Grab',
+    'grab food': 'Grab Food',
+    'grab subscription': 'Grab Subscription',
+    'carousell': 'Carousell',
+    'allianz': 'Allianz'
+  };
+
+  // If the entire normalized string matches a brand
+  const lowerWhole = str.toLowerCase().trim();
+  if (brandMap[lowerWhole]) {
+    return brandMap[lowerWhole];
+  }
+
+  return str.split(/\s+/).map(word => {
+    const cleanWord = word.toLowerCase().replace(/[^a-z0-9&]/g, '');
+    if (brandMap[cleanWord]) {
+      return brandMap[cleanWord];
+    }
+    // Handle standard word capitalization
+    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+  }).join(' ');
 }
 
 /**

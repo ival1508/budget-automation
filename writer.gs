@@ -19,22 +19,110 @@ function formatSheetDate(cellValue) {
   return typeof normalizeDateString === 'function' ? normalizeDateString(cellValue) : String(cellValue || '').trim();
 }
 
+/** Run a sheet mutation under the shared script lock; retain a caller's lock. */
+function withBudgetWriteLock(operation) {
+  const lock = typeof LockService !== 'undefined' ? LockService.getScriptLock() : null;
+  const ownsLock = lock && !lock.hasLock();
+  if (ownsLock && !lock.tryLock(30000)) throw new Error('Budget write is busy; retry shortly.');
+  try {
+    return operation();
+  } finally {
+    if (ownsLock) lock.releaseLock();
+  }
+}
+
+/** Build the row-local formula for Transactions E (Сумма в SGD). */
+function transactionAmountSgdFormula(rowNumber) {
+  const row = Math.max(2, Number(rowNumber) || 2);
+  return `=IF(D${row}="";"";D${row})`;
+}
+
+/** Build the row-local formula for Transactions K (50/30/20). */
+function transactionBucketFormula(rowNumber) {
+  const row = Math.max(2, Number(rowNumber) || 2);
+  return `=IF(H${row}="";"";IFNA(VLOOKUP(H${row};'-'!$B:$C;2;FALSE);"UNKNOWN"))`;
+}
+
+/**
+ * Replace derived values in existing Transactions rows with formulas.
+ * The header and reference-tab checks run before either destination column changes.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
+ * @return {Object} Result summary { updatedRows }.
+ */
+function repairTransactionDerivedFormulas(ss) {
+  return withBudgetWriteLock(() => {
+    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    if (!spreadsheet) throw new Error('No active spreadsheet found.');
+
+    const sheet = getTransactionsSheet(spreadsheet);
+    const headers = sheet.getRange(1, 1, 1, 11).getDisplayValues()[0]
+      .map(value => String(value || '').trim().toLowerCase());
+    const validHeader = (actual, accepted) => accepted.indexOf(actual) !== -1;
+    if (!validHeader(headers[3], ['сумма', 'amount']) ||
+        !validHeader(headers[4], ['сумма в sgd', 'amount sgd', 'sum sgd']) ||
+        !validHeader(headers[7], ['категория', 'category']) ||
+        !headers[10].startsWith('50/30/20')) {
+      throw new Error('Transactions layout is unexpected. Expected D=Сумма, E=Сумма в SGD, H=Категория and K=50/30/20. No formulas were changed.');
+    }
+
+    const referenceSheet = spreadsheet.getSheetByName('-');
+    if (!referenceSheet || referenceSheet.getLastRow() < 1 || referenceSheet.getLastColumn() < 3) {
+      throw new Error('Reference tab "-" with category/bucket values in B:C is required. No formulas were changed.');
+    }
+    const referenceValues = referenceSheet.getRange(1, 2, referenceSheet.getLastRow(), 2).getDisplayValues();
+    const hasReferencePair = referenceValues.some(row => {
+      const category = String(row[0] || '').trim();
+      const bucket = String(row[1] || '').trim();
+      return category && bucket && ['категория', 'category'].indexOf(category.toLowerCase()) === -1;
+    });
+    if (!hasReferencePair) {
+      throw new Error('Reference tab "-" has no category/bucket pairs in B:C. No formulas were changed.');
+    }
+
+    const rowCount = Math.max(0, sheet.getLastRow() - 1);
+    if (rowCount > 0) {
+      const amountFormulas = [];
+      const bucketFormulas = [];
+      for (let i = 0; i < rowCount; i++) {
+        const rowNumber = i + 2;
+        amountFormulas.push([transactionAmountSgdFormula(rowNumber)]);
+        bucketFormulas.push([transactionBucketFormula(rowNumber)]);
+      }
+      sheet.getRange(2, 5, rowCount, 1).setFormulas(amountFormulas);
+      sheet.getRange(2, 11, rowCount, 1).setFormulas(bucketFormulas);
+      SpreadsheetApp.flush();
+    }
+
+    const message = `Repaired Transactions formulas in E and K for ${rowCount} row(s).`;
+    Logger.log(message);
+    if (typeof spreadsheet.toast === 'function') spreadsheet.toast(message, 'Budget', 6);
+    return { updatedRows: rowCount };
+  });
+}
+
 /**
  * Appends approved transactions to the 'Transactions' sheet.
  * 
  * Enforces key invariants:
- * 1. Batch writes input columns (A-E, H-J) in a single setValues operation (§6.6).
- * 2. Writes raw SGD numerical amount to BOTH column D (Сумма) and column E (Сумма в SGD) (§4.3, §6.6).
- * 3. Does NOT compute running balances in code. Copies F:G per-cell formulas down from row above (§4.3, §6.6).
- * 4. Checks if account in column B has ever appeared in the sheet before.
+ * 1. Batch writes columns A-K in a single setValues operation (§6.6).
+ * 2. Writes the raw SGD number to D and a row-local =D formula to E.
+ * 3. Writes a row-local category lookup formula to K using the "-" tab B:C taxonomy.
+ * 4. Does NOT compute running balances in code. Copies F:G per-cell formulas down from row above (§4.3, §6.6).
+ * 5. Checks if account in column B has ever appeared in the sheet before.
  *    For the VERY FIRST row of a new account, writes literal `0` into column F instead of copying formula (§6.6).
- * 5. Idempotent: Skips rows whose dedupe_key already exists in the sheet (§6.6, §6.7).
+ * 6. Idempotent: Skips rows whose dedupe_key already exists in the sheet (§6.6, §6.7).
  * 
  * @param {Array<Object>} transactionsArray - Array of enriched transaction objects.
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
- * @return {Object} Result summary { writtenCount, skippedCount, writtenRows }.
+ * @param {boolean} [optDryRun] - Optional override for DRY_RUN mode.
+ * @return {Object} Result summary { writtenCount, skippedCount, writtenRows, dryRun }.
  */
-function appendTransactions(transactionsArray, ss) {
+function appendTransactions(transactionsArray, ss, optDryRun) {
+  return withBudgetWriteLock(() => appendTransactionsUnlocked(transactionsArray, ss, optDryRun));
+}
+
+function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {
   if (!Array.isArray(transactionsArray) || transactionsArray.length === 0) {
     return { writtenCount: 0, skippedCount: 0, writtenRows: [] };
   }
@@ -70,13 +158,16 @@ function appendTransactions(transactionsArray, ss) {
 
   // 2. Idempotency Filtering: Filter out duplicate transactions unless force_add is set (§6.7)
   const toAppend = [];
+  const rowOutcomes = [];
   let skippedCount = 0;
-  const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap() : null;
+  const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap(ss) : null;
 
   for (let i = 0; i < transactionsArray.length; i++) {
     const txn = transactionsArray[i];
     // Ensure transaction is enriched before checking key
     const enriched = txn.dedupe_key ? txn : enrichTransaction(txn, categoryBucketMap);
+    // The staging reviewer explicitly selected this type; do not reclassify it.
+    if (txn.reviewed_type === true) enriched.type = txn.type;
 
     const isForced = Array.isArray(enriched.flags) && enriched.flags.indexOf('force_add') !== -1;
 
@@ -84,7 +175,9 @@ function appendTransactions(transactionsArray, ss) {
     if (!isForced && existingDedupeKeys.has(enriched.dedupe_key)) {
       Logger.log(`Skipping duplicate row: ${enriched.where} (${enriched.amount})`);
       skippedCount++;
+      rowOutcomes.push({ inputIndex: i, status: 'duplicate_review' });
     } else {
+      rowOutcomes.push({ inputIndex: i, status: 'pending' });
       toAppend.push(enriched);
       // Track dedupe key within current batch to prevent intra-batch duplicates
       existingDedupeKeys.add(enriched.dedupe_key);
@@ -92,11 +185,11 @@ function appendTransactions(transactionsArray, ss) {
   }
 
   if (toAppend.length === 0) {
-    return { writtenCount: 0, skippedCount: skippedCount, writtenRows: [] };
+    return { writtenCount: 0, skippedCount: skippedCount, writtenRows: [], rowOutcomes: rowOutcomes };
   }
 
   // 3. Prepare 2D Array for Input Columns (§4.1, §6.6)
-  // Columns: A:Дата, B:Счёт, C:Тип, D:Сумма, E:Сумма в SGD, F:BalanceBefore, G:BalanceAfter, H:Категория, I:Где, J:50/30/20
+  // Columns: A:Дата, B:Счёт, C:Тип, D:Сумма, E:Сумма в SGD, F:G balances, H:Категория, I:Где, J:Notes, K:50/30/20
   const rows2D = [];
   const startRow = lastRow + 1;
   const newAccountsInBatch = [];
@@ -104,8 +197,9 @@ function appendTransactions(transactionsArray, ss) {
   for (let i = 0; i < toAppend.length; i++) {
     const txn = toAppend[i];
     
-    // Invariant §4.3: Column D & E both receive raw numerical SGD amount
+    // Column D is the single amount value; E and K derive from D and H.
     const sgdAmount = Number(txn.amount_sgd !== undefined && txn.amount_sgd !== null ? txn.amount_sgd : txn.amount) || 0;
+    const rowNumber = startRow + i;
 
     // Track newly seen accounts to apply initial opening balance seed (§6.6)
     const isNewAccount = !seenAccounts.has(txn.account);
@@ -121,14 +215,34 @@ function appendTransactions(transactionsArray, ss) {
       txn.account || '',          // B: Счёт
       txn.type || 'Расходы',      // C: Тип
       sgdAmount,                  // D: Сумма (raw number)
-      sgdAmount,                  // E: Сумма в SGD (raw number)
+      transactionAmountSgdFormula(rowNumber), // E: Сумма в SGD (=D for this row)
       '',                         // F: На счете до (formula / seed placeholder)
       '',                         // G: На счете после (formula placeholder)
       txn.category || 'Другое',   // H: Категория
       txn.where || '',            // I: Где / Merchant
       notesText,                  // J: Notes & Tracking Flags
-      txn.bucket || 'Wants'       // K: 50/30/20 Category
+      transactionBucketFormula(rowNumber) // K: 50/30/20 derived from H and "-"!B:C
     ]);
+  }
+
+  // 4. DRY_RUN Check: If DRY_RUN is active, log exact rows without touching sheet (§6.6, PRD Stage 3)
+  const isDryRun = (typeof optDryRun === 'boolean')
+    ? optDryRun
+    : (typeof SHEET_FACTS !== 'undefined' && Boolean(SHEET_FACTS.DRY_RUN));
+
+  if (isDryRun) {
+    Logger.log(`[DRY_RUN] DRY_RUN is active. Would append ${rows2D.length} rows to "${sheet.getName()}" (starting row ${startRow}):`);
+    rows2D.forEach((r, idx) => {
+      Logger.log(`  [DRY_RUN Row ${idx + 1}] Date: ${r[0]} | Account: ${r[1]} | Type: ${r[2]} | Amount: ${r[3]} | SGD: ${r[4]} | Category: ${r[7]} | Where: ${r[8]} | Notes: ${r[9]} | Bucket: ${r[10]}`);
+    });
+    return {
+      writtenCount: toAppend.length,
+      skippedCount: skippedCount,
+      writtenRows: toAppend,
+      rows2D: rows2D,
+      rowOutcomes: rowOutcomes.map(r => ({ ...r, status: r.status === 'pending' ? 'would_import' : r.status })),
+      dryRun: true
+    };
   }
 
   // 4. Batch Write Input Columns A-K in a single operation (§6.6)
@@ -150,7 +264,9 @@ function appendTransactions(transactionsArray, ss) {
   return {
     writtenCount: toAppend.length,
     skippedCount: skippedCount,
-    writtenRows: toAppend
+    writtenRows: toAppend,
+    rowOutcomes: rowOutcomes.map(r => ({ ...r, status: r.status === 'pending' ? 'imported' : r.status })),
+    dryRun: false
   };
 }
 

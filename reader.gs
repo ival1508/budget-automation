@@ -40,6 +40,21 @@ function parseAmountNumber(rawVal, displayVal) {
   return isNaN(parsed) ? 0 : parsed;
 }
 
+/** Monthly results must not turn a blank or formula error into a zero. */
+function readMonthlyAmount(raw, display) {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  const text = String(display || raw || '').trim();
+  const numeric = text.replace(/S\$|SGD|\$|₽|\s/gi, '');
+  if (!/^-?\d[\d.,]*$/.test(numeric)) throw new Error('Unreadable monthly amount: ' + text);
+  return parseAmountNumber(raw, display);
+}
+
+function readCoachTransactionAmount(row, display, strict) {
+  if (!strict) return parseAmountNumber(row[4], display[4]) || parseAmountNumber(row[3], display[3]) || 0;
+  return row[4] !== '' && row[4] !== null && row[4] !== undefined
+    ? readMonthlyAmount(row[4], display[4]) : readMonthlyAmount(row[3], display[3]);
+}
+
 /**
  * Generates the exact Russian tab name for the current month in Asia/Singapore timezone,
  * using SHEET_FACTS to handle irregular Cyrillic single-letter tabs (Jan-Apr) vs. full names (May+).
@@ -63,7 +78,7 @@ function getCurrentMonthTabName(optDate) {
     9: "Сентябрь'26", 10: "Октябрь'26", 11: "Ноябрь'26", 12: "Декабрь'26"
   };
   
-  return fallbackNames[monthNum] || '';
+  return (fallbackNames[monthNum] || '').replace(/'\d{2}$/, "'" + Utilities.formatDate(date, 'Asia/Singapore', 'yy'));
 }
 
 /**
@@ -113,9 +128,9 @@ function getActiveMonthTab(ss, optDate) {
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
  * @return {Array<Object>} Array of objects: [{ name: "Аренда", planned_amount: 17092.33, is_checked: false }]
  */
-function getMandatoryExpenses(ss) {
+function getMandatoryExpenses(ss, optDate, optStrict) {
   try {
-    const activeInfo = getActiveMonthTab(ss);
+    const activeInfo = getActiveMonthTab(ss, optDate);
     if (!activeInfo || !activeInfo.exists) {
       Logger.log(`⚠️ Warning: ${activeInfo ? activeInfo.message : 'Sheet not found'}`);
       return [];
@@ -133,10 +148,14 @@ function getMandatoryExpenses(ss) {
 
     for (let i = 0; i < rangeValues.length; i++) {
       const label = String(rangeValues[i][0] || '').trim();
-      const amount = parseAmountNumber(rangeValues[i][1], rangeDisp[i][1]);
+      const validLabel = label && !['0', '0.00', '0,00', '-', '—', '--'].includes(label);
+      const amount = optStrict && validLabel ? readMonthlyAmount(rangeValues[i][1], rangeDisp[i][1])
+        : parseAmountNumber(rangeValues[i][1], rangeDisp[i][1]);
       // Col G is index 3 in D:G range (Col D=0, Col E=1, Col F=2, Col G=3)
       const rawCheck = rangeValues[i].length > 3 ? rangeValues[i][3] : rangeValues[i][2];
-      const paidFlag = (rawCheck === true || String(rawCheck).toUpperCase() === 'TRUE');
+      if (optStrict && validLabel && /^#/.test(String(rawCheck))) throw new Error('Unreadable mandatory completion flag.');
+      const nonLedger = (SHEET_FACTS.NON_LEDGER_MANDATORY || []).includes(label);
+      const paidFlag = amount === 0 || nonLedger || rawCheck === true || String(rawCheck).toUpperCase() === 'TRUE';
 
       // Filter out empty cells, blanks, zeros, and dashes in description
       if (label && label !== '0' && label !== '0.00' && label !== '0,00' && label !== '-' && label !== '—' && label !== '--') {
@@ -154,13 +173,14 @@ function getMandatoryExpenses(ss) {
 
     return cleaned;
   } catch (e) {
+    if (optStrict) throw e;
     Logger.log(`Error in getMandatoryExpenses: ${e.message}`);
     return [];
   }
 }
 
-function getExpectedMandatoryExpenses(ss) {
-  return getMandatoryExpenses(ss);
+function getExpectedMandatoryExpenses(ss, optDate) {
+  return getMandatoryExpenses(ss, optDate);
 }
 
 /**
@@ -170,7 +190,7 @@ function getExpectedMandatoryExpenses(ss) {
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
  * @return {Array<Object>} Array of logged objects: [{ description: "Mortgage July", actual_amount: 17092.33 }]
  */
-function getLoggedMandatoryThisMonth(ss) {
+function getLoggedMandatoryThisMonth(ss, optDate, optStrict) {
   try {
     const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
     if (!spreadsheet) return [];
@@ -187,7 +207,7 @@ function getLoggedMandatoryThisMonth(ss) {
     if (lastRow < startRow) return [];
 
     // Determine current month & year in SGT
-    const now = new Date();
+    const now = optDate || new Date();
     const currentMonthYearStr = Utilities.formatDate(now, 'Asia/Singapore', 'MM.yyyy');
 
     const numCols = sheet.getLastColumn();
@@ -225,7 +245,7 @@ function getLoggedMandatoryThisMonth(ss) {
       if (dateMatch) {
         const category = String(row[7] || '').trim(); // Col H
         const where = String(row[8] || '').trim();    // Col I
-        const amount = parseAmountNumber(row[4], disp[4]) || parseAmountNumber(row[3], disp[3]) || 0;
+        const amount = readCoachTransactionAmount(row, disp, optStrict);
 
         // Exact enum string with hyphen spacing
         const label = where ? `${category} - ${where}` : category;
@@ -249,13 +269,14 @@ function getLoggedMandatoryThisMonth(ss) {
 
     return Object.values(groups);
   } catch (e) {
+    if (optStrict) throw e;
     Logger.log(`Error in getLoggedMandatoryThisMonth: ${e.message}`);
     return [];
   }
 }
 
-function getLoggedMandatoryExpenses(ss) {
-  return getLoggedMandatoryThisMonth(ss);
+function getLoggedMandatoryExpenses(ss, optDate) {
+  return getLoggedMandatoryThisMonth(ss, optDate);
 }
 
 /**
@@ -269,10 +290,10 @@ function getLoggedMandatoryExpenses(ss) {
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
  * @return {{ daily_spend: number, cumulative_position: number, daily_saldo: number }}
  */
-function getDailyBudgetStatus(ss) {
+function getDailyBudgetStatus(ss, optDate) {
   try {
-    const pacing = typeof getDailyPacing === 'function' ? getDailyPacing(null, ss) : { K_cumulative_today: 0, L_saldo_yesterday: 0 };
-    const todaySpend = typeof getTodaySpend === 'function' ? getTodaySpend(null, ss) : 0;
+    const pacing = typeof getDailyPacing === 'function' ? getDailyPacing(optDate, ss) : { K_cumulative_today: 0, L_saldo_yesterday: 0 };
+    const todaySpend = typeof getTodaySpend === 'function' ? getTodaySpend(optDate, ss) : 0;
 
     return {
       daily_spend: Number(Number(todaySpend || 0).toFixed(2)),
@@ -354,7 +375,7 @@ function getDailyPacing(optDate, ss) {
     const activeInfo = getActiveMonthTab(spreadsheet, targetDate);
     if (!activeInfo || !activeInfo.exists) {
       Logger.log(`⚠️ Warning: ${activeInfo ? activeInfo.message : 'Active month tab not found'}`);
-      return defaultResult;
+      return { ...defaultResult, error: 'missing_month', month_tab: activeInfo && activeInfo.tabName, message: activeInfo && activeInfo.message };
     }
     const sheet = activeInfo.sheet;
 
@@ -441,7 +462,7 @@ function getDailyPacing(optDate, ss) {
     };
   } catch (e) {
     Logger.log(`Error in getDailyPacing: ${e.message}`);
-    return defaultResult;
+    return { ...defaultResult, error: 'read_error', message: e.message };
   }
 }
 
@@ -481,7 +502,7 @@ const DEBUG_503020 = false;
  * @param {boolean} [optDebug] - Optional debug flag override.
  * @return {{ needs: { actual: number, target: number }, wants: { actual: number, target: number }, savings: { actual: number, target: number }, target_header: string }}
  */
-function get503020Status(ss, optDebug) {
+function get503020Status(ss, optDebug, optDate, optStrict) {
   const isDebug = (typeof optDebug === 'boolean') ? optDebug : (typeof DEBUG_503020 !== 'undefined' ? Boolean(DEBUG_503020) : false);
 
   const defaultPacing = {
@@ -493,17 +514,17 @@ function get503020Status(ss, optDebug) {
 
   try {
     const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
-    if (!spreadsheet) return defaultPacing;
+    if (!spreadsheet) return { ...defaultPacing, error: 'no_spreadsheet' };
 
     const sheet = spreadsheet.getSheetByName('50/30/20');
     if (!sheet) {
       Logger.log('⚠️ Warning: Sheet "50/30/20" not found.');
-      return defaultPacing;
+      return { ...defaultPacing, error: 'missing_503020' };
     }
 
     const lastCol = sheet.getLastColumn();
     const lastRow = sheet.getLastRow();
-    if (lastCol === 0 || lastRow < 3) return defaultPacing;
+    if (lastCol === 0 || lastRow < 3) return { ...defaultPacing, error: 'empty_503020' };
 
     // Helper to safely extract string without ever returning literal "undefined" or "null"
     function safeCellStr(val) {
@@ -562,9 +583,8 @@ function get503020Status(ss, optDebug) {
     defaultPacing.target_header = targetHeader;
 
     // 2. Generate current month string in "MM/yyyy" format (e.g. "08/2026") and find target month column index
-    const now = new Date();
+    const now = optDate || new Date();
     const targetMonthYearStr = Utilities.formatDate(now, 'Asia/Singapore', 'MM/yyyy');
-    const altMonthYearStr = Utilities.formatDate(now, 'Asia/Singapore', 'M/yyyy');
 
     // Read Row 1 to find the column index matching "MM/yyyy"
     const headerRaw = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
@@ -583,8 +603,10 @@ function get503020Status(ss, optDebug) {
         formattedHeader = dispVal;
       }
 
-      if (formattedHeader.indexOf(targetMonthYearStr) !== -1 || dispVal.indexOf(targetMonthYearStr) !== -1 ||
-          formattedHeader.indexOf(altMonthYearStr) !== -1 || dispVal.indexOf(altMonthYearStr) !== -1) {
+      const monthHeader = formattedHeader.match(/(?:^|\D)(\d{1,2})\/(\d{4})(?!\d)/);
+      if (c !== targetSpendColIndex && c !== targetSpendColIndex + 1 && monthHeader &&
+          Number(monthHeader[1]) === Number(Utilities.formatDate(now, 'Asia/Singapore', 'M')) &&
+          monthHeader[2] === Utilities.formatDate(now, 'Asia/Singapore', 'yyyy')) {
         targetColIndex = c;
         break;
       }
@@ -592,7 +614,7 @@ function get503020Status(ss, optDebug) {
 
     if (targetColIndex === -1) {
       Logger.log(`⚠️ [LOUD WARNING] Current month header "${targetMonthYearStr}" not found in Row 1 of "50/30/20" tab. Returning zero pacing.`);
-      return defaultPacing;
+      return { ...defaultPacing, error: 'missing_report_month', report_month: targetMonthYearStr };
     }
 
     // 3. Read data starting from Row 3 to lastRow
@@ -695,6 +717,13 @@ function get503020Status(ss, optDebug) {
 
       if (isTotalRow) {
         if (!result[currentBucket].found_summary) {
+          if (optStrict) {
+            readMonthlyAmount(rowRawData[r][targetColIndex], rowDisplayData[r][targetColIndex]);
+            readMonthlyAmount(rowRawData[r][targetSpendColIndex], rowDisplayData[r][targetSpendColIndex]);
+            [targetColIndex + 1, targetPercentCol].forEach(col => {
+              readMonthlyAmount(rowRawData[r][col], String(rowDisplayData[r][col] || '').replace(/%/g, ''));
+            });
+          }
           if (isDebug) {
             Logger.log(`📌 Matched summary for [${currentBucket}] at Row ${r + 3}: Actual=${colAmount}, Target=${targetSpend}`);
           }
@@ -706,6 +735,13 @@ function get503020Status(ss, optDebug) {
           result[currentBucket].found_summary = true;
         }
       } else if (!isExcludedSummaryRow && colB) {
+        if (optStrict) {
+          [targetColIndex, targetSpendColIndex].forEach(col => {
+            if (rowRawData[r][col] !== '' && rowRawData[r][col] !== null && rowRawData[r][col] !== undefined) {
+              readMonthlyAmount(rowRawData[r][col], rowDisplayData[r][col]);
+            }
+          });
+        }
         result[currentBucket].sub_categories.push({
           name: colB || colA,
           actual: colAmount,
@@ -718,6 +754,7 @@ function get503020Status(ss, optDebug) {
     // Fallback: sum sub-categories if no summary row was encountered for a bucket
     ['needs', 'wants', 'savings'].forEach(k => {
       const bucket = result[k];
+      if (optStrict && !bucket.found_summary) throw new Error('Missing monthly summary for ' + k);
       if (!bucket.found_summary && bucket.sub_categories.length > 0) {
         if (isDebug) {
           Logger.log(`⚠️ No summary row found for [${k}]; falling back to sum of ${bucket.sub_categories.length} subcategories.`);
@@ -730,14 +767,14 @@ function get503020Status(ss, optDebug) {
     });
 
     return {
-      needs: { actual: result.needs.actual, target: result.needs.target, total_actual: result.needs.total_actual, total_percent: result.needs.total_percent, sub_categories: result.needs.sub_categories },
-      wants: { actual: result.wants.actual, target: result.wants.target, total_actual: result.wants.total_actual, total_percent: result.wants.total_percent, sub_categories: result.wants.sub_categories },
-      savings: { actual: result.savings.actual, target: result.savings.target, total_actual: result.savings.total_actual, total_percent: result.savings.total_percent, sub_categories: result.savings.sub_categories },
+      needs: { actual: result.needs.actual, target: result.needs.target, total_actual: result.needs.total_actual, total_percent: result.needs.total_percent, target_percent: result.needs.target_percent, sub_categories: result.needs.sub_categories },
+      wants: { actual: result.wants.actual, target: result.wants.target, total_actual: result.wants.total_actual, total_percent: result.wants.total_percent, target_percent: result.wants.target_percent, sub_categories: result.wants.sub_categories },
+      savings: { actual: result.savings.actual, target: result.savings.target, total_actual: result.savings.total_actual, total_percent: result.savings.total_percent, target_percent: result.savings.target_percent, sub_categories: result.savings.sub_categories },
       target_header: result.target_header
     };
   } catch (e) {
     Logger.log(`Error in get503020Status: ${e.message}`);
-    return defaultPacing;
+    return { ...defaultPacing, error: '503020_read_error', message: e.message };
   }
 }
 
@@ -921,14 +958,14 @@ function getTodaySpend(optDate, optSs) {
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
  * @return {Object} Object: { days_analyzed, days_exceeded_budget, trends }
  */
-function getRecentDailyTrends(ss) {
+function getRecentDailyTrends(ss, optDate) {
   const defaultResult = { days_analyzed: 0, days_exceeded_budget: 0, trends: [] };
 
   try {
     const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
     if (!spreadsheet) return defaultResult;
 
-    const tabName = getCurrentMonthTabName();
+    const tabName = getCurrentMonthTabName(optDate);
     const sheet = spreadsheet.getSheetByName(tabName);
     if (!sheet) {
       Logger.log(`⚠️ Warning: Sheet "${tabName}" not found for recent daily trends.`);
@@ -938,7 +975,7 @@ function getRecentDailyTrends(ss) {
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) return defaultResult;
 
-    const now = new Date();
+    const now = optDate || new Date();
     const targetYear = parseInt(Utilities.formatDate(now, 'Asia/Singapore', 'yyyy'), 10);
     const targetMonth = parseInt(Utilities.formatDate(now, 'Asia/Singapore', 'M'), 10) - 1;
     const targetDay = parseInt(Utilities.formatDate(now, 'Asia/Singapore', 'd'), 10);
@@ -1025,19 +1062,19 @@ function getRecentDailyTrends(ss) {
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
  * @return {Object} Master context JSON object.
  */
-function getBudgetCoachContext(ss) {
+function getBudgetCoachContext(ss, optDate) {
   const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
-  const now = new Date();
+  const now = optDate || new Date();
 
   const currentDateStr = Utilities.formatDate(now, 'Asia/Singapore', 'dd.MM.yyyy');
   const monthTab = getCurrentMonthTabName(now);
 
-  const dailyStatus = getDailyBudgetStatus(spreadsheet);
-  const expectedMandatory = getExpectedMandatoryExpenses(spreadsheet);
-  const loggedMandatory = getLoggedMandatoryExpenses(spreadsheet);
-  const pacing503020 = get503020Status(spreadsheet);
-  const todaysTxns = getTodaysTransactions(spreadsheet);
-  const recentTrends = getRecentDailyTrends(spreadsheet);
+  const dailyStatus = getDailyBudgetStatus(spreadsheet, now);
+  const expectedMandatory = getExpectedMandatoryExpenses(spreadsheet, now);
+  const loggedMandatory = getLoggedMandatoryExpenses(spreadsheet, now);
+  const pacing503020 = get503020Status(spreadsheet, false, now);
+  const todaysTxns = getTodaysTransactions(spreadsheet, now);
+  const recentTrends = getRecentDailyTrends(spreadsheet, now);
 
   const context = {
     current_date: currentDateStr,
@@ -1095,7 +1132,7 @@ function testReaderAPIs() {
  * STAGE 1: getCategoryVelocity() → current-month sums for volatile discretionary categories:
  * Рестораны, Развлечения, Дом, Подарки (specifically excludes Шопинг).
  */
-function getCategoryVelocity(ss) {
+function getCategoryVelocity(ss, optDate, optStrict) {
   const targetCategories = ['Рестораны', 'Развлечения', 'Дом', 'Подарки'];
   const velocity = {
     'Рестораны': { total: 0 },
@@ -1116,7 +1153,7 @@ function getCategoryVelocity(ss) {
     const startRow = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.TRANSACTIONS_TAB_STRUCTURE) ? SHEET_FACTS.TRANSACTIONS_TAB_STRUCTURE.DATA_START_ROW : 2;
     if (lastRow < startRow) return velocity;
 
-    const now = new Date();
+    const now = optDate || new Date();
     const currentMonthYearStr = Utilities.formatDate(now, 'Asia/Singapore', 'MM.yyyy');
 
     const numCols = sheet.getLastColumn();
@@ -1153,7 +1190,7 @@ function getCategoryVelocity(ss) {
           continue;
         }
 
-        const amount = parseAmountNumber(row[4], disp[4]) || parseAmountNumber(row[3], disp[3]) || 0;
+        const amount = readCoachTransactionAmount(row, disp, optStrict);
 
         if (!velocity[category]['Расходы']) {
           velocity[category]['Расходы'] = 0;
@@ -1165,6 +1202,7 @@ function getCategoryVelocity(ss) {
 
     return velocity;
   } catch (e) {
+    if (optStrict) throw e;
     Logger.log(`Error in getCategoryVelocity: ${e.message}`);
     return velocity;
   }
@@ -1215,7 +1253,7 @@ function getCategoryBucketMap(ss) {
     }
 
     // Read Col A to Col C (Category is Col B / index 1, Bucket is Col C / index 2)
-    const numColsToFetch = Math.max(lastCol, 3);
+    const numColsToFetch = 3;
     const data = sheet.getRange(1, 1, lastRow, numColsToFetch).getDisplayValues();
     const map = {};
 
@@ -1840,6 +1878,3 @@ function test_dailyBudgetConsistency() {
     passed: passed
   };
 }
-
-
-
