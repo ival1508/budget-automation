@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '..');
 const sourceFiles = ['constants.gs', 'config.gs', 'bootstrap.gs', 'reader.gs', 'enricher.gs',
-  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'testStage3G.gs', 'coach.gs', 'webhook.gs', 'callbacks.gs'];
+  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'testStage3G.gs', 'coach.gs', 'nudge.gs', 'webhook.gs', 'callbacks.gs'];
 function parseCsv(text) {
   const rows = []; let row = [], value = '', quoted = false;
   for (let i = 0; i < text.length; i++) {
@@ -30,7 +30,8 @@ function context() {
     Logger: { log: value => logs.push(String(value)) },
     SpreadsheetApp: { flush: () => {} },
     PropertiesService: { getScriptProperties: () => ({
-      getProperty: key => props[key] || null, setProperty: (key, value) => { props[key] = value; }
+      getProperty: key => props[key] || null, setProperty: (key, value) => { props[key] = value; },
+      deleteProperty: key => { delete props[key]; }
     }) },
     Utilities: {
       parseCsv, base64Encode: bytes => Buffer.from(bytes).toString('base64'), getUuid: () => crypto.randomUUID(),
@@ -38,8 +39,13 @@ function context() {
       DigestAlgorithm: { SHA_256: 'SHA_256' }, Charset: { UTF_8: 'UTF_8' },
       formatDate: (date, tz, fmt) => {
         const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: tz,
-          year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date).map(p => [p.type, p.value]));
-        return ({ yyyy: parts.year, M: String(+parts.month), d: String(+parts.day),
+          year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+          hourCycle: 'h23', weekday: 'short' }).formatToParts(date).map(p => [p.type, p.value]));
+        return ({ yyyy: parts.year, yy: parts.year.slice(-2), M: String(+parts.month), d: String(+parts.day),
+          H: String(+parts.hour), m: String(+parts.minute), E: parts.weekday,
+          'MM.yyyy': `${parts.month}.${parts.year}`, 'MM/yyyy': `${parts.month}/${parts.year}`,
+          'M/yyyy': `${+parts.month}/${parts.year}`, 'yyyy-MM': `${parts.year}-${parts.month}`,
+          'yyyy-MM-dd': `${parts.year}-${parts.month}-${parts.day}`, 'HH:mm': `${parts.hour}:${parts.minute}`,
           'dd.MM.yyyy': `${parts.day}.${parts.month}.${parts.year}` })[fmt] || '';
       }
     }
@@ -57,10 +63,70 @@ function test(name, run) {
 for (const file of fs.readdirSync(root).filter(f => f.endsWith('.gs'))) {
   new vm.Script(fs.readFileSync(path.join(root, file), 'utf8'), { filename: file });
 }
-for (const name of ['test_normalizeRows', 'test_findMissing', 'test_filterNonSpend',
+test('missing sandbox ID stops resolution, native commit tests and commits before sheet access', c => {
+  let sheetAccess = 0;
+  c.SpreadsheetApp = {
+    openById: () => { sheetAccess++; throw new Error('Unexpected open'); },
+    getActiveSpreadsheet: () => { sheetAccess++; throw new Error('Unexpected live access'); }
+  };
+  for (const id of [undefined, null, '', '   ']) {
+    c.sandboxIdForTest = id;
+    vm.runInContext('SHEET_FACTS.TEST_SPREADSHEET_ID = sandboxIdForTest', c);
+    assert.throws(() => c.getTargetSpreadsheet(true), /TEST_SPREADSHEET_ID is required/);
+    assert.throws(() => c.test_commitStaged(), /TEST_SPREADSHEET_ID is required/);
+    assert.throws(() => c.commitStaged(true, false), /TEST_SPREADSHEET_ID is required/);
+    assert.throws(() => c.commitStaged(true, false, {}), /TEST_SPREADSHEET_ID is required/);
+  }
+  assert.equal(sheetAccess, 0);
+});
+test('sandbox access failure cannot fall back to the active workbook or mutate it', c => {
+  let liveAccess = 0, opened = 0;
+  c.SpreadsheetApp = {
+    openById: () => { opened++; throw new Error('Sandbox access denied'); },
+    getActiveSpreadsheet: () => { liveAccess++; throw new Error('Unexpected live access'); }
+  };
+  assert.throws(() => c.getTargetSpreadsheet(true), /Cannot open TEST_SPREADSHEET_ID.*Sandbox access denied/);
+  assert.throws(() => c.test_commitStaged(), /Cannot open TEST_SPREADSHEET_ID/);
+  assert.throws(() => c.commitStaged(true, false), /Cannot open TEST_SPREADSHEET_ID/);
+  assert.equal(opened, 3); assert.equal(liveAccess, 0);
+});
+test('wrong or unverifiable sandbox identity is rejected before cleanup, locks or writes', c => {
+  let mutations = 0;
+  const wrong = { getId: () => 'live-workbook', getSheetByName: () => { mutations++; throw new Error('Unexpected sheet access'); } };
+  c.SpreadsheetApp = { openById: () => wrong, getActiveSpreadsheet: () => { mutations++; return wrong; } };
+  c.LockService = { getScriptLock: () => { mutations++; throw new Error('Unexpected lock'); } };
+  assert.throws(() => c.test_commitStaged(), /Sandbox spreadsheet identity does not match/);
+  assert.throws(() => c.commitStaged(true, false), /Sandbox spreadsheet identity does not match/);
+  for (const returned of [null, {}, wrong]) {
+    c.SpreadsheetApp.openById = () => returned;
+    assert.throws(() => c.getTargetSpreadsheet(true), /Sandbox spreadsheet identity does not match/);
+  }
+  for (const dry of [true, false]) {
+    assert.throws(() => c.commitStaged(true, dry, wrong), /Sandbox spreadsheet identity does not match/);
+    assert.throws(() => c.commitStaged(true, dry, {}), /Sandbox spreadsheet identity does not match/);
+  }
+  assert.equal(mutations, 0);
+});
+test('verified sandbox can be reused without reopening and ordinary targets still resolve normally', c => {
+  const sandboxId = vm.runInContext('SHEET_FACTS.TEST_SPREADSHEET_ID', c);
+  const sandbox = { getId: () => sandboxId }, active = { getId: () => 'active-workbook' };
+  let opened = 0, activeReads = 0;
+  c.SpreadsheetApp = {
+    openById: id => { opened++; assert.equal(id, sandboxId); return sandbox; },
+    getActiveSpreadsheet: () => { activeReads++; return active; }
+  };
+  vm.runInContext('SHEET_FACTS.TEST_SPREADSHEET_ID = "  " + SHEET_FACTS.TEST_SPREADSHEET_ID + "  "', c);
+  assert.equal(c.getTargetSpreadsheet(true), sandbox);
+  assert.equal(c.getTargetSpreadsheet(true, sandbox), sandbox);
+  assert.equal(opened, 1); assert.equal(activeReads, 0);
+  assert.equal(c.getTargetSpreadsheet(false), active);
+  assert.equal(c.getTargetSpreadsheet(false, sandbox), sandbox);
+  assert.equal(activeReads, 1);
+});
+for (const name of ['test_normalizeRows', 'test_findMissing', 'test_filterNonSpend', 'test_feeReversalPairing',
   'test_cleanMerchantDisplayName', 'test_computeMerchantSimilarity',
   'test_dbsMultiSectionAndCardholderMatching', 'test_locationSuffixStrippingAndMultiFactorMatching',
-  'test_ambiguousInferencePipeline', 'test_grabAmbiguityAndConflictCheck', 'test_geminiTier3', 'test_reportedMerchantDuplicates', 'test_netsFlashpayDuplicate', 'test_claimedLedgerDuplicateReview', 'test_statementCardIdentityGuard', 'test_stage3GInboxRetries', 'test_stage3GInboxFailures', 'test_stage3GRecoveryMarker', 'test_stage3GMenuAndScheduler', 'test_stage3GModelCardSections', 'test_stage3GChangedFile', 'test_reconcileDateValues']) {
+  'test_ambiguousInferencePipeline', 'test_grabAmbiguityAndConflictCheck', 'test_geminiTier3', 'test_reportedMerchantDuplicates', 'test_netsFlashpayDuplicate', 'test_claimedLedgerDuplicateReview', 'test_statementCardIdentityGuard', 'test_stage3GInboxRetries', 'test_stage3GInboxFailures', 'test_stage3GRecoveryMarker', 'test_stage3GMenuAndScheduler', 'test_stage3GModelCardSections', 'test_stage3GChangedFile', 'test_reconcileDateValues', 'test_transactionDerivedFormulaBuilders']) {
   test(name, c => {
     c[name]();
     assert.equal(c.logs.filter(l => l.includes('❌ FAIL')).length, 0);
@@ -150,9 +216,15 @@ class Sheet {
     const sheet = this;
     const range = {
       getValues: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => sheet.data[row - 1 + r]?.[col - 1 + c] ?? '')),
+      getDisplayValues: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => String(sheet.data[row - 1 + r]?.[col - 1 + c] ?? ''))),
       setValues: values => { values.forEach((r, ri) => r.forEach((v, ci) => {
         sheet.data[row - 1 + ri] ||= []; sheet.data[row - 1 + ri][col - 1 + ci] = v;
       })); return range; },
+      setFormulas: values => range.setValues(values),
+      getFormulas: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => {
+        const value = sheet.data[row - 1 + r]?.[col - 1 + c];
+        return typeof value === 'string' && value.startsWith('=') ? value : '';
+      })),
       setValue: value => range.setValues([[value]]),
       getFormula: () => '=F2-D2',
       copyTo: target => sheet.copies.push(target),
@@ -164,10 +236,12 @@ class Sheet {
   }
 }
 const headers = ['✓', 'date', 'account', 'Cardholder', 'Тип', 'amount', 'merchant', 'proposed category', 'proposed bucket', 'confidence', 'source_row', 'status'];
+const transactionHeaders = ['Дата', 'Счёт', 'Тип', 'Сумма', 'Сумма в SGD', 'На счете до', 'На счете после', 'Категория', 'Где', 'Notes', '50/30/20 Category'];
 function storage(c) {
-  const ledger = new Sheet('Transactions', [['header'], ['15.08.2026', 'DBS CC SGD', 'Расходы', 20, 20, 100, 80, 'Другое', 'Old Merchant', '', 'Wants']]);
+  const ledger = new Sheet('Transactions', [transactionHeaders, ['15.08.2026', 'DBS CC SGD', 'Расходы', 20, 20, 100, 80, 'Другое', 'Old Merchant', '', 'Wants']]);
   const staging = new Sheet('_Reconcile', [headers]);
-  const sheets = { Transactions: ledger, _Reconcile: staging };
+  const reference = new Sheet('-', [['', 'Категория', '50/30/20'], ['', 'Другое', 'Wants'], ['', 'Транспорт', 'Needs']]);
+  const sheets = { Transactions: ledger, _Reconcile: staging, '-': reference };
   const ss = { archives: [], getSheetByName: name => sheets[name] || null,
     insertSheet: name => (sheets[name] = new Sheet(name)) };
   const lock = { held: false, acquired: 0, released: 0, hasLock() { return this.held; },
@@ -180,6 +254,37 @@ function storage(c) {
   return { ledger, staging, ss, lock };
 }
 function staged(merchant, amount = 20) { return [true, '15.08.2026', 'DBS CC SGD', 'Val', 'Расходы', amount, merchant, 'Другое', 'Wants', 1, 'Statement row', 'proposed']; }
+test('sandbox dry-run and real commit reuse the verified instance and remain idempotent', c => {
+  const { ledger, staging, ss } = storage(c);
+  const sandboxId = vm.runInContext('SHEET_FACTS.TEST_SPREADSHEET_ID', c);
+  ss.getId = () => sandboxId;
+  let opened = 0;
+  c.SpreadsheetApp.openById = id => { opened++; assert.equal(id, sandboxId); return ss; };
+  c.SpreadsheetApp.getActiveSpreadsheet = () => { throw new Error('Unexpected live access'); };
+  const sandbox = c.getTargetSpreadsheet(true);
+  c.SpreadsheetApp.openById = () => { throw new Error('Verified sandbox must not be reopened'); };
+  staging.data.push(staged('Sandbox purchase', 30));
+  const dry = c.commitStaged(true, true, sandbox);
+  assert.equal(dry.committedCount, 1); assert.equal(ledger.data.length, 2);
+  const real = c.commitStaged(true, false, sandbox);
+  assert.equal(real.committedCount, 1); assert.equal(ledger.data.length, 3);
+  assert.equal(c.commitStaged(true, false, sandbox).committedCount, 0);
+  assert.equal(ledger.data.length, 3); assert.equal(opened, 1);
+});
+test('native commit test passes its already-verified sandbox to the commit path', c => {
+  const { ss } = storage(c);
+  ss.getId = () => vm.runInContext('SHEET_FACTS.TEST_SPREADSHEET_ID', c);
+  let opened = 0, commitCalls = 0;
+  c.SpreadsheetApp.openById = () => { opened++; return ss; };
+  c.SpreadsheetApp.getActiveSpreadsheet = () => { throw new Error('Unexpected live access'); };
+  const stop = new Error('Stop before actual commit');
+  c.commitStaged = (useTest, dry, selected) => {
+    commitCalls++; assert.equal(useTest, true); assert.equal(dry, true); assert.equal(selected, ss);
+    throw stop;
+  };
+  assert.throws(() => c.test_commitStaged(), error => error === stop);
+  assert.equal(opened, 1); assert.equal(commitCalls, 1);
+});
 test('commit dry-run, mixed duplicates, real write, and repeat preserve correct statuses', c => {
   const { ledger, staging, ss, lock } = storage(c);
   staging.data.push(staged('Old Merchant'), staged('New Merchant', 30));
@@ -189,7 +294,9 @@ test('commit dry-run, mixed duplicates, real write, and repeat preserve correct 
   const real = c.commitStaged(false, false, ss);
   assert.equal(real.committedCount, 1); assert.equal(real.skippedCount, 1);
   assert.equal(staging.data[1][11], 'duplicate_review'); assert.equal(staging.data[2][11], 'imported');
-  assert.equal(ledger.data[2].length, 11); assert.equal(ledger.data[2][9], ''); assert.equal(ledger.data[2][10], 'Wants');
+  assert.equal(ledger.data[2].length, 11); assert.equal(ledger.data[2][9], '');
+  assert.equal(ledger.data[2][4], c.transactionAmountSgdFormula(3));
+  assert.equal(ledger.data[2][10], c.transactionBucketFormula(3));
   assert.equal(ledger.copies.length, 1);
   const again = c.commitStaged(false, false, ss);
   assert.equal(again.committedCount, 0); assert.equal(ledger.data.length, 3);
@@ -200,6 +307,24 @@ test('ordinary explicit writes work while reconciliation defaults to dry-run', c
   const txn = { date: '16.08.2026', account: 'DBS CC SGD', amount: 30, where: 'New Merchant', category: 'Другое' };
   assert.equal(c.appendTransactions([txn], ss).dryRun, true); assert.equal(ledger.data.length, 2);
   assert.equal(c.appendTransactions([txn], ss, false).writtenCount, 1); assert.equal(ledger.data.length, 3);
+  assert.equal(lock.acquired, lock.released);
+});
+test('existing Transactions rows can be migrated to row-local E and K formulas', c => {
+  const { ledger, ss, lock } = storage(c);
+  const originalD = ledger.data[1][3]; const originalH = ledger.data[1][7];
+  const result = c.repairTransactionDerivedFormulas(ss);
+  assert.equal(result.updatedRows, 1);
+  assert.equal(ledger.data[1][3], originalD); assert.equal(ledger.data[1][7], originalH);
+  assert.equal(ledger.data[1][4], c.transactionAmountSgdFormula(2));
+  assert.equal(ledger.data[1][10], c.transactionBucketFormula(2));
+  assert.equal(lock.acquired, lock.released);
+});
+test('Transactions formula repair validates layout before changing either column', c => {
+  const { ledger, ss, lock } = storage(c);
+  ledger.data[0][4] = 'Unexpected';
+  const before = structuredClone(ledger.data);
+  assert.throws(() => c.repairTransactionDerivedFormulas(ss), /layout is unexpected/);
+  assert.deepEqual(ledger.data, before);
   assert.equal(lock.acquired, lock.released);
 });
 test('staging rerun archives review edits and releases lock; no merchant learning writes', c => {
@@ -333,7 +458,7 @@ test('Grandparents tag reaches final Notes column on real-mode mock commit', c =
   const result = c.commitStaged(false, false, ss);
   assert.equal(result.committedCount, 3);
   assert.deepEqual(ledger.data.slice(2).map(row => row[9]), ['Grandparents', 'Grandparents', '']);
-  assert.equal(ledger.data[2][10], 'Wants');
+  assert.equal(ledger.data[2][10], c.transactionBucketFormula(3));
 });
 test('commit honors edited expense/income types over the previous amount sign', c => {
   const { staging, ledger, ss } = storage(c);
@@ -346,10 +471,67 @@ test('commit honors edited expense/income types over the previous amount sign', 
   assert.equal(ledger.data[3][3], -32); // Mock G formula is F-D; incoming money must add to it.
 });
 test('preview always invokes the actual commit in dry-run mode', c => {
-  let args;
+  let args, html, shown = 0;
+  const ss = {};
+  c.SpreadsheetApp.getActiveSpreadsheet = () => ss;
+  c.HtmlService = { createHtmlOutput: value => {
+    html = value;
+    return { setWidth() { return this; }, setHeight() { return this; } };
+  } };
+  c.SpreadsheetApp.getUi = () => ({ showModalDialog: () => { shown++; } });
   c.commitStaged = (...values) => { args = values; return { dryRun: true }; };
   assert.equal(c.previewReconcileCommit().dryRun, true);
-  assert.deepEqual(args, [false, true]);
+  assert.deepEqual(args, [false, true, ss]);
+  assert.equal(shown, 1);
+  assert.match(html, /No eligible rows would be appended/);
+});
+test('Sheets preview shows actual writer rows and duplicate identities without changing review or ledger', c => {
+  const { staging, ledger, ss, lock } = storage(c);
+  let html, dialogs = 0;
+  c.HtmlService = { createHtmlOutput: value => {
+    html = value;
+    return { setWidth() { return this; }, setHeight() { return this; } };
+  } };
+  c.SpreadsheetApp.getUi = () => ({ showModalDialog: () => { assert.equal(lock.held, false); dialogs++; } });
+  const credit = staged('Approved Refund', -31); credit[4] = 'Получение денег';
+  const gp = staged('Grandparents Purchase', 32); gp[3] = 'Grandparents';
+  const unticked = staged('Leave Pending', 33); unticked[0] = false;
+  staging.data.push(staged('Old Merchant'), credit, gp, staged('Grandparents Purchase', 32), unticked);
+  const originalReview = structuredClone(staging.data), originalLedger = structuredClone(ledger.data);
+  const result = c.previewReconcileCommit();
+  assert.equal(result.committedCount, 2); assert.equal(result.skippedCount, 2);
+  assert.deepEqual(Array.from(result.rowOutcomes, row => [row.stagingRow, row.status]),
+    [[2, 'duplicate_review'], [3, 'would_import'], [4, 'would_import'], [5, 'duplicate_review']]);
+  for (const row of result.rows2D) for (const column of [0, 1, 2, 3, 7, 8, 9]) {
+    if (row[column] !== '') assert.ok(html.includes(String(row[column])));
+  }
+  assert.ok(html.includes(c.transactionAmountSgdFormula(3).replace(/"/g, '&quot;')));
+  assert.ok(html.includes(c.transactionBucketFormula(4).replace(/"/g, '&quot;').replace(/'/g, '&#39;')));
+  assert.match(html, /Review row 2:.*Old Merchant/);
+  assert.match(html, /Review row 5:.*Grandparents Purchase/);
+  assert.ok(!html.includes('Leave Pending'));
+  assert.match(html, /does not calculate their results/);
+  assert.deepEqual(staging.data, originalReview); assert.deepEqual(ledger.data, originalLedger);
+  assert.equal(ledger.copies.length, 0); assert.equal(ss.getSheetByName('_ReconcileHistory'), null);
+  assert.equal(c.previewReconcileCommit().committedCount, 2);
+  assert.deepEqual(staging.data, originalReview); assert.deepEqual(ledger.data, originalLedger);
+  staging.data = [headers, staged('Old Merchant')];
+  assert.equal(c.previewReconcileCommit().committedCount, 0);
+  assert.match(html, /No eligible rows would be appended/); assert.match(html, /Review row 2:/);
+  staging.data = [headers];
+  assert.equal(c.previewReconcileCommit().committedCount, 0);
+  assert.match(html, /No eligible rows would be appended/);
+  assert.equal(dialogs, 4);
+});
+test('preview escapes all bank and reviewed text and exposes no executable import controls', c => {
+  const malicious = '<script>alert("bank")</script>&';
+  const html = c.buildReconcileCommitPreviewHtml({ committedCount: 1, skippedCount: 1,
+    rows2D: [[malicious, 'DBS CC SGD', 'Расходы', 31, '=D3', '', '', malicious, malicious, malicious, '=H3']],
+    rowOutcomes: [{ stagingRow: 2, status: 'would_import' }, { stagingRow: 3, status: 'duplicate_review',
+      transaction: { date: malicious, account: malicious, where: malicious, amount: 31 } }] });
+  assert.ok(!html.includes(malicious));
+  assert.ok(html.includes('&lt;script&gt;alert(&quot;bank&quot;)&lt;/script&gt;&amp;'));
+  assert.ok(!/<script|onclick|google\.script\.run|<button/i.test(html));
 });
 test('Drive pipeline appends, preserves review, and deduplicates overlapping files', c => {
   const { staging, ledger, ss } = storage(c);
@@ -425,7 +607,7 @@ test('real date cells import with correct day and remain idempotent', c => {
   assert.equal(ledger.data[2][0], '01.09.2026');
   assert.equal(c.commitStaged(false, false, ss).committedCount, 0);
 });
-for (const name of ['test_reviewQueueArchiveRecovery', 'test_reviewQueueDismissalMatching']) {
+for (const name of ['test_reviewQueueArchiveRecovery', 'test_reviewQueueDismissalMatching', 'test_refreshPendingReviewMatching']) {
   test(name, c => {
     c[name]();
     assert.equal(c.logs.filter(l => l.includes('❌ FAIL')).length, 0);
@@ -508,4 +690,190 @@ test('dismissed rows are never imported even if ticked after archive failure', c
   assert.equal(c.commitStaged(false, false, ss).committedCount, 0);
   assert.equal(ledger.data.length, 2);
 });
+test('refresh archives recorded rows and preserves every pending edit without ledger writes', c => {
+  const { staging, ledger, ss } = storage(c);
+  ss.toast = () => {};
+  const present = staged('Old Merchant'); present[0] = false;
+  const pending = staged('New Purchase', 50);
+  const uncertain = staged('Unrelated Merchant', 20); uncertain[11] = 'duplicate_review';
+  staging.data.push(present, pending, uncertain);
+  const beforeLedger = structuredClone(ledger.data), beforePending = structuredClone([pending, uncertain]);
+  const result = c.refreshPendingReconciliation();
+  assert.equal(result.reconciledCount, 1);
+  assert.equal(result.remainingCount, 2);
+  assert.deepEqual(staging.data.slice(1), beforePending);
+  assert.deepEqual(ledger.data, beforeLedger);
+  const history = ss.getSheetByName('_ReconcileHistory');
+  assert.equal(history.data[1][11], 'reconciled');
+  assert.match(history.data[1][12], /Already in Transactions row 2/);
+  assert.equal(c.refreshPendingReconciliation().reconciledCount, 0);
+  assert.equal(history.data.length, 2);
+});
+test('refresh interrupted after history write safely resumes and excludes completed rows from import', c => {
+  const { staging, ledger, ss } = storage(c); ss.toast = () => {};
+  staging.data.push(staged('Old Merchant'));
+  const originalDelete = staging.deleteRows;
+  staging.deleteRows = () => { throw new Error('Interrupted archive removal'); };
+  assert.throws(() => c.refreshPendingReconciliation(), /Interrupted archive removal/);
+  assert.equal(staging.data[1][11], 'reconciled');
+  assert.equal(c.commitStaged(false, false, ss).committedCount, 0);
+  assert.equal(c.readPendingReconcileRows(ss).length, 0);
+  assert.equal(ledger.data.length, 2);
+  staging.deleteRows = originalDelete;
+  assert.equal(c.refreshPendingReconciliation().archivedCount, 1);
+  assert.equal(staging.data.length, 1);
+  assert.equal(ss.getSheetByName('_ReconcileHistory').data.length, 2);
+});
+test('refresh does not reuse an imported history occurrence after a later manual ledger addition', c => {
+  const { staging, ledger, ss } = storage(c); ss.toast = () => {};
+  ledger.data[1][9] = 'Val';
+  staging.data.push(staged('Old Merchant'));
+  c.refreshPendingReconciliation();
+  staging.data.push(staged('Old Merchant'));
+  assert.equal(c.refreshPendingReconciliation().reconciledCount, 0);
+  ledger.data.push(ledger.data[1].slice());
+  assert.equal(c.refreshPendingReconciliation().reconciledCount, 1);
+  assert.equal(staging.data.length, 1);
+});
+test('screenshot merge preserves review edits, multiplicity and card/currency identity', c => {
+  const old = { date: '11.09.2026', account: 'DBS CC SGD', amount: 12, where: 'Cafe', currency: 'SGD', type: 'Расходы', category: 'Edited category' };
+  const fresh = { ...old, category: 'Model category' };
+  const before = JSON.stringify(old);
+  const result = c.mergeScreenshotProposals([old], [fresh, { ...fresh }, { ...fresh, currency: 'USD' }, { ...fresh, cardholder: 'Grandparents' }]);
+  assert.equal(result.length, 4);
+  assert.equal(result[0], old);
+  assert.equal(JSON.stringify(old), before);
+  assert.equal(c.mergeScreenshotProposals(result, [fresh]).length, 4);
+});
+function photoWebhookFixture(c) {
+  const scriptProps = c.PropertiesService.getScriptProperties();
+  scriptProps.setProperty('WEBHOOK_SECRET', 'offline-webhook-secret');
+  scriptProps.setProperty('AUTHORIZED_CHAT_IDS', '42');
+  vm.runInContext('SHEET_FACTS.USERS = { OFFLINE: { chat_id: "42", active: true } }', c);
+  const cache = new Map(), properties = { latest_token_42: 'active' };
+  let held = false;
+  c.CacheService = { getScriptCache: () => ({ get: key => cache.get(key) || null,
+    put: (key, value) => cache.set(key, value), remove: key => cache.delete(key) }) };
+  c.PropertiesService.getUserProperties = () => ({ getProperty: key => properties[key] || null,
+    setProperty: (key, value) => { properties[key] = value; } });
+  c.LockService = { getScriptLock: () => { throw new Error('Statement scanner owns the script lock'); },
+    getUserLock: () => ({ waitLock: () => { assert.equal(held, false); held = true; }, releaseLock: () => { held = false; } }) };
+  c.HtmlService = { createHtmlOutput: text => text };
+  c.getTelegramFilePath = () => 'photo.jpg';
+  c.fetchTelegramFileAsBase64 = () => ({ inlineData: { mimeType: 'image/jpeg', data: 'fake-photo' } });
+  const previous = { date: '10.09.2026', account: 'DBS CC SGD', amount: 12, currency: 'SGD', where: 'Old Shop' };
+  const incoming = { ...previous, date: '11.09.2026', where: 'New Shop' };
+  let stored, delivered;
+  c.getPendingTransactions = () => stored || [previous];
+  c.savePendingTransactions = (rows, token) => { assert.equal(held, true); stored = rows; return token || 'fresh'; };
+  c.sendConfirmationMessage = (_, token, rows) => { delivered = rows; };
+  const run = (extra, updateId = 123) => c.doPost({ parameter: { secret: 'offline-webhook-secret' }, postData: { contents: JSON.stringify({ update_id: updateId, message: {
+    chat: { id: 42 }, photo: [{ file_id: 'photo' }], ...extra
+  } }) } });
+  return { previous, incoming, run, held: () => held, stored: () => stored, delivered: () => delivered };
+}
+test('plain screenshot extracts outside locks without resending old rows, then merges latest state', c => {
+  const f = photoWebhookFixture(c);
+  c.extractTransactions = (inputs, context) => {
+    assert.equal(f.held(), false);
+    assert.equal(context.previous_proposal, undefined);
+    // A different screenshot completed while this request was extracting.
+    c.getPendingTransactions = () => [f.previous, { ...f.previous, where: 'Concurrent Shop' }];
+    return [f.incoming];
+  };
+  assert.equal(f.run({}), 'OK');
+  assert.equal(f.stored().length, 3);
+  assert.equal(f.delivered().length, 3);
+  assert.equal(f.held(), false);
+  assert.ok(c.logs.some(line => line.includes('proposal_total')));
+});
+test('caption corrections retain previous proposal context and serial processing', c => {
+  const f = photoWebhookFixture(c);
+  c.extractTransactions = (_, context) => {
+    assert.equal(f.held(), true);
+    assert.equal(context.previous_proposal[0], f.previous);
+    return [{ ...f.previous, amount: 15 }];
+  };
+  f.run({ caption: 'Correct the previous amount to 15' });
+  assert.equal(f.stored().length, 1);
+  assert.equal(f.stored()[0].amount, 15);
+});
+test('screenshot finishing after approval does not resurrect the processed proposal', c => {
+  const f = photoWebhookFixture(c);
+  c.extractTransactions = () => { c.getPendingTransactions = () => 'PROCESSED'; return [f.incoming]; };
+  f.run({});
+  assert.equal(f.stored().length, 1);
+  assert.equal(f.stored()[0].where, 'New Shop');
+});
+test('captioned album photo retains correction context without collecting other images', c => {
+  const f = photoWebhookFixture(c);
+  c.Utilities.sleep = () => { throw new Error('Albums must not wait for more photos'); };
+  c.extractTransactions = (inputs, context) => {
+    assert.equal(f.held(), true);
+    assert.equal(context.previous_proposal[0], f.previous);
+    assert.ok(inputs.some(input => input.text));
+    return [f.incoming];
+  };
+  f.run({ media_group_id: 'group', caption: 'Correct the previous merchant' });
+  assert.equal(f.stored().length, 1);
+});
+test('all three album photos process even when delivered sequentially and larger than cache limits', c => {
+  const f = photoWebhookFixture(c);
+  const cache = c.CacheService.getScriptCache();
+  c.CacheService.getScriptCache = () => ({ ...cache, put: (key, value) => {
+    assert.ok(!key.startsWith('album_'));
+    assert.ok(Buffer.byteLength(value) <= 100000);
+    cache.put(key, value);
+  } });
+  c.fetchTelegramFileAsBase64 = () => ({ inlineData: { mimeType: 'image/jpeg', data: 'a'.repeat(200000) } });
+  c.Utilities.sleep = () => { throw new Error('Unexpected album delay'); };
+  let extractions = 0;
+  c.extractTransactions = inputs => {
+    assert.equal(inputs.length, 1);
+    assert.equal(inputs[0].inlineData.data.length, 200000);
+    return [{ ...f.incoming, where: 'Shop ' + (++extractions) }];
+  };
+  for (const id of [101, 102, 103]) f.run({ media_group_id: 'three-photos', message_id: id }, id);
+  assert.equal(extractions, 3);
+  assert.equal(f.stored().length, 4); // Existing proposal plus all three new photos.
+  assert.deepEqual(Array.from(f.delivered(), row => row.where), ['Old Shop', 'Shop 1', 'Shop 2', 'Shop 3']);
+  f.run({ media_group_id: 'three-photos', message_id: 102 }, 102);
+  assert.equal(extractions, 3); // A Telegram retry does not process a fourth photo.
+});
+test('three album extractions completing out of order merge without overwriting one another', c => {
+  const f = photoWebhookFixture(c);
+  let number = 0;
+  c.extractTransactions = () => {
+    const current = ++number;
+    if (current < 3) f.run({ media_group_id: 'concurrent', message_id: 200 + current }, 200 + current);
+    return [{ ...f.incoming, where: 'Photo ' + current }];
+  };
+  f.run({ media_group_id: 'concurrent', message_id: 200 }, 200);
+  assert.equal(number, 3);
+  assert.deepEqual(Array.from(f.stored(), row => row.where), ['Old Shop', 'Photo 3', 'Photo 2', 'Photo 1']);
+});
+test('overlapping album screenshots merge shared rows and keep every distinct purchase', c => {
+  const f = photoWebhookFixture(c);
+  let number = 0;
+  c.extractTransactions = () => [f.incoming, { ...f.incoming, amount: ++number, where: 'Distinct ' + number }];
+  for (const id of [300, 301, 302]) f.run({ media_group_id: 'overlap', message_id: id }, id);
+  assert.equal(f.stored().length, 5); // Previous + shared row + three distinct rows.
+  assert.equal(f.stored().filter(row => row.where === 'New Shop').length, 1);
+});
+test('Telegram proposal rejection is surfaced while an unchanged overlap is harmless', c => {
+  vm.runInContext(fs.readFileSync(path.join(root, 'telegramUI.gs'), 'utf8'), c);
+  c.PropertiesService.getScriptProperties().setProperty('TELEGRAM_BOT_TOKEN', 'offline-test');
+  c.PropertiesService.getUserProperties = () => ({ getProperty: () => '42', setProperty: () => {} });
+  c.formatTransactionConfirmationHtml = () => 'Proposal';
+  c.getMainProposalKeyboard = () => ({});
+  let description = 'Bad Request: message is too long';
+  c.UrlFetchApp = { fetch: () => ({ getResponseCode: () => 400,
+    getContentText: () => JSON.stringify({ ok: false, error_code: 400, description }) }) };
+  assert.throws(() => c.sendConfirmationMessage(42, 'token', [], true), /proposal delivery failed.*too long/);
+  description = 'Bad Request: message is not modified';
+  assert.doesNotThrow(() => c.sendConfirmationMessage(42, 'token', [], true));
+});
+require('./monthly-coach-regressions.cjs')(test);
+require('./delivery-regressions.cjs')(test);
+require('./webhook-auth-regressions.cjs')(test);
 console.log(`${passed} tests passed; ${assertions} existing assertions checked; all .gs files parsed.`);

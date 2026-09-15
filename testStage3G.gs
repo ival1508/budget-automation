@@ -1,4 +1,28 @@
 /** In-memory Stage 3G tests, discovered by runAllTests. No Drive/ledger mutations. */
+function test_refreshPendingReviewMatching() {
+  const pending = { date: '20.08.2026', account: 'DBS CC SGD', amount: 31, merchant: 'Shop', cardholder: 'Val', review_row: 2 };
+  const ledger = { date: pending.date, account: pending.account, amount: 31, where: 'Shop', notes: 'Val', row_index: 10 };
+  const first = planPendingReconcileRefresh([pending, { ...pending, review_row: 3 }], [], [ledger], {});
+  assertEq(first.matched.length, 1, 'One ledger occurrence clears at most one pending occurrence');
+  assertEq(first.missing.length + first.ambiguous.length, 1, 'Additional occurrence remains for review');
+  const repeated = planPendingReconcileRefresh([pending], [pending], [ledger], {});
+  assertEq(repeated.matched.length, 0, 'Previously reconciled history reserves its ledger occurrence');
+  const added = planPendingReconcileRefresh([pending], [pending], [ledger, { ...ledger, row_index: 11 }], {});
+  assertEq(added.matched.length, 1, 'A newly added ledger occurrence clears the remaining purchase');
+  const different = planPendingReconcileRefresh([
+    { ...pending, cardholder: 'Rita' }, { ...pending, account: 'Another account' },
+    { ...pending, amount: -31 }, { ...pending, merchant: 'Unrelated merchant' }
+  ], [], [ledger], {});
+  assertEq(different.matched.length, 0, 'Different cards, accounts, directions and uncertain identities are retained');
+  const food = planPendingReconcileRefresh([{ ...pending, merchant: 'Western Boy', raw_merchant: 'FR VIVO WESTERN BOY SINGAPORE SG' }],
+    [], [{ ...ledger, where: 'Food republic' }], {});
+  assertEq(food.matched.length, 1, 'User-confirmed statement and ledger merchant relationship still matches');
+  const incomplete = planPendingReconcileRefresh([{ ...pending, account: '' }, { ...pending, amount: NaN },
+    { ...pending, date: '31.02.2026' }], [], [ledger], {});
+  assertEq(incomplete.matched.length, 0, 'Incomplete review edits are never treated as confirmed ledger matches');
+  assertEq(incomplete.missing.length, 3, 'Incomplete review edits stay in the queue');
+}
+
 function test_reviewQueueArchiveRecovery() {
   const f = makeStage3GFixture();
   const sheet = f.ss.insertSheet('_Reconcile');
@@ -140,7 +164,8 @@ function test_stage3GMenuAndScheduler() {
   buildBudgetMenu({ createMenu: name => { menuName = name; return menu; } });
   assertEq(menuName, '💰 Budget', 'Menu is available in Sheets');
   ['reconcileFromDrive', 'reviewReconcileStaging', 'importReviewedReconciliation', 'dismissSelectedReconcileRows',
-    'archiveCompletedReconcileRows', 'openReconcileHistory'].forEach(name => assertEq(items.includes(name), true, 'Menu includes ' + name));
+    'archiveCompletedReconcileRows', 'openReconcileHistory', 'refreshPendingReconciliation',
+    'repairTransactionDerivedFormulas'].forEach(name => assertEq(items.includes(name), true, 'Menu includes ' + name));
   let created = 0; const triggers = [];
   const chain = { timeBased: () => chain, everyMinutes: minutes => { assertEq(minutes, 15, 'Use existing 15-minute cadence'); return chain; },
     create: () => { created++; triggers.push({ getHandlerFunction: () => 'dispatch' }); } };

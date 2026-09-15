@@ -54,10 +54,12 @@ function callGeminiApiWithRetry(payload, apiKey, preferredModel, customFallbackL
     };
 
     Logger.log(`Calling Gemini API (${modelId})...`);
+    const attemptStarted = Date.now();
     const response = UrlFetchApp.fetch(url, options);
     const responseCode = response.getResponseCode();
     const responseText = response.getContentText();
     const elapsedMs = Date.now() - startTime;
+    Logger.log(`[Proposal timing] model_request ${modelId}: ${Date.now() - attemptStarted}ms; status=${responseCode}; total=${elapsedMs}ms`);
 
     if (responseCode === 200) {
       if (modelId !== primaryModel) {
@@ -88,6 +90,7 @@ function callGeminiApiWithRetry(payload, apiKey, preferredModel, customFallbackL
  * @throws {Error} If API key is missing, HTTP request fails, or JSON parsing fails.
  */
 function extractTransactions(inputs, context) {
+  const extractionStarted = Date.now();
   // 1. Retrieve API Key securely from Script Properties (§5.2, §7.2)
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   if (!apiKey) {
@@ -102,6 +105,7 @@ function extractTransactions(inputs, context) {
   }
 
   const systemPromptText = getSystemPrompt(ctx);
+  Logger.log(`[Proposal timing] prompt_preparation: ${Date.now() - extractionStarted}ms; prompt_chars=${systemPromptText.length}`);
   
   // Format input items into Gemini parts structure
   const parts = [];
@@ -176,12 +180,14 @@ function extractTransactions(inputs, context) {
   }
 
   // 6. Enrich each transaction deterministically & flag duplicates against existing sheet data (§6.7)
+  const enrichmentStarted = Date.now();
   const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap() : null;
   let enrichedTransactions = rawParsedTransactions.map(rawTxn => enrichTransaction(rawTxn, categoryBucketMap));
   if (typeof flagExistingDuplicates === 'function') {
     enrichedTransactions = flagExistingDuplicates(enrichedTransactions);
   }
   Logger.log(`Successfully extracted, enriched, and checked ${enrichedTransactions.length} transaction(s).`);
+  Logger.log(`[Proposal timing] enrichment_and_duplicate_check: ${Date.now() - enrichmentStarted}ms; extraction_total=${Date.now() - extractionStarted}ms; rows=${enrichedTransactions.length}`);
 
   return enrichedTransactions;
 }
@@ -259,7 +265,7 @@ function getLearnedMerchantsContext() {
     if (sheet) {
       const lastRow = sheet.getLastRow();
       if (lastRow > 1) {
-        const numCols = Math.max(5, sheet.getLastColumn());
+        const numCols = 5;
         const data = sheet.getRange(2, 1, Math.min(lastRow - 1, 50), numCols).getValues();
         for (let i = 0; i < data.length; i++) {
           const m = String(data[i][0] || '').trim();

@@ -177,6 +177,14 @@ function sendConfirmationMessage(chatId, token, transactions, isUpdate = false) 
   const response = UrlFetchApp.fetch(url, options);
   const respJson = JSON.parse(response.getContentText());
 
+  // Overlapping screenshots can leave the proposal unchanged. Other delivery
+  // failures must reach the webhook error handler instead of looking successful.
+  const unchanged = isUpdate && existingMsgId && respJson.error_code === 400 &&
+    /message is not modified/i.test(String(respJson.description || ''));
+  if (!respJson.ok && !unchanged) {
+    throw new Error(`Telegram proposal delivery failed (${respJson.error_code || response.getResponseCode()}): ${respJson.description || 'Unknown error'}`);
+  }
+
   // Store the message ID for future rolling context updates
   if (respJson.ok && respJson.result && respJson.result.message_id) {
     userProps.setProperty(msgIdKey, String(respJson.result.message_id));

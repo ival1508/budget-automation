@@ -2053,6 +2053,51 @@ function calculateBigramSimilarity(s1, s2) {
   return (2.0 * intersection) / total;
 }
 
+/** Identify a fee without treating merchant names such as COFFEE as fees. */
+function reconcileFeeIdentity(row) {
+  const description = String(row.raw_merchant || row.merchant || row.description || row.where || '')
+    .toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+  const reversal = /\b(?:REVERSAL|REVERSED|WAIVER|WAIVED)\b/.test(description);
+  const identity = description.replace(/\b(?:AUTO|AUTOMATIC|REVERSAL|REVERSED|WAIVER|WAIVED)\b/g, '')
+    .replace(/\s+/g, ' ').trim();
+  // These complete bank descriptors denote the same late-payment fee.
+  if (/^LATE (?:PAYMENT )?(?:CHARGE(?: FEE)?|FEE)$/.test(identity)) {
+    return { identity: 'LATE PAYMENT FEE', reversal: reversal };
+  }
+  if (!/\bFEE\b/.test(identity) || identity === 'FEE') return null;
+  return { identity: identity, reversal: reversal };
+}
+
+/** Only corroborated normalized expense/credit pairs can cancel each other. */
+function canPairReconcileFee(fee, credit) {
+  const feeAmount = Number(fee.amount !== undefined ? fee.amount : fee.raw_amount);
+  const creditAmount = Number(credit.amount !== undefined ? credit.amount : credit.raw_amount);
+  if (!Number.isFinite(feeAmount) || !Number.isFinite(creditAmount) ||
+      feeAmount <= 0 || creditAmount >= 0 || Math.abs(feeAmount + creditAmount) >= 0.005) return false;
+  if (fee.type !== 'Расходы' || credit.type !== 'Получение денег') return false;
+
+  const account = row => String(row.account || '').trim().toLowerCase();
+  if (!account(fee) || account(fee) !== account(credit)) return false;
+  const currency = row => String(row.currency || 'SGD').trim().toUpperCase();
+  if (currency(fee) !== currency(credit)) return false;
+  const card = row => String(row.card_last4 || row.card_number || '').replace(/\D/g, '').slice(-4);
+  if (card(fee) !== card(credit)) return false;
+  const holder = row => String(row.cardholder || resolveCardholder(card(row)) || '').trim().toLowerCase();
+  if (holder(fee) !== holder(credit)) return false;
+
+  // Restrict automatic cancellation to the same day or the following week.
+  // Older, earlier, missing or invalid dates remain proposals for review.
+  try {
+    const feeDay = reconcileDateSerial(fee.date);
+    const creditDay = reconcileDateSerial(credit.date);
+    if (feeDay === '' || creditDay === '') return false;
+    const daysAfter = creditDay - feeDay;
+    return daysAfter >= 0 && daysAfter <= 7;
+  } catch (error) {
+    return false;
+  }
+}
+
 /**
  * STAGE 3D: Filters non-spend lines from missing statement transactions.
  * Follows Option B (Smart Dual-Sided Reconciler):
@@ -2061,11 +2106,11 @@ function calculateBigramSimilarity(s1, s2) {
  * - internal transfers between own accounts -> reason: 'Transfer to self'
  * - fee and reversal net-zero pairs -> reason: 'Fee and reversal, net zero'
  * - transit auto-topup adjustments -> reason: 'Refund'
- * - standalone fee reversals / waivers -> reason: 'Fee and reversal, net zero'
  * - interest credit lines -> reason: 'Interest / FX'
  * 
  * Proposes:
  * - Genuine expenses (amount > 0, type === 'Расходы')
+ * - Unpaired or ambiguous fee reversals / waivers
  * - Legitimate external credits (merchant refunds, Allianz reimbursements, Carousell sales)
  *   with type 'Получение денег' and negative amount.
  * 
@@ -2093,38 +2138,29 @@ function filterNonSpend(missing) {
   // Map of index -> reason for paired exclusions (e.g. fee & reversal net zero)
   const pairedExcludedMap = new Map();
 
-  // PASS 1: Identify Fee and Reversal Net-Zero Pairs
-  // e.g. Citi "LATE CHARGE FEE" (+100 or -100 raw) and "AUTO LATE FEE REVERSAL" (-100 or +100 raw)
+  // PASS 1: Identify unique, corroborated fee/reversal pairs. Never choose an
+  // arbitrary charge when several occurrences could explain the same reversal.
+  const feeIdentities = missing.map(row => row ? reconcileFeeIdentity(row) : null);
+  const feeCandidates = new Map();
+  const creditCandidates = new Map();
   for (let i = 0; i < missing.length; i++) {
-    if (pairedExcludedMap.has(i)) continue;
-    const r1 = missing[i];
-    if (!r1) continue;
-
-    const desc1 = String(r1.raw_merchant || r1.merchant || r1.description || r1.where || '').toUpperCase();
-    const isFee1 = desc1.includes('LATE CHARGE') || desc1.includes('LATE FEE') || (desc1.includes('FEE') && !desc1.includes('REVERSAL') && !desc1.includes('WAIVER'));
-    if (!isFee1) continue;
-
-    const amt1 = Math.abs(Number(r1.amount !== undefined ? r1.amount : r1.raw_amount) || 0);
-    if (amt1 === 0) continue;
-
+    const feeIdentity = feeIdentities[i];
+    if (!feeIdentity || feeIdentity.reversal) continue;
     for (let j = 0; j < missing.length; j++) {
-      if (i === j || pairedExcludedMap.has(j)) continue;
-      const r2 = missing[j];
-      if (!r2) continue;
-
-      const desc2 = String(r2.raw_merchant || r2.merchant || r2.description || r2.where || '').toUpperCase();
-      const isReversal2 = desc2.includes('REVERSAL') || desc2.includes('WAIVER');
-      if (!isReversal2) continue;
-
-      const amt2 = Math.abs(Number(r2.amount !== undefined ? r2.amount : r2.raw_amount) || 0);
-
-      if (Math.abs(amt1 - amt2) < 0.01) {
-        pairedExcludedMap.set(i, 'Fee and reversal, net zero');
-        pairedExcludedMap.set(j, 'Fee and reversal, net zero');
-        break;
-      }
+      const creditIdentity = feeIdentities[j];
+      if (!creditIdentity || !creditIdentity.reversal || feeIdentity.identity !== creditIdentity.identity ||
+          !canPairReconcileFee(missing[i], missing[j])) continue;
+      if (!feeCandidates.has(i)) feeCandidates.set(i, []);
+      if (!creditCandidates.has(j)) creditCandidates.set(j, []);
+      feeCandidates.get(i).push(j);
+      creditCandidates.get(j).push(i);
     }
   }
+  feeCandidates.forEach((credits, feeIndex) => {
+    if (credits.length !== 1 || creditCandidates.get(credits[0]).length !== 1) return;
+    pairedExcludedMap.set(feeIndex, 'Fee and reversal, net zero');
+    pairedExcludedMap.set(credits[0], 'Fee and reversal, net zero');
+  });
 
   // PASS 2: Evaluate Each Row Against Rules
   for (let idx = 0; idx < missing.length; idx++) {
@@ -2220,23 +2256,7 @@ function filterNonSpend(missing) {
         continue;
       }
 
-      // 5. Standalone Fee Reversals / Waivers without matched fee
-      const isFeeWaiver = (
-        descUpper.includes('LATE FEE REVERSAL') ||
-        descUpper.includes('FEE REVERSAL') ||
-        descUpper.includes('FEE WAIVER')
-      );
-
-      if (isFeeWaiver) {
-        excluded.push({
-          ...row,
-          reason: 'Fee and reversal, net zero',
-          exclusion_category: 'fee_reversal'
-        });
-        continue;
-      }
-
-      // 6. FX and Interest Credit Lines
+      // 5. FX and Interest Credit Lines
       const isInterestCredit = (
         descUpper.includes('INTEREST CREDIT') ||
         descUpper.includes('CREDIT INTEREST')
@@ -3211,7 +3231,50 @@ function applyReconcileDropdowns(sheet, categories) {
 
 /** Preview ticked rows through the actual commit/writer path; never append. */
 function previewReconcileCommit() {
-  return commitStaged(false, true);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const result = commitStaged(false, true, ss);
+  const output = HtmlService.createHtmlOutput(buildReconcileCommitPreviewHtml(result))
+    .setWidth(1100).setHeight(650);
+  SpreadsheetApp.getUi().showModalDialog(output, 'Preview ticked rows');
+  return result;
+}
+
+/** Render writer output as escaped text; the preview has no import action. */
+function buildReconcileCommitPreviewHtml(result) {
+  const escape = value => String(value === undefined || value === null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const headings = ['Review row', 'A · Дата', 'B · Счёт', 'C · Тип', 'D · Сумма',
+    'E · Сумма в SGD', 'F · На счете до', 'G · На счете после',
+    'H · Категория', 'I · Где', 'J · Notes', 'K · 50/30/20'];
+  const outcomes = result.rowOutcomes || [];
+  const imports = outcomes.filter(row => row.status === 'would_import');
+  const rows = (result.rows2D || []).map((row, index) => {
+    const cells = row.map((value, column) =>
+      `<td>${escape(column === 5 || column === 6 ? 'Filled at import' : value)}</td>`).join('');
+    return `<tr><td>${escape(imports[index] ? imports[index].stagingRow : '')}</td>${cells}</tr>`;
+  }).join('');
+  const duplicates = outcomes.filter(row => row.status === 'duplicate_review').map(row => {
+    const txn = row.transaction;
+    return `<li>Review row ${escape(row.stagingRow)}: ${escape(txn.date)} · ${escape(txn.account)} · ` +
+      `${escape(txn.where)} · ${escape(txn.amount)} — matches an existing or earlier checked purchase.</li>`;
+  }).join('');
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+    body{font:14px Arial,sans-serif;color:#24332e;margin:24px}h2{font-size:20px}
+    .table{overflow:auto;max-height:420px;border:1px solid #d8e1dc}
+    table{border-collapse:collapse;width:100%}th,td{padding:10px;border-bottom:1px solid #d8e1dc;
+    text-align:left;vertical-align:top;white-space:pre-wrap;min-width:90px}
+    th{position:sticky;top:0;background:#edf5f0}p{line-height:1.5}
+    </style></head><body><h2>${escape(result.committedCount)} would import · ${escape(result.skippedCount)} duplicates skipped</h2>
+    <p>Preview only. Transactions, checkboxes and review history are unchanged.
+    Close this window and use <b>Import ticked rows from staging</b> when the rows are correct.</p>
+    ${rows ? `<div class="table"><table><thead><tr>${headings.map(label => `<th>${escape(label)}</th>`).join('')}</tr></thead>
+    <tbody>${rows}</tbody></table></div>` : '<p>No eligible rows would be appended.</p>'}
+    <p>E and K show the formulas the writer will append. Balances F:G are copied at import;
+    F starts at zero for a new account. This preview does not calculate their results.
+    A later import rechecks the current ledger and checked rows.</p>
+    ${duplicates ? `<h3>Duplicates retained for review</h3><ul>${duplicates}</ul>` : ''}
+    </body></html>`;
 }
 
 /** Repair an existing review in place; preserve its values, ticks and statuses. */
@@ -3918,9 +3981,9 @@ function reconcileAndStage(statementInput, optSpreadsheet, optOptions) {
  * @return {Object} Commit summary { committedCount, skippedCount, dryRun, writtenRows }.
  */
 function commitStaged(useTestSheet, optDryRun, optSpreadsheet) {
-  const ss = optSpreadsheet || ((typeof getTargetSpreadsheet === 'function')
-    ? getTargetSpreadsheet(Boolean(useTestSheet))
-    : SpreadsheetApp.getActiveSpreadsheet());
+  const ss = useTestSheet
+    ? getTargetSpreadsheet(true, optSpreadsheet)
+    : (optSpreadsheet || getTargetSpreadsheet(false));
 
   if (!ss) {
     throw new Error('commitStaged: No spreadsheet instance available.');
@@ -4013,7 +4076,7 @@ function commitStaged(useTestSheet, optDryRun, optSpreadsheet) {
       }
 
       // Skip already imported rows (Idempotency safeguard)
-      if (status === 'imported' || status === 'dismissed') {
+      if (isCompletedReconcileStatus(status)) {
         Logger.log(`[commitStaged] Row ${r + 2} skipped: already marked '${status}'.`);
         continue;
       }
@@ -4083,7 +4146,12 @@ function commitStaged(useTestSheet, optDryRun, optSpreadsheet) {
       skippedCount: writeResult.skippedCount,
       dryRun: isDryRun,
       writtenRows: writeResult.writtenRows || [],
-      rows2D: writeResult.rows2D || []
+      rows2D: writeResult.rows2D || [],
+      rowOutcomes: (writeResult.rowOutcomes || []).map(outcome => ({
+        stagingRow: candidateRowIndices[outcome.inputIndex],
+        status: outcome.status,
+        transaction: toAppend[outcome.inputIndex]
+      }))
     };
   } finally {
     if (lock) {
@@ -4967,6 +5035,7 @@ function buildBudgetMenu(ui) {
   ui.createMenu('💰 Budget')
     .addItem('Reconcile statements from Drive', 'reconcileFromDrive')
     .addItem('Review staging', 'reviewReconcileStaging')
+    .addItem('Refresh pending review against Transactions', 'refreshPendingReconciliation')
     .addItem('Preview ticked rows', 'previewReconcileCommit')
     .addItem('Import ticked rows from staging', 'importReviewedReconciliation')
     .addItem('Reviewed — do not import selected rows', 'dismissSelectedReconcileRows')
@@ -4978,6 +5047,7 @@ function buildBudgetMenu(ui) {
     .addItem('Retry failed inbox files', 'retryStatementInboxFailures')
     .addItem('Repair staging dropdowns', 'repairReconcileDropdowns')
     .addItem('Repair staging dates', 'repairReconcileDates')
+    .addItem('Repair Transactions formulas', 'repairTransactionDerivedFormulas')
     .addSeparator()
     .addItem('Run morning coach now', 'sendMorningCoach')
     .addToUi();
@@ -5054,6 +5124,88 @@ function importReviewedReconciliation() {
 
 const RECONCILE_HISTORY_TAB = '_ReconcileHistory';
 
+function isCompletedReconcileStatus(status) {
+  return ['imported', 'dismissed', 'reconciled'].includes(String(status || '').trim().toLowerCase());
+}
+
+/** Match reviewed values while retaining bank descriptors for known merchant relationships. */
+function reconcileReviewMatchItem(row, index, ss) {
+  const credit = ['Получение денег', 'Доходы', 'Доходы - премия', 'Доходы - лёгкие деньги'].includes(row[4]);
+  let descriptor = '';
+  if (row[14]) {
+    try { descriptor = JSON.parse(String(row[14]))[4] || ''; } catch (error) { /* legacy key: use source below */ }
+  }
+  if (!descriptor) {
+    const source = /Statement: "([\s\S]*)"(?: \([^)]*\))?$/.exec(String(row[10] || ''));
+    descriptor = source ? source[1] : String(row[6] || '');
+  }
+  return { date: reconcileDateString(row[1], ss), account: String(row[2] || ''),
+    cardholder: row[3] === 'Unknown' ? '' : String(row[3] || ''), type: row[4],
+    amount: credit ? -Math.abs(Number(row[5])) : Math.abs(Number(row[5])),
+    merchant: String(row[6] || ''), raw_merchant: descriptor, review_row: index };
+}
+
+/** Reserve prior completed occurrences so refreshing twice cannot reuse one ledger entry. */
+function planPendingReconcileRefresh(pending, completed, ledger, aliases) {
+  const canMatch = row => {
+    if (!String(row.account || '').trim() || !String(row.merchant || '').trim() || !Number.isFinite(row.amount)) return false;
+    try { return reconcileDateSerial(row.date) !== ''; } catch (error) { return false; }
+  };
+  const previous = findMissing(completed.filter(canMatch), ledger, aliases);
+  const reserved = new Set(previous.matched.map(row => row.matched_ledger.row_index));
+  // Uncertain historical allocations also stay reserved; retain pending rows conservatively.
+  previous.ambiguous.forEach(row => (row.candidates || []).forEach(candidate => reserved.add(candidate.row_index)));
+  const result = findMissing(pending.filter(canMatch), ledger.filter(row => !reserved.has(row.row_index)), aliases);
+  result.missing = result.missing.concat(pending.filter(row => !canMatch(row)));
+  return result;
+}
+
+function refreshPendingReconciliation() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const result = withBudgetWriteLock(() => refreshPendingReconciliationUnlocked(ss));
+  ss.toast(`${result.reconciledCount} already recorded; ${result.remainingCount} still to review (${result.ambiguousCount} uncertain matches). Completed rows are in ${RECONCILE_HISTORY_TAB}.`, 'Budget', 12);
+  return result;
+}
+
+function refreshPendingReconciliationUnlocked(ss) {
+  const sheet = ss.getSheetByName(RECONCILE_STAGING_TAB_NAME);
+  if (!sheet) throw new Error('No _Reconcile tab yet. Reconcile a statement first.');
+  assertCurrentReconcileSchema(sheet);
+  if (!ss.getSheetByName('Transactions')) throw new Error('Transactions tab not found. Review was not changed.');
+  const data = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, 15).getValues() : [];
+  const pending = [], completed = [], seenIds = new Set();
+  const collectCompleted = (row, index) => {
+    if (!['imported', 'reconciled'].includes(String(row[11]).trim().toLowerCase())) return;
+    const id = String(row[13] || '');
+    if (id && seenIds.has(id)) return;
+    if (id) seenIds.add(id);
+    completed.push(reconcileReviewMatchItem(row, index, ss));
+  };
+  const history = ss.getSheetByName(RECONCILE_HISTORY_TAB);
+  if (history && history.getLastRow() > 1) {
+    assertCurrentReconcileSchema(history);
+    history.getRange(2, 1, history.getLastRow() - 1, 15).getValues().forEach(collectCompleted);
+  }
+  data.forEach((row, index) => {
+    collectCompleted(row, index + 2);
+    if (!isCompletedReconcileStatus(row[11]) && row[1]) pending.push(reconcileReviewMatchItem(row, index + 2, ss));
+  });
+  const ledger = readLedgerRowsForReconciliation(ss);
+  const plan = planPendingReconcileRefresh(pending, completed, ledger, getMerchantAliases());
+  // No ledger writes, reclassification, or edits to uncertain/unmatched proposals.
+  for (const match of plan.matched) {
+    const index = match.review_row;
+    const original = data[index - 2];
+    const reason = `Already in Transactions row ${match.matched_ledger.row_index} (${match.match_type})`;
+    sheet.getRange(index, 13).setValue(original[12] ? original[12] + ' | ' + reason : reason);
+    sheet.getRange(index, 12).setValue('reconciled');
+  }
+  SpreadsheetApp.flush();
+  const archivedCount = archiveCompletedReconcileRowsUnlocked(ss);
+  return { reconciledCount: plan.matched.length, remainingCount: pending.length - plan.matched.length,
+    ambiguousCount: plan.ambiguous.length, archivedCount: archivedCount };
+}
+
 /** Deliberately exact: no fuzzy aliases, date tolerance, or cross-card matching. */
 function reconcileReviewKey(date, account, cardholder, amount, descriptor) {
   if (!date || !account || !descriptor || !cardholder || cardholder === 'Unknown') return '';
@@ -5120,7 +5272,7 @@ function archiveCompletedReconcileRowsUnlocked(ss) {
   assertCurrentReconcileSchema(sheet);
   const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 15).getValues();
   const completed = data.map((row, index) => ({ row: row, index: index + 2 }))
-    .filter(item => ['imported', 'dismissed'].includes(String(item.row[11]).toLowerCase()));
+    .filter(item => isCompletedReconcileStatus(item.row[11]));
   if (!completed.length) return 0;
   let history = ss.getSheetByName(RECONCILE_HISTORY_TAB);
   if (!history) history = ss.insertSheet(RECONCILE_HISTORY_TAB);
@@ -5181,7 +5333,7 @@ function dismissSelectedReconcileRows() {
   }
   const selected = Array.from(indices).sort((a, b) => a - b).map(index => ({
     index: index, row: sheet.getRange(index, 1, 1, 15).getValues()[0]
-  })).filter(item => !['imported', 'dismissed'].includes(String(item.row[11]).toLowerCase()) && item.row[1]);
+  })).filter(item => !isCompletedReconcileStatus(item.row[11]) && item.row[1]);
   if (!selected.length) throw new Error('Select at least one pending data row in _Reconcile.');
   const ui = SpreadsheetApp.getUi();
   const reply = ui.prompt('Reviewed — do not import',
@@ -5221,7 +5373,7 @@ function readPendingReconcileRows(ss) {
   if (!sheet || sheet.getLastRow() < 2) return [];
   assertCurrentReconcileSchema(sheet);
   const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 12).getValues();
-  return rows.filter(row => !['imported', 'dismissed'].includes(String(row[11]).toLowerCase())).map(row => ({
+  return rows.filter(row => !isCompletedReconcileStatus(row[11])).map(row => ({
     date: reconcileDateString(row[1], ss), account: String(row[2]), amount: ['Получение денег', 'Доходы', 'Доходы - премия', 'Доходы - лёгкие деньги'].includes(row[4]) ? -Math.abs(Number(row[5])) : Math.abs(Number(row[5])), where: String(row[6]),
     category: String(row[7]), notes: row[3] === 'Unknown' ? '' : String(row[3]),
     row_index: 'staging ' + (rows.indexOf(row) + 2), pending_review: true

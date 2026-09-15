@@ -6,55 +6,142 @@
  */
 
 /**
- * Sends a Telegram HTML message to all authorized chat IDs (or a specific targetChatId).
+ * Sends to active configured users, or one explicitly requested chat.
+ * Every delivery requires HTTP 200 and Telegram ok:true; partial broadcasts throw
+ * with accepted/failure details after attempting every recipient.
  * 
  * @param {string} htmlText - Formatted Telegram HTML text message.
  * @param {string|number} [targetChatId] - Optional specific Chat ID for on-demand requests.
+ * @param {Object} [optOptions] - Optional reply_markup. Legacy true arguments are harmless.
+ * @return {Array<Object>} Accepted delivery receipts.
  */
-function sendTelegramMessage(htmlText, targetChatId) {
+function sendTelegramMessage(htmlText, targetChatId, optOptions) {
   const token = PropertiesService.getScriptProperties().getProperty("TELEGRAM_BOT_TOKEN");
   if (!token) {
     throw new Error('TELEGRAM_BOT_TOKEN missing in Script Properties.');
   }
 
-  let chatIds = [];
-  if (targetChatId) {
-    chatIds = [String(targetChatId)];
-  } else {
-    const authorizedIdsString = String(
-      PropertiesService.getScriptProperties().getProperty("AUTHORIZED_CHAT_IDS") ||
-      PropertiesService.getScriptProperties().getProperty("TELEGRAM_CHAT_ID") || ""
-    ).trim();
-
-    if (!authorizedIdsString) {
-      Logger.log('No registered Chat IDs found in AUTHORIZED_CHAT_IDS or TELEGRAM_CHAT_ID.');
-      return;
-    }
-    chatIds = authorizedIdsString.split(",").map(id => id.trim());
-  }
-
+  const chatIds = targetChatId ? [String(targetChatId).trim()] : getActiveTelegramUsers().map(user => user.chat_id);
+  if (!chatIds.length) throw new Error('No active Telegram recipients are configured.');
+  const accepted = [], failures = [];
   chatIds.forEach(chatId => {
-    if (!chatId) return;
     const url = `https://api.telegram.org/bot${token}/sendMessage`;
     const payload = {
       chat_id: chatId,
       text: htmlText,
       parse_mode: 'HTML'
     };
-
-    const response = UrlFetchApp.fetch(url, {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true
-    });
-
-    if (response.getResponseCode() === 200) {
-      Logger.log(`✅ Telegram message sent to Chat ID ${chatId}`);
+    if (optOptions && optOptions.reply_markup) payload.reply_markup = optOptions.reply_markup;
+    let response;
+    try {
+      response = UrlFetchApp.fetch(url, {
+        method: 'post', contentType: 'application/json', payload: JSON.stringify(payload), muteHttpExceptions: true
+      });
+    } catch (_) {
+      // UrlFetch exceptions can contain the token-bearing request URL.
+      failures.push({ chat_id: chatId, description: 'Network request failed.', retry_after: 0 });
+      return;
+    }
+    const code = response.getResponseCode();
+    let result;
+    try { result = JSON.parse(response.getContentText()); }
+    catch (_) { result = null; }
+    if (code !== 200 || !result || result.ok !== true) {
+      const retryAfter = Number(result && result.parameters && result.parameters.retry_after);
+      failures.push({ chat_id: chatId, description: `HTTP ${code}: ` + ((result && result.description) || 'Invalid Telegram response.'),
+        retry_after: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 0 });
     } else {
-      Logger.log(`❌ Failed to send to Chat ID ${chatId}: ${response.getContentText()}`);
+      accepted.push({ chat_id: chatId, message_id: result.result && result.result.message_id });
+      Logger.log(`✅ Telegram accepted message for Chat ID ${chatId}`);
     }
   });
+  if (failures.length) {
+    const error = new Error('Telegram delivery failed: ' + failures.map(failure => failure.chat_id + ' ' + failure.description).join('; '));
+    error.accepted = accepted;
+    error.failures = failures;
+    error.retryAfterSeconds = Math.max(...failures.map(failure => failure.retry_after));
+    throw error;
+  }
+  return accepted;
+}
+
+function getActiveTelegramUsers() {
+  const seen = new Set();
+  const users = typeof SHEET_FACTS !== 'undefined' ? SHEET_FACTS.USERS || {} : {};
+  return Object.values(users).filter(user => {
+    const chatId = user && String(user.chat_id || '').trim();
+    if (!user || user.active !== true || !chatId || seen.has(chatId)) return false;
+    seen.add(chatId); return true;
+  }).map(user => ({ ...user, chat_id: String(user.chat_id).trim() }));
+}
+
+// A live execution expires after seven minutes (longer than Apps Script's six-minute limit).
+// Only the brief property claim holds the shared lock; no model/network work holds it.
+function deliverScheduledMessage(key, slot, chatId, buildMessage, optSentKey) {
+  const props = PropertiesService.getScriptProperties();
+  const sentKey = optSentKey || 'sent_' + key;
+  const sentValue = optSentKey ? 'sent' : slot.period;
+  const sendingKey = 'sending_' + key, retryKey = 'retry_' + key;
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return false;
+  let token, attempts;
+  try {
+    if (props.getProperty(sentKey) === sentValue) return true;
+    if (Date.now() < slot.dueAt || Date.now() >= slot.expiresAt) return false;
+    const retry = JSON.parse(props.getProperty(retryKey) || 'null');
+    if (retry && retry.period === slot.period && Date.now() < retry.notBefore) return false;
+    const current = JSON.parse(props.getProperty(sendingKey) || 'null');
+    if (current && Date.now() - current.startedAt < 420000) return false;
+    token = Utilities.getUuid();
+    attempts = retry && retry.period === slot.period ? retry.attempts : 0;
+    props.setProperty(sendingKey, JSON.stringify({ token: token, period: slot.period, startedAt: Date.now() }));
+  } finally { lock.releaseLock(); }
+  try {
+    const message = buildMessage();
+    if (Date.now() >= slot.expiresAt) throw new Error('Delivery window expired during generation.');
+    sendTelegramMessage(typeof message === 'string' ? message : message.text, chatId,
+      typeof message === 'string' ? true : { reply_markup: message.reply_markup });
+    props.setProperty(sentKey, sentValue);
+    props.deleteProperty(retryKey);
+    Logger.log(`✅ [DISPATCH] Accepted ${key} for ${slot.period}`);
+    return true;
+  } catch (error) {
+    const serverDelay = Number(error.retryAfterSeconds) || 0;
+    const backoffSeconds = Math.min(900, 60 * Math.pow(2, Math.min(attempts, 4)));
+    props.setProperty(retryKey, JSON.stringify({ period: slot.period, attempts: attempts + 1,
+      notBefore: Date.now() + Math.max(serverDelay, backoffSeconds) * 1000 }));
+    Logger.log(`❌ [DISPATCH] ${key} pending until the next eligible heartbeat: ${error.message}`);
+    return false;
+  } finally {
+    const current = JSON.parse(props.getProperty(sendingKey) || 'null');
+    if (current && current.token === token) props.deleteProperty(sendingKey);
+  }
+}
+
+/** Daily catch-up ends at its deadline or SGT midnight, whichever comes first. */
+function getDailyDeliverySlot(now, time, catchUpMinutes) {
+  const parts = String(time || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!parts || Number(parts[1]) > 23 || Number(parts[2]) > 59) return null;
+  const year = Number(Utilities.formatDate(now, 'Asia/Singapore', 'yyyy'));
+  const month = Number(Utilities.formatDate(now, 'Asia/Singapore', 'M'));
+  const day = Number(Utilities.formatDate(now, 'Asia/Singapore', 'd'));
+  const dueAt = Date.UTC(year, month - 1, day, Number(parts[1]) - 8, Number(parts[2]));
+  const expiresAt = Math.min(dueAt + catchUpMinutes * 60000, Date.UTC(year, month - 1, day + 1, -8));
+  return now.getTime() >= dueAt && now.getTime() < expiresAt
+    ? { period: Utilities.formatDate(now, 'Asia/Singapore', 'yyyy-MM-dd'), dueAt: dueAt, expiresAt: expiresAt } : null;
+}
+
+/** Latest month-end due date, including catch-up across the next month's midnight. */
+function getMonthEndDeliverySlot(now) {
+  const year = Number(Utilities.formatDate(now, 'Asia/Singapore', 'yyyy'));
+  const month = Number(Utilities.formatDate(now, 'Asia/Singapore', 'M'));
+  let dueAt = Date.UTC(year, month, 0, 15, 30); // Last day, 23:30 SGT.
+  if (now.getTime() < dueAt) dueAt = Date.UTC(year, month - 1, 0, 15, 30);
+  const expiresAt = dueAt + 180 * 60000;
+  if (now.getTime() < dueAt || now.getTime() >= expiresAt) return null;
+  const reportDate = new Date(dueAt);
+  return { period: Utilities.formatDate(reportDate, 'Asia/Singapore', 'yyyy-MM'),
+    reportDate: reportDate, dueAt: dueAt, expiresAt: expiresAt };
 }
 
 /**
@@ -69,20 +156,7 @@ function sendMorningCoach() {
   const briefText = typeof generateCoachBrief === 'function' ? generateCoachBrief(payload) : generateDailyCoachBrief(payload);
   Logger.log('Generated Coach Brief Text:\n' + briefText);
 
-  // Check USERS config in SHEET_FACTS for per-user dispatch rules
-  if (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.USERS) {
-    Object.values(SHEET_FACTS.USERS).forEach(user => {
-      if (user && user.active && user.chat_id) {
-        Logger.log(`Delivering Morning Coach brief to ${user.name} (Chat ID: ${user.chat_id}, Morning Time: ${user.morning_time} SGT)...`);
-        sendTelegramMessage(briefText, user.chat_id);
-      } else {
-        Logger.log(`Skipping delivery to ${user ? user.name : 'User'} (Inactive for trial run or missing chat_id).`);
-      }
-    });
-  } else {
-    // Default fallback if USERS is unavailable
-    sendTelegramMessage(briefText, '96069960');
-  }
+  return sendTelegramMessage(briefText);
 }
 
 /**
@@ -95,55 +169,24 @@ function sendWeeklyMandatoryAudit(targetChatId) {
   Logger.log('=== Running Weekly Mandatory Expenses Audit ===');
   const context = getBudgetCoachContext();
   const reportHtml = generateWeeklyMandatoryReport(context);
-  sendTelegramMessage(reportHtml, targetChatId);
+  return sendTelegramMessage(reportHtml, targetChatId);
 }
 
 /**
  * Sends the daily evening nudge message via Telegram at 21:00 SGT (§6.5).
  */
-function sendDailyNudge() {
-  const token = PropertiesService.getScriptProperties().getProperty("TELEGRAM_BOT_TOKEN");
-  if (!token) {
-    throw new Error('TELEGRAM_BOT_TOKEN missing in Script Properties.');
-  }
-
-  const authorizedIdsString = String(
-    PropertiesService.getScriptProperties().getProperty("AUTHORIZED_CHAT_IDS") ||
-    PropertiesService.getScriptProperties().getProperty("TELEGRAM_CHAT_ID") || ""
-  ).trim();
-
-  const chatIdsSet = new Set(authorizedIdsString ? authorizedIdsString.split(",").map(id => id.trim()) : []);
-  if (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.USERS) {
-    Object.values(SHEET_FACTS.USERS).forEach(user => {
-      if (user && user.active && user.chat_id) {
-        chatIdsSet.add(String(user.chat_id).trim());
-      }
-    });
-  }
-  const chatIds = Array.from(chatIdsSet).filter(Boolean);
-
-  if (chatIds.length === 0) {
-    Logger.log('No registered Chat IDs found in AUTHORIZED_CHAT_IDS, TELEGRAM_CHAT_ID, or SHEET_FACTS.USERS.');
-    return;
-  }
-  const payload = {
+function buildDailyNudgeMessage() {
+  return {
     text: "🌙 <b>Evening! Anything to log for today?</b>\n\nSnap a receipt, paste a text dump, or tap below if today was a zero-spend day.",
-    parse_mode: "HTML",
-    reply_markup: JSON.stringify({
+    reply_markup: {
       inline_keyboard: [[{ text: "😴 Nothing today", callback_data: "nothing_today" }]]
-    })
+    }
   };
+}
 
-  chatIds.forEach(chatId => {
-    if (!chatId) return;
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
-    UrlFetchApp.fetch(url, {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(Object.assign({}, payload, { chat_id: chatId })),
-      muteHttpExceptions: true
-    });
-  });
+function sendDailyNudge(targetChatId) {
+  const message = buildDailyNudgeMessage();
+  return sendTelegramMessage(message.text, targetChatId, { reply_markup: message.reply_markup });
 }
 
 /**
@@ -273,18 +316,60 @@ function generateDailyTransactionsRecap(optSs, optDate) {
 function sendDailyEveningRecap(targetChatId) {
   Logger.log('=== Running Daily Evening Transaction Recap (22:00 SGT) ===');
   const recapHtml = generateDailyTransactionsRecap();
-  sendTelegramMessage(recapHtml, targetChatId);
+  return sendTelegramMessage(recapHtml, targetChatId);
 }
 
 /**
  * Sends the End-of-Month Retrospective Coach Brief via Telegram (§6.5).
- * Triggered automatically on the 1st day of every month at 09:00 SGT.
+ * On demand: defaults to the latest completed month, or accepts an explicit report date.
+ * Scheduled month-end delivery is sequenced by runMonthEndJobs().
  */
-function sendMonthlyCoach() {
+function sendMonthlyCoach(optReportDate, optSs) {
   Logger.log('=== Running Monthly Coach Retrospective Brief ===');
-  const context = getBudgetCoachContext();
+  const context = buildCoachPayload('monthly', optSs, optReportDate);
   const briefText = generateMonthlyCoachBrief(context);
   sendTelegramMessage(briefText);
+  return briefText;
+}
+
+/** Reminder then coach for each active user, guarded by reporting month and delivery step. */
+function runMonthEndJobs(reportDate, optSs, optSlot) {
+  const slot = optSlot || getMonthEndDeliverySlot(reportDate);
+  if (!slot) return;
+  const reportMonth = Utilities.formatDate(reportDate, 'Asia/Singapore', 'yyyy-MM');
+  const props = PropertiesService.getScriptProperties();
+  const runningKey = 'month_end_running_' + reportMonth;
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+  const token = Utilities.getUuid();
+  try {
+    const previous = JSON.parse(props.getProperty(runningKey) || 'null');
+    if (previous && Date.now() - previous.startedAt < 420000) return;
+    props.setProperty(runningKey, JSON.stringify({ token: token, startedAt: Date.now() }));
+  } finally { lock.releaseLock(); }
+
+  try {
+    const users = getActiveTelegramUsers();
+    let briefText = null;
+    for (const user of users) {
+      const prefix = 'month_end_' + reportMonth + '_' + user.chat_id;
+      if (props.getProperty(prefix + '_coach') === 'sent') continue;
+      const reminded = deliverScheduledMessage(prefix + '_reminder', slot, user.chat_id, () => {
+        const inboxId = props.getProperty('STATEMENT_INBOX_ID');
+        const destination = inboxId ? 'the configured statement inbox in Drive' : 'your statement inbox (set it up from the Budget menu)';
+        return `Please upload the bank statements for <b>${escapeCoachHtml(getCurrentMonthTabName(reportDate))}</b> to ${destination}, then review and import the reconciliation proposals.`;
+      }, prefix + '_reminder');
+      if (!reminded) continue;
+      deliverScheduledMessage(prefix + '_coach', slot, user.chat_id, () => {
+        if (!briefText) briefText = generateMonthlyCoachBrief(buildCoachPayload('monthly', optSs, reportDate));
+        return briefText;
+      }, prefix + '_coach');
+    }
+  } finally {
+    // Do not hold the shared script lock during model generation or network delivery.
+    const current = JSON.parse(props.getProperty(runningKey) || 'null');
+    if (current && current.token === token) props.deleteProperty(runningKey);
+  }
 }
 
 /**
@@ -294,129 +379,35 @@ function sendMonthlyCoach() {
  */
 function dispatch() {
   const now = new Date();
-  const tz = 'Asia/Singapore';
-  const todayStr = Utilities.formatDate(now, tz, 'yyyy-MM-dd');
-  const currentHour = parseInt(Utilities.formatDate(now, tz, 'H'), 10);
-  const currentMinute = parseInt(Utilities.formatDate(now, tz, 'm'), 10);
-  const currentTotalMins = currentHour * 60 + currentMinute;
-  const dayOfWeek = Utilities.formatDate(now, tz, 'E'); // 'Mon', 'Tue', etc.
-  const dayOfMonth = parseInt(Utilities.formatDate(now, tz, 'd'), 10);
+  const users = getActiveTelegramUsers();
+  let morningBrief = null, recap = null, weeklyReport = null;
+  const nudgeSlot = getDailyDeliverySlot(now, '21:00', 60);
+  const recapSlot = getDailyDeliverySlot(now, '22:00', 90);
+  const weeklySlot = Utilities.formatDate(now, 'Asia/Singapore', 'E') === 'Mon'
+    ? getDailyDeliverySlot(now, '09:00', 180) : null;
 
-  // Month-rollover detection: check if tomorrow is in a different month
-  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-  const tomorrowMonth = parseInt(Utilities.formatDate(tomorrow, tz, 'M'), 10);
-  const currentMonth = parseInt(Utilities.formatDate(now, tz, 'M'), 10);
-  const isLastDayOfMonth = (tomorrowMonth !== currentMonth);
-
-  const props = PropertiesService.getScriptProperties();
-
-  // Helper: checks if target HH:mm falls within the current 15-minute window (exact 15m, no overlap)
-  function isTimeInWindow(targetTimeStr) {
-    if (!targetTimeStr || !targetTimeStr.includes(':')) return false;
-    const parts = targetTimeStr.split(':');
-    const targetH = parseInt(parts[0], 10);
-    const targetM = parseInt(parts[1], 10);
-    const targetTotalMins = targetH * 60 + targetM;
-    
-    // Window: exactly 15 minutes without overlap: diff >= 0 && diff < 15
-    const diff = currentTotalMins - targetTotalMins;
-    return diff >= 0 && diff < 15;
+  for (const user of users) {
+    const morningSlot = getDailyDeliverySlot(now, user.morning_time || '08:00', 180);
+    if (morningSlot) deliverScheduledMessage('morning_coach_' + user.chat_id, morningSlot, user.chat_id, () => {
+      if (!morningBrief) morningBrief = generateCoachBrief(buildCoachPayload('daily', undefined, now));
+      return morningBrief;
+    });
+    if (nudgeSlot) deliverScheduledMessage('daily_nudge_' + user.chat_id, nudgeSlot, user.chat_id, buildDailyNudgeMessage);
+    if (recapSlot) deliverScheduledMessage('daily_evening_recap_' + user.chat_id, recapSlot, user.chat_id, () => {
+      if (!recap) recap = generateDailyTransactionsRecap(undefined, now);
+      return recap;
+    });
+    if (weeklySlot) deliverScheduledMessage('weekly_mandatory_audit_' + user.chat_id, weeklySlot, user.chat_id, () => {
+      if (!weeklyReport) weeklyReport = generateWeeklyMandatoryReport(getBudgetCoachContext(undefined, now));
+      return weeklyReport;
+    });
   }
 
-  // Helper: once-per-day guard
-  function hasSentToday(key) {
-    return props.getProperty(`sent_${key}`) === todayStr;
-  }
-
-  function markSentToday(key) {
-    props.setProperty(`sent_${key}`, todayStr);
-  }
-
-  function clearSentToday(key) {
-    props.deleteProperty(`sent_${key}`);
-  }
-
-  // 1. Per-User Morning Coach Briefs at each user's morning_time (SHEET_FACTS.USERS)
-  const users = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.USERS) ? SHEET_FACTS.USERS : {
-    VAL: { name: 'Val', chat_id: '96069960', morning_time: '08:00', active: true },
-    RITA: { name: 'Rita', chat_id: '402188776', morning_time: '08:00', active: true }
-  };
-
-  let morningPayload = null;
-  let morningBriefText = null;
-
-  Object.values(users).forEach(user => {
-    if (!user || !user.active || !user.chat_id) return;
-    const targetTime = user.morning_time || '08:00';
-    const userKey = `morning_coach_${user.chat_id}`;
-
-    if (isTimeInWindow(targetTime) && !hasSentToday(userKey)) {
-      Logger.log(`[DISPATCH] Claiming slot & firing Morning Coach for ${user.name} (${user.chat_id}) for scheduled window ${targetTime}`);
-      markSentToday(userKey); // Claim slot BEFORE async/LLM work to prevent double-firing
-      try {
-        if (!morningBriefText) {
-          morningPayload = typeof buildCoachPayload === 'function' ? buildCoachPayload('daily') : getBudgetCoachContext();
-          morningBriefText = typeof generateCoachBrief === 'function' ? generateCoachBrief(morningPayload) : generateDailyCoachBrief(morningPayload);
-        }
-        sendTelegramMessage(morningBriefText, user.chat_id);
-        Logger.log(`✅ [DISPATCH] Morning Coach sent to ${user.name}`);
-      } catch (err) {
-        clearSentToday(userKey); // Clear slot on error so next tick can retry
-        Logger.log(`❌ [DISPATCH] Error delivering Morning Coach to ${user.name} (slot cleared for retry): ${err.message}`);
-      }
-    }
-  });
-
-  // 2. Daily Evening Nudge at 21:00 SGT
-  if (isTimeInWindow('21:00') && !hasSentToday('daily_nudge')) {
-    Logger.log('[DISPATCH] Claiming slot & firing Daily Evening Nudge (21:00 SGT)');
-    markSentToday('daily_nudge');
-    try {
-      sendDailyNudge();
-      Logger.log('✅ [DISPATCH] Daily Evening Nudge sent.');
-    } catch (err) {
-      clearSentToday('daily_nudge');
-      Logger.log(`❌ [DISPATCH] Error in sendDailyNudge (slot cleared for retry): ${err.message}`);
-    }
-  }
-
-  // 3. Daily Evening Transactions Recap at 22:00 SGT
-  if (isTimeInWindow('22:00') && !hasSentToday('daily_evening_recap')) {
-    Logger.log('[DISPATCH] Claiming slot & firing Daily Evening Transactions Recap (22:00 SGT)');
-    markSentToday('daily_evening_recap');
-    try {
-      sendDailyEveningRecap();
-      Logger.log('✅ [DISPATCH] Daily Evening Recap sent.');
-    } catch (err) {
-      clearSentToday('daily_evening_recap');
-      Logger.log(`❌ [DISPATCH] Error in sendDailyEveningRecap (slot cleared for retry): ${err.message}`);
-    }
-  }
-
-  // 4. Weekly Mandatory Expenses Audit on Mondays at 09:00 SGT
-  if (dayOfWeek === 'Mon' && isTimeInWindow('09:00') && !hasSentToday('weekly_mandatory_audit')) {
-    Logger.log('[DISPATCH] Claiming slot & firing Weekly Mandatory Expenses Audit (Monday 09:00 SGT)');
-    markSentToday('weekly_mandatory_audit');
-    try {
-      sendWeeklyMandatoryAudit();
-      Logger.log('✅ [DISPATCH] Weekly Mandatory Audit sent.');
-    } catch (err) {
-      clearSentToday('weekly_mandatory_audit');
-      Logger.log(`❌ [DISPATCH] Error in sendWeeklyMandatoryAudit (slot cleared for retry): ${err.message}`);
-    }
-  }
-
-  // 5. Monthly Retrospective Coach Brief on 1st of every month at 09:00 SGT
-  if (dayOfMonth === 1 && isTimeInWindow('09:00') && !hasSentToday('monthly_coach_retrospective')) {
-    Logger.log('[DISPATCH] Claiming slot & firing Monthly Retrospective Coach Brief (1st of month 09:00 SGT)');
-    markSentToday('monthly_coach_retrospective');
-    try {
-      sendMonthlyCoach();
-      Logger.log('✅ [DISPATCH] Monthly Retrospective Coach sent.');
-    } catch (err) {
-      clearSentToday('monthly_coach_retrospective');
-      Logger.log(`❌ [DISPATCH] Error in sendMonthlyCoach (slot cleared for retry): ${err.message}`);
-    }
+  // Month-end catch-up uses the original closing month, including after midnight.
+  const monthEndSlot = getMonthEndDeliverySlot(now);
+  if (monthEndSlot) {
+    try { runMonthEndJobs(monthEndSlot.reportDate, undefined, monthEndSlot); }
+    catch (error) { Logger.log('Month-end jobs failed: ' + error.message); }
   }
 
   // Drive statements share this heartbeat; no additional scheduler is needed.
@@ -425,10 +416,6 @@ function dispatch() {
     catch (error) { Logger.log('Statement inbox scan failed: ' + error.message); }
   }
 
-  // 6. Month-Rollover Jobs (Last day of month at 23:30 SGT) - placeholder for Stages 3/5/6
-  if (isLastDayOfMonth && isTimeInWindow('23:30')) {
-    Logger.log('⏭️ [DISPATCH] Month-rollover jobs not yet implemented (Stages 3/5/6). Skipping.');
-  }
 }
 
 /**

@@ -117,14 +117,17 @@ const SHEET_FACTS = {
    */
   getMonthTabName: function(input) {
     let monthNum;
+    let yearSuffix = '';
     if (typeof input === 'number') {
       monthNum = input;
     } else {
       const date = (input instanceof Date) ? input : new Date();
       const monthStr = Utilities.formatDate(date, 'Asia/Singapore', 'M');
       monthNum = parseInt(monthStr, 10);
+      yearSuffix = Utilities.formatDate(date, 'Asia/Singapore', 'yy');
     }
-    return this.MONTH_TAB_NAMES[monthNum] || '';
+    const name = this.MONTH_TAB_NAMES[monthNum] || '';
+    return yearSuffix ? name.replace(/'\d{2}$/, "'" + yearSuffix) : name;
   }
 };
 
@@ -306,25 +309,36 @@ function showReferenceTab() {
 /**
  * Returns the target Google Spreadsheet instance.
  * When useTest is true, opens and returns the sandbox spreadsheet defined by
- * SHEET_FACTS.TEST_SPREADSHEET_ID. Otherwise returns the active spreadsheet.
+ * SHEET_FACTS.TEST_SPREADSHEET_ID. Missing, inaccessible or mismatched sandbox
+ * targets throw before any sheet access; they never fall back to the active sheet.
+ * An explicit spreadsheet is validated without reopening it in sandbox mode.
  * 
  * @param {boolean} [useTest=false] - If true, returns the test sandbox spreadsheet.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSpreadsheet] - Already-resolved target.
  * @return {GoogleAppsScript.Spreadsheet.Spreadsheet} Target spreadsheet instance.
  */
-function getTargetSpreadsheet(useTest) {
+function getTargetSpreadsheet(useTest, optSpreadsheet) {
   if (useTest) {
     const testId = typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.TEST_SPREADSHEET_ID
       ? String(SHEET_FACTS.TEST_SPREADSHEET_ID).trim()
       : '';
-    if (testId) {
-      try {
-        return SpreadsheetApp.openById(testId);
-      } catch (err) {
-        Logger.log(`⚠️ Failed to open TEST_SPREADSHEET_ID ("${testId}"): ${err.message}. Falling back to active spreadsheet.`);
-      }
-    } else {
-      Logger.log('ℹ️ SHEET_FACTS.TEST_SPREADSHEET_ID is empty. Using active spreadsheet for test target.');
+    if (!testId) {
+      throw new Error('TEST_SPREADSHEET_ID is required for sandbox runs. No spreadsheet was modified.');
     }
+
+    let sandbox = optSpreadsheet;
+    if (!sandbox) {
+      try {
+        sandbox = SpreadsheetApp.openById(testId);
+      } catch (err) {
+        throw new Error(`Cannot open TEST_SPREADSHEET_ID for sandbox runs: ${err.message}. No spreadsheet was modified.`);
+      }
+    }
+
+    if (!sandbox || typeof sandbox.getId !== 'function' || sandbox.getId() !== testId) {
+      throw new Error('Sandbox spreadsheet identity does not match TEST_SPREADSHEET_ID. No spreadsheet was modified.');
+    }
+    return sandbox;
   }
-  return SpreadsheetApp.getActiveSpreadsheet();
+  return optSpreadsheet || SpreadsheetApp.getActiveSpreadsheet();
 }

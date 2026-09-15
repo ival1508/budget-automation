@@ -13,12 +13,13 @@ const WEB_APP_URL = 'PASTE_YOUR_DEPLOYED_EXEC_URL_HERE';
  * Run this function after deploying your web app as "Execute as: Me", "Who has access: Anyone".
  */
 function registerTelegramWebhook() {
-  const botToken = PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
-  const webhookSecret = PropertiesService.getScriptProperties().getProperty('WEBHOOK_SECRET');
+  const props = PropertiesService.getScriptProperties();
+  const botToken = props.getProperty('TELEGRAM_BOT_TOKEN');
 
   if (!botToken) {
     throw new Error('TELEGRAM_BOT_TOKEN missing in Script Properties.');
   }
+  const webhookSecret = getWebhookAccessPolicy(props).secret;
 
   if (WEB_APP_URL === 'PASTE_YOUR_DEPLOYED_EXEC_URL_HERE' || !WEB_APP_URL.startsWith('https://script.google.com/')) {
     throw new Error(
@@ -29,13 +30,10 @@ function registerTelegramWebhook() {
   }
 
   // Construct target URL including secret parameter (§5.2)
-  let targetUrl = WEB_APP_URL;
-  if (webhookSecret) {
-    targetUrl += (targetUrl.includes('?') ? '&' : '?') + 'secret=' + encodeURIComponent(webhookSecret);
-  }
+  const targetUrl = WEB_APP_URL + (WEB_APP_URL.includes('?') ? '&' : '?') + 'secret=' + encodeURIComponent(webhookSecret);
 
   const telegramUrl = `https://api.telegram.org/bot${botToken}/setWebhook?url=${encodeURIComponent(targetUrl)}`;
-  Logger.log(`Registering Webhook URL: ${targetUrl.replace(webhookSecret || '', '***SECRET***')}`);
+  Logger.log(`Registering Webhook URL: ${WEB_APP_URL.split('?')[0]} (secret included)`);
 
   const response = UrlFetchApp.fetch(telegramUrl, { muteHttpExceptions: true });
   const resultJson = JSON.parse(response.getContentText());

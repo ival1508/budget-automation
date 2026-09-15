@@ -29,6 +29,12 @@ const _testRunnerContext = {
   totalAssertionsFailed: 0
 };
 
+function test_transactionDerivedFormulaBuilders() {
+  assertEq(transactionAmountSgdFormula(12), '=IF(D12="";"";D12)', 'Transactions E formula follows D on the same row');
+  assertEq(transactionBucketFormula(12), '=IF(H12="";"";IFNA(VLOOKUP(H12;\'-\'!$B:$C;2;FALSE);"UNKNOWN"))',
+    'Transactions K formula looks up H in the reference taxonomy');
+}
+
 // ============================================================================
 // 1. ASSERTION HELPERS
 // ============================================================================
@@ -819,6 +825,60 @@ function test_findMissing() {
 // 6. STAGE 3D TESTS
 // ============================================================================
 
+function test_feeReversalPairing() {
+  const fee = { id: 'fee', date: '26.08.2026', amount: 100, type: 'Расходы',
+    merchant: 'LATE CHARGE FEE', account: 'Citibank CC', currency: 'SGD', card_last4: '4320', cardholder: 'Val' };
+  const credit = { ...fee, id: 'credit', amount: -100, type: 'Получение денег', merchant: 'AUTO LATE FEE REVERSAL' };
+  const remains = (rows, label) => {
+    for (const order of [rows, rows.slice().reverse()]) {
+      const result = filterNonSpend(order);
+      assertEq(result.proposals.map(row => row.id).sort(), rows.map(row => row.id).sort(), label + ': all occurrences remain reviewable');
+      assertEq(result.excluded.length, 0, label + ': no false net-zero exclusion');
+    }
+  };
+  const paired = (rows, label) => {
+    for (const order of [rows, rows.slice().reverse()]) {
+      const before = JSON.stringify(order);
+      const result = filterNonSpend(order);
+      assertEq(result.proposals.length, 0, label + ': corroborated pair cancels');
+      assertEq(result.excluded.map(row => row.id).sort(), rows.map(row => row.id).sort(), label + ': both exact occurrences excluded');
+      assertEq(result.excluded.every(row => row.reason === 'Fee and reversal, net zero'), true, label + ': net-zero reasons');
+      assertEq(JSON.stringify(order), before, label + ': input is unchanged');
+    }
+  };
+
+  remains([{ ...fee, date: '05.08.2026', merchant: 'SCHOOL TUITION FEE', account: 'DBS CC SGD' },
+    { ...credit, date: '25.08.2026', account: 'DBS CC SGD' }], 'Reported tuition/late-fee counterexample');
+  remains([{ ...fee, merchant: 'SCHOOL TUITION FEE' }, credit], 'Different fee identity on the same day');
+  remains([fee, { ...credit, amount: 100 }], 'Same signed amounts');
+  remains([fee, { ...credit, amount: -99.99 }], 'Amounts differ by one cent');
+  remains([fee, { ...credit, type: 'Расходы' }], 'Contradictory credit type');
+  remains([fee, { ...credit, account: 'DBS CC SGD' }], 'Different accounts');
+  remains([{ ...fee, account: '' }, { ...credit, account: '' }], 'Unknown account');
+  remains([fee, { ...credit, currency: 'USD' }], 'Different currencies');
+  remains([fee, { ...credit, card_last4: '7509', cardholder: 'Rita' }], 'Different cards');
+  remains([fee, { ...credit, cardholder: 'Rita' }], 'Conflicting named cardholders');
+  remains([fee, { ...credit, card_last4: '' }], 'Incomplete card identity');
+  remains([fee, { ...credit, date: '25.08.2026' }], 'Reversal precedes the fee');
+  remains([fee, { ...credit, date: '03.09.2026' }], 'Reversal more than seven days later');
+  remains([fee, { ...credit, date: '' }], 'Missing reversal date');
+  remains([fee, { ...credit, date: '31.02.2026' }], 'Invalid reversal date');
+  remains([fee, { ...fee, id: 'second-fee' }, credit], 'Two fees compete for one reversal');
+  remains([fee, credit, { ...credit, id: 'second-credit' }], 'Two reversals compete for one fee');
+  remains([{ ...fee, merchant: 'FEE' }, { ...credit, merchant: 'FEE REVERSAL' }], 'Unspecified fee identity');
+  remains([{ ...fee, merchant: 'COFFEE' }, { ...credit, merchant: 'COFFEE REVERSAL' }], 'Fee substring inside a merchant name');
+  remains([credit], 'Standalone fee reversal');
+  remains([{ ...credit, merchant: 'ANNUAL FEE WAIVER' }], 'Standalone fee waiver');
+
+  paired([fee, credit], 'Known Citi late-fee pair');
+  paired([fee, { ...credit, date: '02.09.2026' }], 'Seven-day boundary across month end');
+  paired([{ ...fee, merchant: 'ANNUAL FEE' }, { ...credit, merchant: 'AUTO ANNUAL FEE WAIVER' }], 'Exact annual-fee waiver');
+  paired([fee, { ...credit, account: '  citibank cc  ', currency: 'sgd', cardholder: 'val' }], 'Account/currency/holder formatting');
+  const normalized = normalizeRows([fee, credit]);
+  normalized.forEach((row, index) => { row.id = index === 0 ? 'fee' : 'credit'; });
+  paired(normalized, 'Normalized statement rows retain their original fee identity');
+}
+
 /**
  * STAGE 3D TEST: Non-Spend Line Filtering Verification.
  * 
@@ -826,7 +886,7 @@ function test_findMissing() {
  * 1. Excludes credit card repayment: DBS "BILL PAYMENT - DBS INTERNET/WIRELESS" S$12,969.24 (Credit) -> 'CC payoff'
  * 2. Excludes refund / transit adjustment: DBS "SPL AUTO TOPUP (ABT/RE)" S$20.19 (Credit) -> 'Refund'
  * 3. Excludes transfer to self: Citi "MONEYSEND VALERIY IVANOV" +483.23 -> 'Transfer to self'
- * 4. Excludes net-zero fee pair: Citi "LATE CHARGE FEE" -100.00 & "AUTO LATE FEE REVERSAL" +100.00 -> 'Fee and reversal, net zero'
+ * 4. Excludes net-zero fee pair: Citi "LATE CHARGE FEE" +100.00 & "AUTO LATE FEE REVERSAL" -100.00 -> 'Fee and reversal, net zero'
  * 5. Passes through genuine expenses: SIMPLYGO APP S$30.00 and SHELL TELOK BLANGAH S$207.32 -> proposals
  * 6. Passes through trap cases (Choice 1 Guard Rule):
  *    - "BILL PAYMENT - SP SERVICES" +120.00 Расходы -> proposals
@@ -1261,9 +1321,7 @@ function test_commitStaged() {
   Logger.log('       TEST: test_commitStaged() EXECUTION');
   Logger.log('====================================================\n');
 
-  const ss = (typeof getTargetSpreadsheet === 'function')
-    ? getTargetSpreadsheet(true)
-    : SpreadsheetApp.getActiveSpreadsheet();
+  const ss = getTargetSpreadsheet(true);
 
   if (!ss) {
     throw new Error('test_commitStaged: No sandbox spreadsheet available.');
@@ -1348,7 +1406,7 @@ function test_commitStaged() {
     const transLastRowBeforeStep1 = transSheet.getLastRow();
     Logger.log(`[Step 1] Initial Transactions.getLastRow(): ${transLastRowBeforeStep1}`);
 
-    const step1Result = commitStaged(true, true); // useTestSheet=true, optDryRun=true
+    const step1Result = commitStaged(true, true, ss); // Reuse the verified sandbox.
     Logger.log(`[Step 1 DRY_RUN] Result: committed=${step1Result.committedCount}, skipped=${step1Result.skippedCount}, dryRun=${step1Result.dryRun}`);
     Logger.log('[Step 1 DRY_RUN] Exact rows that would be appended:');
     (step1Result.writtenRows || []).forEach((r, idx) => {
@@ -1376,7 +1434,7 @@ function test_commitStaged() {
     // --------------------------------------------------------------------------
     Logger.log('\n--- Step 2: DRY_RUN = false against the SANDBOX ---');
     transLastRowBeforeStep2 = transSheet.getLastRow();
-    const step2Result = commitStaged(true, false); // useTestSheet=true, optDryRun=false
+    const step2Result = commitStaged(true, false, ss); // Reuse the verified sandbox.
     Logger.log(`[Step 2 NON-DRY-RUN] Result: committed=${step2Result.committedCount}, skipped=${step2Result.skippedCount}, dryRun=${step2Result.dryRun}`);
 
     assertEq(step2Result.dryRun, false, 'Step 2: dryRun flag is false');
@@ -1387,6 +1445,8 @@ function test_commitStaged() {
     const newRow1Idx = transLastRowBeforeStep2 + 1;
     const newRows = transSheet.getRange(newRow1Idx, 1, 2, 11).getValues();
     const newFormulas = transSheet.getRange(newRow1Idx, 6, 2, 2).getFormulas();
+    const newAmountFormulas = transSheet.getRange(newRow1Idx, 5, 2, 1).getFormulas();
+    const newBucketFormulas = transSheet.getRange(newRow1Idx, 11, 2, 1).getFormulas();
 
     // Verification 2.1: Row 1 (Expense: simplygo app S$30.00)
     const expRow = newRows[0];
@@ -1399,6 +1459,8 @@ function test_commitStaged() {
     assertEq(expRow[8], 'SimplyGo App', 'Step 2: Expense merchant is clean display name "SimplyGo App"');
     assertEq(expRow[9], '', 'Step 2: J (Notes) is EMPTY');
     assertEq(expRow[10], 'Needs', 'Step 2: K holds the bucket ("Needs")');
+    assertEq(newAmountFormulas[0][0], transactionAmountSgdFormula(newRow1Idx), 'Step 2: Expense E derives from D');
+    assertEq(newBucketFormulas[0][0], transactionBucketFormula(newRow1Idx), 'Step 2: Expense K derives from H and the reference tab');
 
     // Formulas present on Expense
     assertEq(newFormulas[0][0].length > 0, true, 'Step 2: Expense has formula in F (На счете до)');
@@ -1413,6 +1475,8 @@ function test_commitStaged() {
     assertEq(creditRow[8], 'Allianz Reimbursement', 'Step 2: Credit merchant is clean display name "Allianz Reimbursement"');
     assertEq(creditRow[9], '', 'Step 2: Credit J (Notes) is EMPTY');
     assertEq(creditRow[10], 'Needs', 'Step 2: Credit K holds the bucket ("Needs")');
+    assertEq(newAmountFormulas[1][0], transactionAmountSgdFormula(newRow1Idx + 1), 'Step 2: Credit E derives from D');
+    assertEq(newBucketFormulas[1][0], transactionBucketFormula(newRow1Idx + 1), 'Step 2: Credit K derives from H and the reference tab');
 
     // Formulas present on Credit
     assertEq(newFormulas[1][0].length > 0, true, 'Step 2: Credit has formula in F (На счете до)');
@@ -1437,7 +1501,7 @@ function test_commitStaged() {
     // --------------------------------------------------------------------------
     Logger.log('\n--- Step 3: Re-run against the sandbox (Idempotency) ---');
     const transLastRowBeforeStep3 = transSheet.getLastRow();
-    const step3Result = commitStaged(true, false);
+    const step3Result = commitStaged(true, false, ss);
     Logger.log(`[Step 3 IDEMPOTENCY] Result: committed=${step3Result.committedCount}, skipped=${step3Result.skippedCount}`);
 
     assertEq(step3Result.committedCount, 0, 'Step 3: Idempotency re-run committed ZERO rows');
@@ -1447,11 +1511,7 @@ function test_commitStaged() {
     // STEP 4: Live Sheet Safety Gate
     // --------------------------------------------------------------------------
     Logger.log('\n--- Step 4: Live Sheet Safety Gate ---');
-    const activeSs = SpreadsheetApp.getActiveSpreadsheet();
-    const sandboxId = typeof SHEET_FACTS !== 'undefined' ? SHEET_FACTS.TEST_SPREADSHEET_ID : '';
-    if (activeSs && sandboxId && activeSs.getId() !== sandboxId) {
-      Logger.log('✅ PASS: Active sheet is NOT sandbox; confirmed live sheet was not modified during test.');
-    }
+    assertEq(ss.getId(), String(SHEET_FACTS.TEST_SPREADSHEET_ID).trim(), 'All commit steps targeted the verified sandbox');
     Logger.log('✅ PASS: All 4 steps of Stage 3F testing sequence verified on sandbox.');
   } finally {
     // --------------------------------------------------------------------------
@@ -2278,13 +2338,14 @@ function test_dbsMultiSectionAndCardholderMatching() {
   assertEq(gpDryTxn[1], 'DBS CC SGD', 'GP Col B (Счёт) is "DBS CC SGD"');
   assertEq(gpDryTxn[2], 'Расходы', 'GP Col C (Тип) is "Расходы"');
   assertClose(Number(gpDryTxn[3]), 1.85, 0.01, 'GP Col D (Сумма) is 1.85');
-  assertClose(Number(gpDryTxn[4]), 1.85, 0.01, 'GP Col E (Сумма в SGD) is 1.85');
+  assertEq(/^=IF\(D\d+="";"";D\d+\)$/.test(gpDryTxn[4]), true, 'GP Col E (Сумма в SGD) is a row formula from D');
   assertEq(gpDryTxn[5], '', 'GP Col F (До) is empty formula placeholder');
   assertEq(gpDryTxn[6], '', 'GP Col G (После) is empty formula placeholder');
   assertEq(Boolean(gpDryTxn[7]), true, 'GP Col H (Категория) is populated');
   assertEq(gpDryTxn[8], 'SimplyGo MRT', 'GP Col I (Где) is "SimplyGo MRT"');
   assertEq(gpDryTxn[9], 'Grandparents', 'GP Col J (Notes) is TAGGED WITH "Grandparents"');
-  assertEq(Boolean(gpDryTxn[10]), true, 'GP Col K (50/30/20) is populated');
+  assertEq(/^=IF\(H\d+="";"";IFNA\(VLOOKUP\(H\d+;'-'!\$B:\$C;2;FALSE\);"UNKNOWN"\)\)$/.test(gpDryTxn[10]), true,
+    'GP Col K (50/30/20) is a category lookup formula');
 
   // Val and Rita Column J confirmation:
   assertEq(valDryTxn[9], '', 'Val Col J (Notes) is CONFIRMED EMPTY ""');

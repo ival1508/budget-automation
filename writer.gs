@@ -31,16 +31,87 @@ function withBudgetWriteLock(operation) {
   }
 }
 
+/** Build the row-local formula for Transactions E (Сумма в SGD). */
+function transactionAmountSgdFormula(rowNumber) {
+  const row = Math.max(2, Number(rowNumber) || 2);
+  return `=IF(D${row}="";"";D${row})`;
+}
+
+/** Build the row-local formula for Transactions K (50/30/20). */
+function transactionBucketFormula(rowNumber) {
+  const row = Math.max(2, Number(rowNumber) || 2);
+  return `=IF(H${row}="";"";IFNA(VLOOKUP(H${row};'-'!$B:$C;2;FALSE);"UNKNOWN"))`;
+}
+
+/**
+ * Replace derived values in existing Transactions rows with formulas.
+ * The header and reference-tab checks run before either destination column changes.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
+ * @return {Object} Result summary { updatedRows }.
+ */
+function repairTransactionDerivedFormulas(ss) {
+  return withBudgetWriteLock(() => {
+    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    if (!spreadsheet) throw new Error('No active spreadsheet found.');
+
+    const sheet = getTransactionsSheet(spreadsheet);
+    const headers = sheet.getRange(1, 1, 1, 11).getDisplayValues()[0]
+      .map(value => String(value || '').trim().toLowerCase());
+    const validHeader = (actual, accepted) => accepted.indexOf(actual) !== -1;
+    if (!validHeader(headers[3], ['сумма', 'amount']) ||
+        !validHeader(headers[4], ['сумма в sgd', 'amount sgd', 'sum sgd']) ||
+        !validHeader(headers[7], ['категория', 'category']) ||
+        !headers[10].startsWith('50/30/20')) {
+      throw new Error('Transactions layout is unexpected. Expected D=Сумма, E=Сумма в SGD, H=Категория and K=50/30/20. No formulas were changed.');
+    }
+
+    const referenceSheet = spreadsheet.getSheetByName('-');
+    if (!referenceSheet || referenceSheet.getLastRow() < 1 || referenceSheet.getLastColumn() < 3) {
+      throw new Error('Reference tab "-" with category/bucket values in B:C is required. No formulas were changed.');
+    }
+    const referenceValues = referenceSheet.getRange(1, 2, referenceSheet.getLastRow(), 2).getDisplayValues();
+    const hasReferencePair = referenceValues.some(row => {
+      const category = String(row[0] || '').trim();
+      const bucket = String(row[1] || '').trim();
+      return category && bucket && ['категория', 'category'].indexOf(category.toLowerCase()) === -1;
+    });
+    if (!hasReferencePair) {
+      throw new Error('Reference tab "-" has no category/bucket pairs in B:C. No formulas were changed.');
+    }
+
+    const rowCount = Math.max(0, sheet.getLastRow() - 1);
+    if (rowCount > 0) {
+      const amountFormulas = [];
+      const bucketFormulas = [];
+      for (let i = 0; i < rowCount; i++) {
+        const rowNumber = i + 2;
+        amountFormulas.push([transactionAmountSgdFormula(rowNumber)]);
+        bucketFormulas.push([transactionBucketFormula(rowNumber)]);
+      }
+      sheet.getRange(2, 5, rowCount, 1).setFormulas(amountFormulas);
+      sheet.getRange(2, 11, rowCount, 1).setFormulas(bucketFormulas);
+      SpreadsheetApp.flush();
+    }
+
+    const message = `Repaired Transactions formulas in E and K for ${rowCount} row(s).`;
+    Logger.log(message);
+    if (typeof spreadsheet.toast === 'function') spreadsheet.toast(message, 'Budget', 6);
+    return { updatedRows: rowCount };
+  });
+}
+
 /**
  * Appends approved transactions to the 'Transactions' sheet.
  * 
  * Enforces key invariants:
- * 1. Batch writes input columns (A-E, H-J) in a single setValues operation (§6.6).
- * 2. Writes raw SGD numerical amount to BOTH column D (Сумма) and column E (Сумма в SGD) (§4.3, §6.6).
- * 3. Does NOT compute running balances in code. Copies F:G per-cell formulas down from row above (§4.3, §6.6).
- * 4. Checks if account in column B has ever appeared in the sheet before.
+ * 1. Batch writes columns A-K in a single setValues operation (§6.6).
+ * 2. Writes the raw SGD number to D and a row-local =D formula to E.
+ * 3. Writes a row-local category lookup formula to K using the "-" tab B:C taxonomy.
+ * 4. Does NOT compute running balances in code. Copies F:G per-cell formulas down from row above (§4.3, §6.6).
+ * 5. Checks if account in column B has ever appeared in the sheet before.
  *    For the VERY FIRST row of a new account, writes literal `0` into column F instead of copying formula (§6.6).
- * 5. Idempotent: Skips rows whose dedupe_key already exists in the sheet (§6.6, §6.7).
+ * 6. Idempotent: Skips rows whose dedupe_key already exists in the sheet (§6.6, §6.7).
  * 
  * @param {Array<Object>} transactionsArray - Array of enriched transaction objects.
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
@@ -118,7 +189,7 @@ function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {
   }
 
   // 3. Prepare 2D Array for Input Columns (§4.1, §6.6)
-  // Columns: A:Дата, B:Счёт, C:Тип, D:Сумма, E:Сумма в SGD, F:BalanceBefore, G:BalanceAfter, H:Категория, I:Где, J:50/30/20
+  // Columns: A:Дата, B:Счёт, C:Тип, D:Сумма, E:Сумма в SGD, F:G balances, H:Категория, I:Где, J:Notes, K:50/30/20
   const rows2D = [];
   const startRow = lastRow + 1;
   const newAccountsInBatch = [];
@@ -126,8 +197,9 @@ function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {
   for (let i = 0; i < toAppend.length; i++) {
     const txn = toAppend[i];
     
-    // Invariant §4.3: Column D & E both receive raw numerical SGD amount
+    // Column D is the single amount value; E and K derive from D and H.
     const sgdAmount = Number(txn.amount_sgd !== undefined && txn.amount_sgd !== null ? txn.amount_sgd : txn.amount) || 0;
+    const rowNumber = startRow + i;
 
     // Track newly seen accounts to apply initial opening balance seed (§6.6)
     const isNewAccount = !seenAccounts.has(txn.account);
@@ -143,13 +215,13 @@ function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {
       txn.account || '',          // B: Счёт
       txn.type || 'Расходы',      // C: Тип
       sgdAmount,                  // D: Сумма (raw number)
-      sgdAmount,                  // E: Сумма в SGD (raw number)
+      transactionAmountSgdFormula(rowNumber), // E: Сумма в SGD (=D for this row)
       '',                         // F: На счете до (formula / seed placeholder)
       '',                         // G: На счете после (formula placeholder)
       txn.category || 'Другое',   // H: Категория
       txn.where || '',            // I: Где / Merchant
       notesText,                  // J: Notes & Tracking Flags
-      txn.bucket || 'Wants'       // K: 50/30/20 Category
+      transactionBucketFormula(rowNumber) // K: 50/30/20 derived from H and "-"!B:C
     ]);
   }
 

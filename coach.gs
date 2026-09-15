@@ -12,14 +12,17 @@
  * 
  * @param {string} [period='daily'] - Period type ('daily' or 'monthly').
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSs] - Optional Spreadsheet instance.
+ * @param {Date} [optReportDate] - Daily snapshot date or monthly window; monthly defaults to getMonthlyReportDate().
  * @return {Object} Structured JSON payload for Gemini coach model.
  */
-function buildCoachPayload(period, optSs) {
+function buildCoachPayload(period, optSs, optReportDate) {
   const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
   const p = period || 'daily';
+  if (p === 'monthly') return buildMonthlyCoachPayload(ss, optReportDate || getMonthlyReportDate());
+  const reportDate = optReportDate || new Date();
   
   // Single source for all daily budget & pacing metrics
-  const pacingData = typeof getDailyPacing === 'function' ? getDailyPacing(null, ss) : {
+  const pacingData = typeof getDailyPacing === 'function' ? getDailyPacing(reportDate, ss) : {
     K_cumulative_today: 0,
     L_saldo_yesterday: 0,
     D17_flat_daily: 0,
@@ -32,8 +35,8 @@ function buildCoachPayload(period, optSs) {
     return { period: p, error: pacingData.error, month_tab: pacingData.month_tab || '' };
   }
 
-  const pacing = typeof get503020Status === 'function' ? get503020Status(ss) : {};
-  const todaySpend = typeof getTodaySpend === 'function' ? getTodaySpend(null, ss) : 0;
+  const pacing = typeof get503020Status === 'function' ? get503020Status(ss, false, reportDate) : {};
+  const todaySpend = typeof getTodaySpend === 'function' ? getTodaySpend(reportDate, ss) : 0;
 
   const cumulativeToday = Number(Number(pacingData.K_cumulative_today || 0).toFixed(2));
   const realisticDaily = Number(Number(pacingData.D19_realistic_daily || 0).toFixed(2));
@@ -58,7 +61,7 @@ function buildCoachPayload(period, optSs) {
   };
 
   // Compute current-month category spend splits from Transactions (discretionary vs committed)
-  const splits = getCurrentMonthCategorySplits(ss);
+  const splits = getCurrentMonthCategorySplits(ss, reportDate);
 
   // Pool ALL sub_categories across ALL buckets from get503020Status
   const allSubCategories = [
@@ -126,7 +129,7 @@ function buildCoachPayload(period, optSs) {
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss
  * @return {Object<string, { discretionary: number, committed: number }>}
  */
-function getCurrentMonthCategorySplits(ss) {
+function getCurrentMonthCategorySplits(ss, optDate, optStrict) {
   const splits = {};
   try {
     const transTabName = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.CORE_TABS) ? SHEET_FACTS.CORE_TABS.TRANSACTIONS : 'Transactions';
@@ -136,8 +139,8 @@ function getCurrentMonthCategorySplits(ss) {
     const lastRow = sheet.getLastRow();
     if (lastRow <= 1) return splits;
 
-    const tz = ss.getSpreadsheetTimeZone() || 'Asia/Singapore';
-    const now = new Date();
+    const tz = optStrict ? 'Asia/Singapore' : (ss.getSpreadsheetTimeZone() || 'Asia/Singapore');
+    const now = optDate || new Date();
     const currentMonthYearStr = Utilities.formatDate(now, tz, 'MM.yyyy');
 
     const numCols = sheet.getLastColumn();
@@ -171,12 +174,13 @@ function getCurrentMonthCategorySplits(ss) {
       if (!dateMatch) continue;
 
       const typeColC = String(row[2] || '').trim().replace(/\t/g, '');
+      if (optStrict && typeColC !== 'Расходы' && typeColC !== 'Обязательные расходы') continue;
       const catKey = category.toLowerCase();
       if (!splits[catKey]) {
         splits[catKey] = { discretionary: 0, committed: 0 };
       }
 
-      const amount = (typeof parseAmountNumber === 'function')
+      const amount = optStrict ? readCoachTransactionAmount(row, disp, true) : (typeof parseAmountNumber === 'function')
         ? (parseAmountNumber(row[4], disp[4]) || parseAmountNumber(row[3], disp[3]) || 0)
         : (parseFloat(row[4]) || parseFloat(row[3]) || 0);
 
@@ -187,9 +191,97 @@ function getCurrentMonthCategorySplits(ss) {
       }
     }
   } catch (e) {
+    if (optStrict) throw e;
     Logger.log(`Error in getCurrentMonthCategorySplits: ${e.message}`);
   }
   return splits;
+}
+
+/** Manual retrospectives use the latest completed month; late month-end uses today. */
+function getMonthlyReportDate(optNow) {
+  const now = optNow || new Date();
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new Error('A valid monthly report date is required.');
+  const year = Number(Utilities.formatDate(now, 'Asia/Singapore', 'yyyy'));
+  const month = Number(Utilities.formatDate(now, 'Asia/Singapore', 'M'));
+  const day = Number(Utilities.formatDate(now, 'Asia/Singapore', 'd'));
+  const minutes = Number(Utilities.formatDate(now, 'Asia/Singapore', 'H')) * 60 +
+    Number(Utilities.formatDate(now, 'Asia/Singapore', 'm'));
+  if (day === new Date(Date.UTC(year, month, 0)).getUTCDate() && minutes >= 23 * 60 + 30) {
+    return new Date(now.getTime());
+  }
+  return new Date(Date.UTC(year, month - 1, 0, 12));
+}
+
+/** Payment completion is deterministic; this summary does not infer due dates. */
+function summarizeMonthlyMandatory(expected, logged) {
+  const totals = {};
+  logged.forEach(item => {
+    const key = String(item.category || '').trim().toLowerCase();
+    const amount = Number(item.amount !== undefined ? item.amount : item.actual_amount);
+    if (!Number.isFinite(amount)) throw new Error('Invalid logged mandatory amount.');
+    totals[key] = (totals[key] || 0) + amount;
+  });
+  const summary = { paid: 0, unpaid: 0, excluded: 0, items: [] };
+  expected.forEach(item => {
+    const name = String(item.label || item.name || '').trim();
+    const planned = Number(item.amount !== undefined ? item.amount : item.planned_amount);
+    if (!Number.isFinite(planned) || planned < 0) throw new Error('Invalid planned mandatory amount.');
+    if (planned === 0 || (SHEET_FACTS.NON_LEDGER_MANDATORY || []).includes(name)) {
+      summary.excluded++; return;
+    }
+    const actual = Number((totals[name.toLowerCase()] || 0).toFixed(2));
+    const paid = item.paidFlag === true || item.is_checked === true || actual >= planned - 0.005;
+    summary[paid ? 'paid' : 'unpaid']++;
+    summary.items.push({ name: name, planned: planned, actual: actual,
+      status: paid ? 'paid' : (actual > 0 ? 'partial' : 'unpaid') });
+  });
+  return summary;
+}
+
+/** Assemble only the selected month's numbers; never label daily pacing as monthly results. */
+function buildMonthlyCoachPayload(ss, reportDate) {
+  if (!(reportDate instanceof Date) || !Number.isFinite(reportDate.getTime())) throw new Error('A valid monthly report date is required.');
+  const monthTab = getCurrentMonthTabName(reportDate);
+  const reportMonth = Utilities.formatDate(reportDate, 'Asia/Singapore', 'yyyy-MM');
+  try {
+    if (!ss || !ss.getSheetByName(monthTab)) return { period: 'monthly', error: 'missing_month', month_tab: monthTab, report_month: reportMonth };
+    if (!ss.getSheetByName('Transactions')) throw new Error('Transactions is missing.');
+    const pacing = get503020Status(ss, false, reportDate, true);
+    if (pacing.error || !pacing.target_header) throw new Error(pacing.message || pacing.error || 'Budget targets are unavailable.');
+    const expected = getMandatoryExpenses(ss, reportDate, true);
+    if (!expected.length) throw new Error('Mandatory plan is unavailable.');
+    const logged = getLoggedMandatoryThisMonth(ss, reportDate, true);
+    const velocity = getCategoryVelocity(ss, reportDate, true);
+    const splits = getCurrentMonthCategorySplits(ss, reportDate, true);
+    const buckets = {};
+    ['needs', 'wants', 'savings'].forEach(key => {
+      const source = pacing[key];
+      if (!source || !Number.isFinite(source.actual) || !Number.isFinite(source.target) ||
+          source.target_percent === undefined) throw new Error('Monthly bucket totals/targets are unavailable.');
+      buckets[key] = { actual: source.actual, target: source.target,
+        actual_percent: source.total_percent, target_percent: source.target_percent };
+    });
+    const volatile = ['Рестораны', 'Развлечения', 'Дом', 'Подарки'].map(name => ({
+      name: name, actual: Number(((velocity[name] || {}).total || 0).toFixed(2))
+    }));
+    const categories = [...(pacing.needs.sub_categories || []), ...(pacing.wants.sub_categories || [])]
+      .map(category => ({ ...category, over_by: Number((category.actual - category.target).toFixed(2)),
+        discretionary_spend: Number(((splits[category.name.toLowerCase()] || {}).discretionary || 0).toFixed(2)),
+        committed_spend: Number(((splits[category.name.toLowerCase()] || {}).committed || 0).toFixed(2)) }))
+      .filter(category => category.actual > 0 && category.target > 0 && category.discretionary_spend > 0)
+      .sort((a, b) => b.over_by - a.over_by || b.actual - a.actual);
+    return { period: 'monthly', report_month: reportMonth, month_tab: monthTab,
+      report_start: '01.' + Utilities.formatDate(reportDate, 'Asia/Singapore', 'MM.yyyy'),
+      report_end: Utilities.formatDate(new Date(Date.UTC(
+        Number(Utilities.formatDate(reportDate, 'Asia/Singapore', 'yyyy')),
+        Number(Utilities.formatDate(reportDate, 'Asia/Singapore', 'M')), 0, 12)), 'Asia/Singapore', 'dd.MM.yyyy'),
+      buckets: buckets, target_header: pacing.target_header, volatile_categories: volatile,
+      category_focus: categories.length ? categories[0] : null,
+      mandatory_summary: summarizeMonthlyMandatory(expected, logged) };
+  } catch (error) {
+    return { period: 'monthly', error: 'monthly_read_error', message: error.message,
+      month_tab: monthTab, report_month: reportMonth };
+  }
 }
 
 /**
@@ -201,13 +293,19 @@ function getCurrentMonthCategorySplits(ss) {
  */
 function generateCoachBrief(payload) {
   const ctx = payload || buildCoachPayload('daily');
-  if (ctx.error) return buildFallbackCoachBrief(ctx);
+  const fallback = ctx.period === 'monthly' ? buildFallbackMonthlyBrief : buildFallbackCoachBrief;
+  if (ctx.error) return fallback(ctx);
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   if (!apiKey) {
+    if (ctx.period === 'monthly') return fallback(ctx);
     throw new Error('GEMINI_API_KEY property is missing in Script Properties.');
   }
 
-  const systemInstruction = `You are a sharp, warm financial coach for a Singapore family. From this JSON write a concise Telegram brief formatted as clean bullet points. At most 3 short sentences total.
+  const systemInstruction = ctx.period === 'monthly' ? `You are a sharp, warm financial coach for a Singapore family. Write a month-in-review using only this monthly JSON, in at most four short conversational sentences.
+Lead with the month_tab and compare the actual/target amounts and percentages for Needs, Wants and Savings. Include the mandatory_summary paid and unpaid counts; partial items are unpaid, and excluded planning lines are not payments. Do not call unpaid items late: no due dates are supplied.
+For each bucket use "Needs S$actual (actual_percent) vs S$target (target_percent)" (and likewise Wants and Savings). Use "N paid, N unpaid" for completion counts.
+Reference at most one category, using category_focus, and end with one concrete focus for next month. Do not advise cutting committed costs. Carry target_header as a short separate label so the target basis remains visible.
+USE ONLY numbers supplied in this payload. Never calculate a total from bucket amounts, invent a cap, infer a month-over-month trend, or quote daily pacing. All money must use S$; percentages must use %. No tables, bullet lists, or headings; use only <b> and <i> for Telegram HTML.` : `You are a sharp, warm financial coach for a Singapore family. From this JSON write a concise Telegram brief formatted as clean bullet points. At most 3 short sentences total.
 
 Structure as bullet points:
 • <b>Pace:</b> State the reality check on pace and allowance:
@@ -267,17 +365,17 @@ Rules:
       let cleaned = textOutput.trim();
       // Ensure any markdown **bold** is converted to <b>bold</b> for Telegram HTML
       cleaned = cleaned.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
-      if (!coachMoneyIsGrounded(cleaned, ctx)) {
-        Logger.log('Coach returned a money amount absent from the payload; using grounded fallback.');
-        return buildFallbackCoachBrief(ctx);
+      if (!coachMoneyIsGrounded(cleaned, ctx) || (ctx.period === 'monthly' && !monthlyCoachBriefIsGrounded(cleaned, ctx))) {
+        Logger.log('Coach returned ungrounded figures or an invalid monthly brief; using grounded fallback.');
+        return fallback(ctx);
       }
       return cleaned;
     }
     Logger.log('Empty response from Gemini, using fallback brief.');
-    return buildFallbackCoachBrief(ctx);
+    return fallback(ctx);
   } catch (err) {
     Logger.log(`Gemini Coach invocation failed: ${err.message}. Using fallback brief.`);
-    return buildFallbackCoachBrief(ctx);
+    return fallback(ctx);
   }
 }
 
@@ -299,6 +397,11 @@ function coachMoneyIsGrounded(text, payload) {
   }
   ['cumulative_today', 'realistic_daily', 'flat_daily', 'spend_today'].forEach(key => add(payload[key]));
   Object.values(payload.buckets || {}).forEach(bucket => { add(bucket.actual); add(bucket.target); });
+  (payload.volatile_categories || []).forEach(category => add(category.actual));
+  if (payload.category_focus) {
+    ['actual', 'target', 'over_by', 'discretionary_spend', 'committed_spend'].forEach(key => add(payload.category_focus[key]));
+  }
+  ((payload.mandatory_summary || {}).items || []).forEach(item => { add(item.planned); add(item.actual); });
   (payload.categories_over_target || []).forEach(category => {
     ['actual', 'target', 'over_by', 'discretionary_spend', 'committed_spend'].forEach(key => add(category[key]));
   });
@@ -308,6 +411,54 @@ function coachMoneyIsGrounded(text, payload) {
     if (!allowed.has(Number(match[1].replace(/,/g, '')))) return false;
   }
   return true;
+}
+
+/** Monthly prose must preserve the reporting identity, percentages and payment counts. */
+function monthlyCoachBriefIsGrounded(text, payload) {
+  if (/<\/?(?!b\b|i\b)[a-z][^>]*>/i.test(text) || /[•|]|^\s*[-#]/m.test(text)) return false;
+  let plain = String(text).replace(/<[^>]*>/g, '');
+  if (!plain.includes(payload.month_tab) || !plain.includes(payload.target_header)) return false;
+  plain = plain.split(payload.month_tab).join('').split(payload.target_header).join('');
+  if (plain.length > 1600 || (plain.match(/[.!?](?=\s|$)/g) || []).length > 4) return false;
+  if (/total (?:monthly )?(?:spend|budget)|volatile|month.over.month|daily (?:pace|allowance)|\blate\b|\boverdue\b/i.test(plain)) return false;
+  if (/(?:^|[^S])\$|\bSGD\b/i.test(plain)) return false;
+  // Verify the three comparisons against their own source fields, including their labels.
+  for (const key of ['needs', 'wants', 'savings']) {
+    const comparison = new RegExp('\\b' + key + '\\b\\s*:?\\s*S\\$\\s*(-?\\d[\\d,]*(?:\\.\\d+)?)\\s*\\(([-\\d.,]+)%\\)\\s*vs\\.?\\s*S\\$\\s*(-?\\d[\\d,]*(?:\\.\\d+)?)\\s*\\(([-\\d.,]+)%\\)', 'i');
+    const match = plain.match(comparison), bucket = payload.buckets[key];
+    if (!match) return false;
+    const sameMoney = (text, value) => [Number(value.toFixed(2)), Math.round(value)].includes(Number(text.replace(/,/g, '')));
+    const percent = value => Number(String(value).replace('%', '').replace(',', '.'));
+    if (!sameMoney(match[1], bucket.actual) || !sameMoney(match[3], bucket.target) ||
+        percent(match[2]) !== percent(bucket.actual_percent) || percent(match[4]) !== percent(bucket.target_percent)) return false;
+  }
+  const percentages = new Set();
+  Object.values(payload.buckets).forEach(bucket => {
+    [bucket.actual_percent, bucket.target_percent].forEach(value => {
+      percentages.add(Number(String(value).replace(/%/g, '').replace(',', '.')));
+    });
+  });
+  let valid = true;
+  plain = plain.replace(/(\d+(?:[.,]\d+)?)\s*%/g, (_, value) => {
+    if (!percentages.has(Number(value.replace(',', '.')))) valid = false;
+    return '';
+  });
+  plain = plain.replace(/S\$\s*-?\d[\d,]*(?:\.\d+)?/g, '');
+  const counts = payload.mandatory_summary;
+  // Require unambiguous completion counts, rather than merely whitelisting any small integer.
+  for (const label of ['paid', 'unpaid']) {
+    const expected = counts[label];
+    const pattern = new RegExp('\\b' + expected + '\\s+' + label + '\\b|\\b' + label + '\\s*:\\s*' + expected + '\\b', 'i');
+    if (!pattern.test(plain)) return false;
+  }
+  for (const number of plain.matchAll(/\d+(?:[.,]\d+)?/g)) {
+    if (![counts.paid, counts.unpaid, counts.excluded].includes(Number(number[0]))) valid = false;
+  }
+  return valid;
+}
+
+function escapeCoachHtml(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 /**
@@ -521,8 +672,8 @@ function testSendMonthlyCoach() {
   Logger.log('=== Running testSendMonthlyCoach() ===');
   
   // 1. Fetch live context
-  const context = getBudgetCoachContext();
-  Logger.log('Monthly Context Aggregated: ' + JSON.stringify(context.pacing_50_30_20, null, 2));
+  const context = buildCoachPayload('monthly');
+  Logger.log('Monthly Context Aggregated: ' + JSON.stringify(context, null, 2));
   
   // 2. Generate Brief via Gemini
   let briefText = '';
@@ -664,70 +815,9 @@ function buildFallbackMandatoryReport(expected, logged) {
  * @return {string} Formatted Telegram HTML brief.
  */
 function generateMonthlyCoachBrief(contextJSON) {
-  const ctx = contextJSON || getBudgetCoachContext();
-  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY property is missing in Script Properties.');
-  }
-
-  const systemInstruction = `You are an elite, highly strategic financial coach for a family in Singapore. Analyze their Google Sheets budget context (specifically the 50/30/20 pacing data, monthly tab name, and recent trends) and generate an End-of-Month Retrospective Brief for Telegram.
-
-CRITICAL FORMATTING & CONTENT RULES:
-1. Strict Telegram HTML: Use ONLY Telegram-supported HTML tags (e.g., <b>, <i>, <code>). Do NOT use markdown syntax (no **, ##, or \`\`\`) and do NOT use markdown or HTML tables.
-2. Structure: Format the brief into clean, bulleted sections with emojis.
-3. Content Requirements:
-   - Total Monthly Overview: State total monthly spend vs. budget from the 50/30/20 data or daily status.
-   - Final 50/30/20 Ratios: Display actual percentages and spend amounts for Needs, Wants, and Savings.
-   - Volatile Sub-Category Callout: Identify and call out the single most volatile or highest over-budget sub-category in Needs or Wants.
-   - Behavioral Recommendation: Provide 1-2 actionable, direct coaching recommendations for the upcoming month (e.g. 'tighten up on dining out' or 'great job staying under budget').
-
-MANDATORY HTML MESSAGE TEMPLATE:
-📊 <b>Monthly Financial Retrospective — [month_tab]</b>
-
-• 💰 <b>Total Monthly Spend:</b> [Total actual spend]
-• ⚖️ <b>Final 50/30/20 Split:</b>
-  - <b>Needs:</b> [total_actual] ([total_percent])
-  - <b>Wants:</b> [total_actual] ([total_percent])
-  - <b>Savings:</b> [total_actual] ([total_percent])
-• ⚠️ <b>Most Volatile Category:</b> [Identify highest spending / over-budget sub-category with exact amount]
-• 💡 <b>Monthly Coach Recommendation:</b> [1-2 sentences of actionable coaching]`;
-
-  const payload = {
-    systemInstruction: {
-      parts: [{ text: systemInstruction }]
-    },
-    contents: [
-      {
-        parts: [{ text: JSON.stringify(ctx, null, 2) }]
-      }
-    ],
-    generationConfig: {
-      temperature: 0.2
-    }
-  };
-
-  const targetModel = typeof COACH_MODEL_ID !== 'undefined' ? COACH_MODEL_ID : 'gemini-3.8-flash';
-  Logger.log(`Generating Monthly Coach Brief via Gemini (Target: ${targetModel})...`);
-  const monthlyStart = Date.now();
-  try {
-    const apiResult = callGeminiApiWithRetry(payload, apiKey, targetModel);
-    const responseText = typeof apiResult === 'object' ? apiResult.text : apiResult;
-    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : targetModel;
-    const elapsedMs = (typeof apiResult === 'object' && apiResult.elapsedTimeMs) ? apiResult.elapsedTimeMs : (Date.now() - monthlyStart);
-    Logger.log(`Monthly Coach Brief generated by model: ${modelUsed} in ${elapsedMs}ms`);
-
-    const json = JSON.parse(responseText);
-    const textOutput = json.candidates &&
-      json.candidates[0] &&
-      json.candidates[0].content &&
-      json.candidates[0].content.parts &&
-      json.candidates[0].content.parts[0].text;
-
-    return textOutput ? textOutput.trim() : buildFallbackMonthlyBrief(ctx);
-  } catch (err) {
-    Logger.log(`Failed to parse Gemini monthly coach response: ${err.message}`);
-    return buildFallbackMonthlyBrief(ctx);
-  }
+  const ctx = contextJSON || buildCoachPayload('monthly');
+  if (ctx.period !== 'monthly') throw new Error('Monthly coaching requires an explicit monthly payload.');
+  return generateCoachBrief(ctx);
 }
 
 /**
@@ -737,32 +827,24 @@ MANDATORY HTML MESSAGE TEMPLATE:
  * @return {string} Formatted Telegram HTML monthly retrospective brief.
  */
 function buildFallbackMonthlyBrief(ctx) {
-  const monthName = ctx.month_tab || 'Current Month';
-  const pacing = ctx.pacing_50_30_20 || {};
-  const needs = pacing.needs || { total_actual: 0, total_percent: '0%', sub_categories: [] };
-  const wants = pacing.wants || { total_actual: 0, total_percent: '0%', sub_categories: [] };
-  const savings = pacing.savings || { total_actual: 0, total_percent: '0%', sub_categories: [] };
-
-  const totalSpend = (needs.total_actual + wants.total_actual + savings.total_actual).toFixed(2);
-
-  // Find most volatile subcategory in Wants or Needs
-  let topSub = { name: 'None', actual: 0 };
-  const allSubs = [...(needs.sub_categories || []), ...(wants.sub_categories || [])];
-  allSubs.forEach(s => {
-    if (s.actual > topSub.actual) {
-      topSub = s;
-    }
+  const month = escapeCoachHtml(ctx.month_tab || ctx.report_month || 'Selected month');
+  if (ctx.error) return `<b>${month}</b>: monthly results are unavailable; check that month's tab and budget figures before requesting the report again.`;
+  const money = value => 'S$' + Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const comparisons = ['needs', 'wants', 'savings'].map(key => {
+    const bucket = ctx.buckets[key];
+    return `${key[0].toUpperCase() + key.slice(1)} ${money(bucket.actual)} (${escapeCoachHtml(bucket.actual_percent)}) vs ${money(bucket.target)} (${escapeCoachHtml(bucket.target_percent)})`;
   });
-
-  return [
-    `📊 <b>Monthly Financial Retrospective — ${monthName}</b>`,
-    ``,
-    `• 💰 <b>Total Monthly Spend:</b> S$${totalSpend}`,
-    `• ⚖️ <b>Final 50/30/20 Split:</b>`,
-    `  - <b>Needs:</b> S$${Number(needs.total_actual).toFixed(2)} (${needs.total_percent})`,
-    `  - <b>Wants:</b> S$${Number(wants.total_actual).toFixed(2)} (${wants.total_percent})`,
-    `  - <b>Savings:</b> S$${Number(savings.total_actual).toFixed(2)} (${savings.total_percent})`,
-    `• ⚠️ <b>Most Volatile Category:</b> ${topSub.name} (S$${Number(topSub.actual).toFixed(2)})`,
-    `• 💡 <b>Monthly Coach Recommendation:</b> Keep an eye on discretionary spending as you head into the new month to stay within your targets!`
-  ].join('\n');
+  const payments = ctx.mandatory_summary;
+  const focus = ctx.category_focus;
+  const sentences = [
+    `<b>${month}</b>: ${comparisons.join('; ')}.`,
+    `Mandatory payments: ${payments.paid} paid, ${payments.unpaid} unpaid; CPF and zero-value plans are excluded.`
+  ];
+  if (focus) {
+    sentences.push(`${escapeCoachHtml(focus.name)} finished at ${money(focus.actual)} vs ${money(focus.target)}, including ${money(focus.discretionary_spend)} discretionary spending.`);
+    sentences.push(`Review discretionary purchases in ${escapeCoachHtml(focus.name)} against the target before spending next month.`);
+  } else {
+    sentences.push('Check the category targets before making discretionary purchases next month.');
+  }
+  return `<i>${escapeCoachHtml(ctx.target_header)}</i>\n` + sentences.join(' ');
 }
