@@ -214,28 +214,7 @@ function getMonthlyReportDate(optNow) {
 
 /** Payment completion is deterministic; this summary does not infer due dates. */
 function summarizeMonthlyMandatory(expected, logged) {
-  const totals = {};
-  logged.forEach(item => {
-    const key = String(item.category || '').trim().toLowerCase();
-    const amount = Number(item.amount !== undefined ? item.amount : item.actual_amount);
-    if (!Number.isFinite(amount)) throw new Error('Invalid logged mandatory amount.');
-    totals[key] = (totals[key] || 0) + amount;
-  });
-  const summary = { paid: 0, unpaid: 0, excluded: 0, items: [] };
-  expected.forEach(item => {
-    const name = String(item.label || item.name || '').trim();
-    const planned = Number(item.amount !== undefined ? item.amount : item.planned_amount);
-    if (!Number.isFinite(planned) || planned < 0) throw new Error('Invalid planned mandatory amount.');
-    if (planned === 0 || (SHEET_FACTS.NON_LEDGER_MANDATORY || []).includes(name)) {
-      summary.excluded++; return;
-    }
-    const actual = Number((totals[name.toLowerCase()] || 0).toFixed(2));
-    const paid = item.paidFlag === true || item.is_checked === true || actual >= planned - 0.005;
-    summary[paid ? 'paid' : 'unpaid']++;
-    summary.items.push({ name: name, planned: planned, actual: actual,
-      status: paid ? 'paid' : (actual > 0 ? 'partial' : 'unpaid') });
-  });
-  return summary;
+  return matchMandatoryPayments(expected, logged, { trustPaidFlags: true });
 }
 
 /** Assemble only the selected month's numbers; never label daily pacing as monthly results. */
@@ -691,121 +670,22 @@ function testSendMonthlyCoach() {
   Logger.log('  Monthly Coach test message dispatched to Val only!');
 }
 
-/**
- * Generates a structured Weekly Mandatory Expenses Reconciliation Audit using Gemini AI.
- * Performs semantic matching between expected planned items (D3:E13) and logged fixed expenses.
- * 
- * @param {Object} [context] - Spreadsheet context object (defaults to getBudgetCoachContext()).
- * @return {string} Formatted audit message text in Telegram HTML format.
- */
-function generateWeeklyMandatoryReport(context) {
-  const ctx = context || getBudgetCoachContext();
-  const mandatory = ctx.mandatory_expenses || { expected: [], logged: [] };
-
-  const expectedList = mandatory.expected || [];
-  const loggedList = mandatory.logged || [];
-
-  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY property is missing in Script Properties.');
+/** Weekly audit uses canonical ledger matching; it does not infer due dates. */
+function generateWeeklyMandatoryReport(context, ss, asOf) {
+  // Explicit legacy contexts retain Part B category-only reporting for callers.
+  // All normal entry points use the confirmed Calendar and strict ledger adapter.
+  if (!context) return formatMandatoryCalendarBrief(getMandatoryCalendarStatus(ss, asOf));
+  const ctx = context;
+  const mandatory = ctx.mandatory_expenses;
+  if (!mandatory || mandatory.error || !mandatory.expected || !mandatory.expected.length || !Array.isArray(mandatory.logged)) {
+    return '<b>Mandatory payments unavailable</b> — check the monthly plan and Transactions data.';
   }
-
-  const promptText = `You are an expert financial controller analyzing a personal budget ledger.
-Your task is to reconcile expected mandatory monthly expenses against actual logged fixed transactions for the current month.
-
-### INPUT DATA:
-1. EXPECTED MANDATORY EXPENSES (Planned D3:E13):
-${JSON.stringify(expectedList, null, 2)}
-
-2. LOGGED FIXED TRANSACTIONS ("Transactions" Sheet, Type: "Обязательные расходы"):
-${JSON.stringify(loggedList, null, 2)}
-
-### INSTRUCTIONS:
-Perform semantic matching between expected item names (e.g. "Аренда", "Школа & Детский сад", "Лин", "Singtel") and logged transaction descriptions (e.g. "Mortgage July", "Agora Preschool", "Singtel Mobile", "Аренда за июль").
-
-Generate a clean, structured Telegram HTML report using standard HTML tags (<b>, <i>, <code>). Do NOT use markdown syntax like ** or #.
-
-Structure your response into exactly three sections:
-
-1. ✅ <b>Paid / Settled:</b>
-   - List expected planned items that have been logged this month.
-   - For each: Item Name — S$Actual (Planned: S$Planned).
-   - If there is a price variance (actual > planned or actual < planned), note the difference clearly (e.g., "Over planned by S$50.00").
-
-2. ⏳ <b>Pending / Unpaid:</b>
-   - List items from the planned D3:E13 list that have NO matching logged transaction yet this month.
-   - For each: Item Name — Planned: S$Planned.
-
-3. 💡 <b>Unplanned Fixed Spend:</b>
-   - List any logged "Обязательные расходы" transactions that did NOT match any item on the planned D3:E13 list.
-   - For each: Description — S$Actual (Logged on Date).
-
-Keep the tone concise, encouraging, and clear.`;
-
-  const payload = {
-    contents: [
-      {
-        parts: [{ text: promptText }]
-      }
-    ],
-    generationConfig: {
-      temperature: 0.2
-    }
-  };
-
-  const targetModel = typeof COACH_MODEL_ID !== 'undefined' ? COACH_MODEL_ID : 'gemini-3.8-flash';
-  Logger.log(`Generating Weekly Mandatory Audit report via Gemini (Target: ${targetModel})...`);
-  const auditStart = Date.now();
-  try {
-    const apiResult = callGeminiApiWithRetry(payload, apiKey, targetModel);
-    const responseText = typeof apiResult === 'object' ? apiResult.text : apiResult;
-    const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : targetModel;
-    const elapsedMs = (typeof apiResult === 'object' && apiResult.elapsedTimeMs) ? apiResult.elapsedTimeMs : (Date.now() - auditStart);
-    Logger.log(`Weekly Mandatory Audit report generated by model: ${modelUsed} in ${elapsedMs}ms`);
-
-    const json = JSON.parse(responseText);
-    const textOutput = json.candidates &&
-      json.candidates[0] &&
-      json.candidates[0].content &&
-      json.candidates[0].content.parts &&
-      json.candidates[0].content.parts[0].text;
-
-    return textOutput || buildFallbackMandatoryReport(expectedList, loggedList);
-  } catch (err) {
-    Logger.log(`Failed to parse Gemini audit response: ${err.message}`);
-    return buildFallbackMandatoryReport(expectedList, loggedList);
-  }
+  return buildFallbackMandatoryReport(mandatory.expected, mandatory.logged);
 }
 
-/**
- * Fallback generator if Gemini API is unavailable for mandatory report.
- * 
- * @param {Array<Object>} expected - Array of expected mandatory objects.
- * @param {Array<Object>} logged - Array of logged mandatory objects.
- * @return {string} Formatted HTML fallback report.
- */
+/** Kept as a compatible entry point; all reports now use the same matcher. */
 function buildFallbackMandatoryReport(expected, logged) {
-  const lines = ['<b>📋 Weekly Mandatory Expenses Audit</b>\n'];
-  
-  lines.push('<b>Planned Mandatory Items (D3:E13):</b>');
-  if (expected.length === 0) {
-    lines.push('<i>None specified</i>');
-  } else {
-    expected.forEach(item => {
-      lines.push(`• <b>${item.name}</b> — Planned: S$${Number(item.planned_amount).toFixed(2)}`);
-    });
-  }
-
-  lines.push('\n<b>Logged Fixed Expenses:</b>');
-  if (logged.length === 0) {
-    lines.push('<i>No mandatory expenses logged this month yet.</i>');
-  } else {
-    logged.forEach(item => {
-      lines.push(`• 📅 ${item.date} — <b>${item.description}</b>: S$${Number(item.actual_amount).toFixed(2)}`);
-    });
-  }
-
-  return lines.join('\n');
+  return formatMandatoryPaymentReport(matchMandatoryPayments(expected, logged));
 }
 
 /**

@@ -5049,6 +5049,8 @@ function buildBudgetMenu(ui) {
     .addItem('Repair staging dates', 'repairReconcileDates')
     .addItem('Repair Transactions formulas', 'repairTransactionDerivedFormulas')
     .addSeparator()
+    .addItem('Seed / review mandatory calendar draft', 'seedCalendarFromMenu')
+    .addItem('Check mandatory payments now', 'checkMandatoryPaymentsNow')
     .addItem('Run morning coach now', 'sendMorningCoach')
     .addToUi();
 }

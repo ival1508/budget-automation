@@ -167,8 +167,7 @@ function sendMorningCoach() {
  */
 function sendWeeklyMandatoryAudit(targetChatId) {
   Logger.log('=== Running Weekly Mandatory Expenses Audit ===');
-  const context = getBudgetCoachContext();
-  const reportHtml = generateWeeklyMandatoryReport(context);
+  const reportHtml = generateWeeklyMandatoryReport();
   return sendTelegramMessage(reportHtml, targetChatId);
 }
 
@@ -383,8 +382,7 @@ function dispatch() {
   let morningBrief = null, recap = null, weeklyReport = null;
   const nudgeSlot = getDailyDeliverySlot(now, '21:00', 60);
   const recapSlot = getDailyDeliverySlot(now, '22:00', 90);
-  const weeklySlot = Utilities.formatDate(now, 'Asia/Singapore', 'E') === 'Mon'
-    ? getDailyDeliverySlot(now, '09:00', 180) : null;
+  const weeklySlot = getMandatoryWeeklySlot(now);
 
   for (const user of users) {
     const morningSlot = getDailyDeliverySlot(now, user.morning_time || '08:00', 180);
@@ -398,10 +396,12 @@ function dispatch() {
       return recap;
     });
     if (weeklySlot) deliverScheduledMessage('weekly_mandatory_audit_' + user.chat_id, weeklySlot, user.chat_id, () => {
-      if (!weeklyReport) weeklyReport = generateWeeklyMandatoryReport(getBudgetCoachContext(undefined, now));
+      if (!weeklyReport) weeklyReport = generateWeeklyMandatoryReport(undefined, undefined, now);
       return weeklyReport;
     });
   }
+
+  runMandatorySameDayAlerts(now, users);
 
   // Month-end catch-up uses the original closing month, including after midnight.
   const monthEndSlot = getMonthEndDeliverySlot(now);

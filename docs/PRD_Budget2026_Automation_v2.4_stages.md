@@ -386,13 +386,15 @@ function onOpen() {
 
 ## STAGE 4 — UC‑6 Mandatory‑payment calendar + weekly reminder + missed‑date alerts
 
-**Progress:** not complete. The existing AI weekly audit is a precursor; the editable Calendar, deterministic due-date rules and alerts below remain to be built. Mandatory G semantics are still unconfirmed; no G write-back is implemented.
+**Progress:** Parts A–C are implemented locally and offline regressions pass. Live Calendar review and overdue/upcoming acceptance remain pending. Completion uses ledger payments; mandatory G semantics remain unconfirmed and no G write-back is implemented.
 
 **Objective.** Never forget a fixed payment. Build a **calendar of expected payment dates**, then a **weekly** reminder of what's still unpaid this month, with **prominent alerts for expected dates that have already passed** without a matching payment.
 
 > **Moved after the reconciler (v2.4)** so UC‑4 is never blocked by this stage's details.
 
 ### Part A — Build the mandatory‑payment calendar
+
+**Implementation (16 September):** local Part A source and offline tests are complete. The visible calendar seeds inactive proposals from recent completed months and preserves edits on reruns. Actual-history verification and Val’s confirmation remain pending. See [Stage 4A runbook](stage-4a-calendar.md). Parts B/C are also implemented locally; live acceptance remains pending.
 - New **`Calendar` config tab** (bootstrapped like `Merchants`), one row per fixed item:
   `item · category · expected_day_of_month · typical_amount · account · active`
   Support **end‑of‑month** items (e.g. helper salary paid on the last day) via a sentinel like `EOM` rather than a fixed number.
@@ -401,6 +403,9 @@ function onOpen() {
 **Test (`test_seedCalendar`):** run the seeding against historical data and assert the derived day‑of‑month for 3 known items (e.g. IRAS ≈ 6, `Лин` = EOM) falls within ±2 days of reality.
 
 ### Part B — Label→category mapping + exclusions (required)
+
+**Implementation (16 September):** canonical matching and exclusions now drive the weekly report and shared monthly summary. The required fixture and offline regressions pass; live verification remains pending. See [Stage 4B matching](stage-4b-matching.md).
+
 The 11 actual `Обязательные расходы` labels (from `D3:D13`, verified) map to transaction categories mostly 1:1 — the taxonomy has converged since earlier drafts — but three need special handling:
 
 | Monthly label (D) | Transaction `Категория` | Notes |
@@ -422,6 +427,9 @@ The 11 actual `Обязательные расходы` labels (from `D3:D13`, v
 **Test (`test_mandatoryMatching`):** fixture with one paid item, one unpaid, one `CPF`, one S$0 `Родители`; assert exactly one "unpaid" is reported.
 
 ### Part C — Weekly reminder + missed‑date alerts
+
+**Implementation (16 September):** confirmed Calendar items now drive the weekly heartbeat, `/mandatory`, and a sheet menu preview. EOM, partial payments, exclusions and optional day-of alerts are covered by offline regressions. See [Stage 4C reminders](stage-4c-reminders.md) for matching rules, the current-month seven-day window, configuration and pending live acceptance.
+
 - **Weekly cron:** default **Monday 09:00 SGT** (configurable), via the Stage 2 heartbeat dispatcher. Determine paid/unpaid by cross‑referencing the `Calendar` against logged `Обязательные расходы` — **or** column **G** directly if it proves to be a live paid flag.
 - **Brief structure (ordered by expected date):**
   1. **⚠️ Overdue / missed** — expected day passed this month, no matching payment. *Surface prominently.*

@@ -19,7 +19,7 @@ function setup(c, iso = '2026-09-16T00:01:00Z') {
   };
   c.generateCoachBrief = payload => { assert.equal(locked, false); return 'Morning ' + payload.report_date; };
   c.getBudgetCoachContext = (_, reportDate) => ({ report_date: selected(reportDate) });
-  c.generateWeeklyMandatoryReport = payload => { builds.push('weekly'); return 'Weekly ' + payload.report_date; };
+  c.generateWeeklyMandatoryReport = (_, ss, reportDate) => { builds.push('weekly'); return 'Weekly ' + selected(reportDate); };
   c.generateMonthlyCoachBrief = payload => 'Monthly ' + payload.report_date;
   c.generateDailyTransactionsRecap = (_, reportDate) => { builds.push('recap'); return 'Recap ' + selected(reportDate); };
   c.scanConfiguredStatementInbox = () => {};

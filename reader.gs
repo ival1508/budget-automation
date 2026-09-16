@@ -132,6 +132,7 @@ function getMandatoryExpenses(ss, optDate, optStrict) {
   try {
     const activeInfo = getActiveMonthTab(ss, optDate);
     if (!activeInfo || !activeInfo.exists) {
+      if (optStrict) throw new Error('Mandatory plan sheet is unavailable.');
       Logger.log(`⚠️ Warning: ${activeInfo ? activeInfo.message : 'Sheet not found'}`);
       return [];
     }
@@ -154,7 +155,7 @@ function getMandatoryExpenses(ss, optDate, optStrict) {
       // Col G is index 3 in D:G range (Col D=0, Col E=1, Col F=2, Col G=3)
       const rawCheck = rangeValues[i].length > 3 ? rangeValues[i][3] : rangeValues[i][2];
       if (optStrict && validLabel && /^#/.test(String(rawCheck))) throw new Error('Unreadable mandatory completion flag.');
-      const nonLedger = (SHEET_FACTS.NON_LEDGER_MANDATORY || []).includes(label);
+      const nonLedger = isNonLedgerMandatory(label);
       const paidFlag = amount === 0 || nonLedger || rawCheck === true || String(rawCheck).toUpperCase() === 'TRUE';
 
       // Filter out empty cells, blanks, zeros, and dashes in description
@@ -193,11 +194,15 @@ function getExpectedMandatoryExpenses(ss, optDate) {
 function getLoggedMandatoryThisMonth(ss, optDate, optStrict) {
   try {
     const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
-    if (!spreadsheet) return [];
+    if (!spreadsheet) {
+      if (optStrict) throw new Error('Mandatory spreadsheet is unavailable.');
+      return [];
+    }
 
     const transTabName = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.CORE_TABS) ? SHEET_FACTS.CORE_TABS.TRANSACTIONS : 'Transactions';
     const sheet = spreadsheet.getSheetByName(transTabName);
     if (!sheet) {
+      if (optStrict) throw new Error('Transactions sheet is unavailable.');
       Logger.log(`⚠️ Warning: "${transTabName}" sheet not found.`);
       return [];
     }
@@ -231,7 +236,11 @@ function getLoggedMandatoryThisMonth(ss, optDate, optStrict) {
       if (!isFixedType) continue;
 
       let dateMatch = false;
-      if (cellDate instanceof Date) {
+      if (optStrict) {
+        const date = calendarDateParts(cellDate);
+        const monthYear = String(date.month).padStart(2, '0') + '.' + date.year;
+        dateMatch = monthYear === currentMonthYearStr;
+      } else if (cellDate instanceof Date) {
         const rowMonthYearStr = Utilities.formatDate(cellDate, 'Asia/Singapore', 'MM.yyyy');
         dateMatch = (rowMonthYearStr === currentMonthYearStr);
       } else if (typeof cellDate === 'string' && cellDate.trim()) {
@@ -245,7 +254,8 @@ function getLoggedMandatoryThisMonth(ss, optDate, optStrict) {
       if (dateMatch) {
         const category = String(row[7] || '').trim(); // Col H
         const where = String(row[8] || '').trim();    // Col I
-        const amount = readCoachTransactionAmount(row, disp, optStrict);
+        const amount = optStrict ? readMonthlyAmount(row[4], disp[4]) : readCoachTransactionAmount(row, disp, false);
+        if (optStrict && !category) throw new Error('Logged mandatory payment has no category.');
 
         // Exact enum string with hyphen spacing
         const label = where ? `${category} - ${where}` : category;
@@ -1070,8 +1080,15 @@ function getBudgetCoachContext(ss, optDate) {
   const monthTab = getCurrentMonthTabName(now);
 
   const dailyStatus = getDailyBudgetStatus(spreadsheet, now);
-  const expectedMandatory = getExpectedMandatoryExpenses(spreadsheet, now);
-  const loggedMandatory = getLoggedMandatoryExpenses(spreadsheet, now);
+  let mandatory;
+  try {
+    mandatory = {
+      expected: getMandatoryExpenses(spreadsheet, now, true),
+      logged: getLoggedMandatoryThisMonth(spreadsheet, now, true)
+    };
+  } catch (error) {
+    mandatory = { expected: [], logged: [], error: error.message };
+  }
   const pacing503020 = get503020Status(spreadsheet, false, now);
   const todaysTxns = getTodaysTransactions(spreadsheet, now);
   const recentTrends = getRecentDailyTrends(spreadsheet, now);
@@ -1082,10 +1099,7 @@ function getBudgetCoachContext(ss, optDate) {
     daily_status: dailyStatus,
     todays_transactions: todaysTxns,
     recent_trends: recentTrends,
-    mandatory_expenses: {
-      expected: expectedMandatory,
-      logged: loggedMandatory
-    },
+    mandatory_expenses: mandatory,
     pacing_50_30_20: pacing503020
   };
 

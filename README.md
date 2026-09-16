@@ -332,3 +332,22 @@ Logs prefixed `[Album photo]` identify each processed album message and its extr
 count. Telegram delivery errors now surface instead of being logged as successful
 proposal completion; harmless “message is not modified” responses remain accepted.
 Sync and update the existing web-app deployment before testing this with a live album.
+
+## Stage 4A: mandatory-payment calendar
+
+The editable calendar and history-derived draft seeding are implemented locally.
+See [the Stage 4A runbook](docs/stage-4a-calendar.md) for setup, derivation rules,
+review steps and pending live acceptance. New rows remain inactive until reviewed.
+
+## Stage 4B: canonical mandatory-payment matching
+
+The weekly audit now uses deterministic category totals with CPF/zero-plan
+exclusions. See [Stage 4B matching](docs/stage-4b-matching.md) for behavior, tests
+and the separate Calendar/date integration in Part C.
+
+## Stage 4C: Calendar reminders
+
+Confirmed Calendar rows now drive the weekly reminder, `/mandatory`, and
+**💰 Budget → Check mandatory payments now**. Optional evening day-of alerts
+are off by default. See [Stage 4C reminders](docs/stage-4c-reminders.md) for matching,
+scheduling, date rules and the live acceptance checklist. Column G is untouched.
