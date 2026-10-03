@@ -5052,6 +5052,8 @@ function buildBudgetMenu(ui) {
     .addItem('Seed / review mandatory calendar draft', 'seedCalendarFromMenu')
     .addItem('Check mandatory payments now', 'checkMandatoryPaymentsNow')
     .addItem('Run morning coach now', 'sendMorningCoach')
+    .addItem('Preview monthly coach', 'showMonthlyCoachPreview')
+    .addItem('Preview next month (read-only)', 'showMonthCreationPreview')
     .addToUi();
 }
 

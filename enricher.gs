@@ -365,7 +365,9 @@ function enrichTransaction(parsedRow, categoryBucketMap) {
   const aliases = getMerchantAliases();
   const rawNorm = normaliseWhere(where);
   const rawSnippetNorm = normaliseWhere(parsedRow.raw_snippet || '');
-  const aliasMatch = aliases[rawNorm] || (rawSnippetNorm ? aliases[rawSnippetNorm] : null);
+  // Explicit transaction edits take precedence over learned merchant defaults.
+  const aliasMatch = parsedRow.manual_merchant_category ? null :
+    (aliases[rawNorm] || (rawSnippetNorm ? aliases[rawSnippetNorm] : null));
 
   if (aliasMatch) {
     const canonicalName = typeof aliasMatch === 'string' ? aliasMatch : (aliasMatch.canonical || aliasMatch.name);

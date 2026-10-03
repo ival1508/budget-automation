@@ -647,6 +647,7 @@ function get503020Status(ss, optDebug, optDate, optStrict) {
         return String(displayVal).trim();
       }
       if (typeof rawVal === 'number' && !isNaN(rawVal)) {
+        if (optStrict) return (rawVal * 100).toFixed(1) + '%';
         const pct = rawVal <= 1 ? (rawVal * 100).toFixed(1) : rawVal.toFixed(1);
         return pct + '%';
       }
@@ -755,6 +756,8 @@ function get503020Status(ss, optDebug, optDate, optStrict) {
         result[currentBucket].sub_categories.push({
           name: colB || colA,
           actual: colAmount,
+          actual_available: rowRawData[r][targetColIndex] !== '' && rowRawData[r][targetColIndex] != null,
+          target_available: rowRawData[r][targetSpendColIndex] !== '' && rowRawData[r][targetSpendColIndex] != null,
           percent: colPercent,
           target: targetSpend
         });

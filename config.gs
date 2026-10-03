@@ -43,6 +43,9 @@ const SHEET_FACTS = {
   
   NON_LEDGER_MANDATORY: ['CPF'],
 
+  // Stage 6B preview only. No automatic creation is enabled.
+  monthTemplate: { workbookYear: 2026, version: 1, creationEnabled: false },
+
   // Shared dispatch heartbeat, SGT. Same-day alerts need explicit opt-in.
   MANDATORY_REMINDERS: {
     WEEKLY_DAY: 'Mon',
@@ -74,6 +77,9 @@ const SHEET_FACTS = {
   },
   
   MONTHLY_TAB_STRUCTURE: {
+    ORDINARY_MONTHLY_BUDGET_CELL: 'D15', // Income minus the mandatory plan, verified in the live sheet.
+    MONTHLY_INCOME_CELL: 'B14',
+    MANDATORY_TOTAL_CELL: 'E14',
     FLAT_DAILY_PACING_CELL: 'D17',
     CURRENT_DAILY_BUDGET_CELL: 'D19', // Effectively SALDO_END_OF_THE_DAY divided by number of days left in the month
     saldoCell: 'D19', // Alias for Stage 1 reader tasks

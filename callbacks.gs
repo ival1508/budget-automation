@@ -157,10 +157,10 @@ function handleCallbackQuery(callbackQuery) {
   // 7.1. ACTION: PICK MERCHANT (Rename Merchant)
   if (action === 'pick_merch') {
     answerCallbackQuery(queryId);
-    if (!isNaN(itemIndex)) {
+    if (!isNaN(itemIndex) && transactions[itemIndex]) {
       const cache = CacheService.getScriptCache();
-      cache.put('awaiting_merchant:' + chatId, JSON.stringify({ token: token, index: itemIndex, messageId: messageId }), 300); // 5 mins
-      sendTelegramMessage('Please type the new Merchant display name for this transaction:', chatId);
+      cache.put('awaiting_merchant:' + chatId, JSON.stringify({ token: token, index: itemIndex, messageId: messageId, transactionSnapshot: JSON.stringify(transactions[itemIndex]) }), 300); // 5 mins
+      sendTelegramMessage(`Please type the new Merchant display name for item ${itemIndex + 1} (${transactions[itemIndex].currency || 'SGD'} ${Number(transactions[itemIndex].amount).toFixed(2)}). This changes only this transaction:`, chatId);
     }
     return;
   }
@@ -183,14 +183,8 @@ function handleCallbackQuery(callbackQuery) {
     if (!isNaN(itemIndex) && transactions[itemIndex] && selectedCategory) {
       transactions[itemIndex].category = selectedCategory;
       
-      // Record user's category preference for this merchant
-      if (typeof saveMerchantAlias === 'function' && transactions[itemIndex].where) {
-        saveMerchantAlias(
-          transactions[itemIndex].raw_where || transactions[itemIndex].where,
-          transactions[itemIndex].where,
-          selectedCategory
-        );
-      }
+      // A one-off correction must not create a rule for every matching merchant.
+      transactions[itemIndex].manual_merchant_category = true;
 
       // Re-enrich transaction to update 50/30/20 bucket and dedupe key
       transactions[itemIndex] = enrichTransaction(transactions[itemIndex]);
@@ -471,6 +465,7 @@ function updateMerchantLearningStore(transactions) {
 
   for (let i = 0; i < transactions.length; i++) {
     const txn = transactions[i];
+    if (txn.manual_merchant_category) continue;
     const cleanWhere = (txn.where || '').trim();
     if (!cleanWhere) continue;
 
