@@ -94,6 +94,18 @@ trusted to report test output it did not execute.
 ## Docs
 See /docs for the PRD and the staged build prompts.
 
+### Stage 6 — read-only month creation preview
+
+`previewMonthCreation(2026, 11, spreadsheet)` returns the proposed new-month
+name, source template and exact cell edits without changing the workbook.
+The optional spreadsheet defaults to the bound workbook. With no arguments,
+it previews next month. After syncing source and reloading Sheets, use
+**Budget → Preview next month (read-only)** for the same plan in a dialog.
+Existing months are no-ops; creation across the configured workbook year is
+refused. Formula construction is offline-tested; actual formula recalculation
+remains a sandbox acceptance step. No automatic creator is enabled.
+See [Stage 6 plan and checkpoint](docs/stage-6-month-creation.md).
+
 ## Offline regression checks
 
 Run `node scripts/test-regressions.cjs` (Node.js 18 or later). It needs no credentials
@@ -134,9 +146,9 @@ and CPF and zero-value plans are excluded. Due-date/overdue classification still
 depends on Stage 4's calendar and confirmation of column G's semantics. Next-month
 tab creation remains Stage 6 work.
 
-Monthly generation shares the daily model engine and money checks, with additional
-bucket/percentage/count/reporting-month validation and a grounded fallback of at
-most four sentences. Missing or unreadable month data produces an unavailable
+Monthly generation now explains ordinary-spend variance, overall allocations,
+category drivers, specific purchases and observed history. The evidence renderer
+replaces the former four-sentence bucket recital; the daily model path is unchanged. Missing or unreadable month data produces an unavailable
 report. Neither bucket totals nor percentages are recomputed from transactions.
 
 GET serves a health check only. Run diagnostics and `runAllTests()` from the Apps
@@ -351,3 +363,15 @@ Confirmed Calendar rows now drive the weekly reminder, `/mandatory`, and
 **💰 Budget → Check mandatory payments now**. Optional evening day-of alerts
 are off by default. See [Stage 4C reminders](docs/stage-4c-reminders.md) for matching,
 scheduling, date rules and the live acceptance checklist. Column G is untouched.
+
+## Stage 5: monthly coach verification
+
+The existing monthly engine is hardened and has a read-only **Preview monthly
+coach** menu entry. August 2026 results were checked against a live workbook
+snapshot; native runtime and real Telegram acceptance remain pending. See
+[Stage 5 implementation and checkpoint](docs/stage-5-monthly-coach.md).
+
+The 19 September monthly-coach redesign leads with Расходы against D15, explains
+category overruns and meaningful restraint, and identifies transactions worth
+reviewing. Recommendations use up to five earlier recorded months, with explicit
+limits when history is missing. See [the current monthly review contract](docs/stage-5-monthly-coach.md).

@@ -130,16 +130,14 @@ function doPost(e) {
             const index = state.index;
             const msgId = state.messageId;
             
-            const transactions = typeof getPendingTransactions === 'function' ? getPendingTransactions(token) : null;
-            if (transactions && transactions[index]) {
+            let transactions = typeof getPendingTransactions === 'function' ? getPendingTransactions(token) : null;
+            if (Array.isArray(transactions) && transactions[index] &&
+                state.transactionSnapshot === JSON.stringify(transactions[index])) {
               const txn = transactions[index];
-              const rawName = txn.raw_where || txn.where;
               const newName = textTrimmed;
               
               txn.where = newName;
-              if (typeof saveMerchantAlias === 'function' && rawName) {
-                saveMerchantAlias(rawName, newName, txn.category);
-              }
+              txn.manual_merchant_category = true;
               
               if (typeof enrichTransaction === 'function') {
                 transactions[index] = enrichTransaction(txn);
@@ -158,9 +156,13 @@ function doPost(e) {
               }
               return HtmlService.createHtmlOutput('OK');
             }
+            sendTelegramMessage('The selected transaction changed or expired. Please select Rename Merchant again.', chatId);
           } catch (e) {
             Logger.log('Error processing merchant rename: ' + e.message);
+            sendTelegramMessage('Could not complete the rename. Please reopen the proposal and try again.', chatId);
           }
+          // Never reinterpret a rename reply as a new transaction or an AI batch edit.
+          return HtmlService.createHtmlOutput('OK');
         }
         // --- END INTERCEPT ---
 

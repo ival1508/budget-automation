@@ -185,6 +185,7 @@ module.exports = test => {
   });
   test('monthly fallback uses the shared engine and omits aggregate totals and committed-cost advice', c => {
     const f = fixture(c), payload = c.buildCoachPayload('monthly', f.ss, date(c, '2026-09-30T12:00:00Z'));
+    delete payload.monthly_review; // Compatibility coverage for legacy monthly payloads.
     const text = c.generateMonthlyCoachBrief(payload); // No model key: deterministic fallback.
     assert.match(text, /S\$3,500.00/); assert.match(text, /2 paid, 2 unpaid/);
     assert.match(text, /Target month 06\/2026/); assert.doesNotMatch(text, /Total Monthly Spend|volatile|Кредит/);
@@ -195,6 +196,7 @@ module.exports = test => {
   });
   test('monthly model output is grounded for money, percentages, payment counts, period and length', c => {
     const f = fixture(c), payload = c.buildCoachPayload('monthly', f.ss, date(c, '2026-09-30T12:00:00Z'));
+    delete payload.monthly_review; // The new review uses checked evidence rendering.
     c.PropertiesService.getScriptProperties().setProperty('GEMINI_API_KEY', 'offline-test');
     const good = c.buildFallbackMonthlyBrief(payload);
     let output = good, calls = 0;
@@ -219,8 +221,8 @@ module.exports = test => {
     const f = scheduler(c); c.dispatch(); c.dispatch();
     assert.equal(f.sends.length, 4);
     assert.deepEqual(f.sends.map(row => row.chat), ['96069960', '96069960', '402188776', '402188776']);
-    assert.match(f.sends[0].text, /upload the bank statements/); assert.match(f.sends[1].text, /S\$3,500.00/);
-    assert.match(f.sends[2].text, /upload the bank statements/); assert.match(f.sends[3].text, /S\$3,500.00/);
+    assert.match(f.sends[0].text, /upload the bank statements/); assert.match(f.sends[1].text, /Расходы finished/);
+    assert.match(f.sends[2].text, /upload the bank statements/); assert.match(f.sends[3].text, /Расходы finished/);
     assert.ok(f.sends.every(row => row.text.includes("Сентябрь'26")));
     assert.deepEqual(f.scans, [4, 4]);
   });
@@ -243,7 +245,7 @@ module.exports = test => {
     c.generateMonthlyCoachBrief = payload => { clock(c, '2026-09-30T16:01:00Z'); return original(payload); };
     c.dispatch(); assert.equal(f.sends.length, 4);
     assert.ok(f.sends.every(row => row.text.includes("Сентябрь'26")));
-    assert.match(f.sends[3].text, /S\$3,500.00/);
+    assert.match(f.sends[3].text, /Расходы finished/);
   });
   test('unfinished monthly delivery retries at 23:45 without duplicating reminders or the other user', c => {
     const f = scheduler(c); const deliver = c.sendTelegramMessage;
@@ -271,7 +273,7 @@ module.exports = test => {
     vm.runInContext('SHEET_FACTS.USERS.RITA.active = false', c);
     c.sendMonthlyCoach(undefined, f.ss);
     assert.equal(f.sends.length, 1); assert.equal(f.sends[0].chat, '96069960');
-    assert.match(f.sends[0].text, /S\$3,500.00/);
+    assert.match(f.sends[0].text, /Расходы finished/);
   });
   test('actual monthly Telegram send rejects HTTP and API errors before marking the step delivered', c => {
     c.PropertiesService.getScriptProperties().setProperty('TELEGRAM_BOT_TOKEN', 'offline-test');
@@ -309,7 +311,7 @@ module.exports = test => {
     c.dispatch(); assert.equal(f.sends.length, 2); assert.ok(f.sends.every(row => row.chat === '402188776'));
     fail = false; clock(c, '2026-09-30T15:46:00Z'); c.dispatch();
     assert.equal(f.sends.length, 4); assert.match(f.sends[2].text, /upload the bank statements/);
-    assert.match(f.sends[3].text, /S\$3,500.00/);
+    assert.match(f.sends[3].text, /Расходы finished/);
   });
   test('month-end active execution guard expires after an interrupted Apps Script execution', c => {
     const f = scheduler(c), props = c.PropertiesService.getScriptProperties();

@@ -97,11 +97,34 @@ function deliverScheduledMessage(key, slot, chatId, buildMessage, optSentKey) {
     props.setProperty(sendingKey, JSON.stringify({ token: token, period: slot.period, startedAt: Date.now() }));
   } finally { lock.releaseLock(); }
   try {
-    const message = buildMessage();
+    const partsKey = 'parts_' + key + '_' + slot.period + '_';
+    const savedCount = Number(props.getProperty(partsKey + 'count')) || 0;
+    const message = savedCount ? { parts: Array.from({ length: savedCount }, (_, index) => {
+      const part = props.getProperty(partsKey + index);
+      if (part === null) throw new Error('Saved monthly report part is missing.');
+      return part;
+    }) } : buildMessage();
     if (Date.now() >= slot.expiresAt) throw new Error('Delivery window expired during generation.');
-    sendTelegramMessage(typeof message === 'string' ? message : message.text, chatId,
-      typeof message === 'string' ? true : { reply_markup: message.reply_markup });
+    if (message.parts) {
+      if (!savedCount) {
+        message.parts.forEach((part, index) => props.setProperty(partsKey + index, part));
+        props.setProperty(partsKey + 'count', String(message.parts.length));
+      }
+      const next = Number(props.getProperty(partsKey + 'next')) || 0;
+      for (let index = next; index < message.parts.length; index++) {
+        if (Date.now() >= slot.expiresAt) throw new Error('Monthly delivery window expired.');
+        sendTelegramMessage(message.parts[index], chatId);
+        props.setProperty(partsKey + 'next', String(index + 1));
+      }
+    } else {
+      sendTelegramMessage(typeof message === 'string' ? message : message.text, chatId,
+        typeof message === 'string' ? true : { reply_markup: message.reply_markup });
+    }
     props.setProperty(sentKey, sentValue);
+    if (message.parts) {
+      message.parts.forEach((_, index) => props.deleteProperty(partsKey + index));
+      props.deleteProperty(partsKey + 'count'); props.deleteProperty(partsKey + 'next');
+    }
     props.deleteProperty(retryKey);
     Logger.log(`✅ [DISPATCH] Accepted ${key} for ${slot.period}`);
     return true;
@@ -327,7 +350,7 @@ function sendMonthlyCoach(optReportDate, optSs) {
   Logger.log('=== Running Monthly Coach Retrospective Brief ===');
   const context = buildCoachPayload('monthly', optSs, optReportDate);
   const briefText = generateMonthlyCoachBrief(context);
-  sendTelegramMessage(briefText);
+  splitMonthlyReview(briefText).forEach(part => sendTelegramMessage(part));
   return briefText;
 }
 
@@ -348,6 +371,10 @@ function runMonthEndJobs(reportDate, optSs, optSlot) {
   } finally { lock.releaseLock(); }
 
   try {
+    // Expired incomplete report snapshots are no longer retryable; retain only this month.
+    if (typeof props.getProperties === 'function') Object.keys(props.getProperties()).forEach(key => {
+      if (key.startsWith('parts_month_end_') && !key.startsWith('parts_month_end_' + reportMonth + '_')) props.deleteProperty(key);
+    });
     const users = getActiveTelegramUsers();
     let briefText = null;
     for (const user of users) {
@@ -361,7 +388,8 @@ function runMonthEndJobs(reportDate, optSs, optSlot) {
       if (!reminded) continue;
       deliverScheduledMessage(prefix + '_coach', slot, user.chat_id, () => {
         if (!briefText) briefText = generateMonthlyCoachBrief(buildCoachPayload('monthly', optSs, reportDate));
-        return briefText;
+        const parts = splitMonthlyReview(briefText);
+        return parts.length === 1 ? briefText : { parts: parts };
       }, prefix + '_coach');
     }
   } finally {

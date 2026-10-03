@@ -134,7 +134,10 @@ function getCurrentMonthCategorySplits(ss, optDate, optStrict) {
   try {
     const transTabName = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.CORE_TABS) ? SHEET_FACTS.CORE_TABS.TRANSACTIONS : 'Transactions';
     const sheet = ss.getSheetByName(transTabName);
-    if (!sheet) return splits;
+    if (!sheet) {
+      if (optStrict) throw new Error('Transactions is missing.');
+      return splits;
+    }
 
     const lastRow = sheet.getLastRow();
     if (lastRow <= 1) return splits;
@@ -157,10 +160,16 @@ function getCurrentMonthCategorySplits(ss, optDate, optStrict) {
       const cellDate = row[0];
       const category = String(row[7] || '').trim(); // Col H
 
+      const typeColC = String(row[2] || '').trim().replace(/\t/g, '');
+      if (optStrict && typeColC !== 'Расходы' && typeColC !== 'Обязательные расходы') continue;
+      if (optStrict && !category) throw new Error('Monthly transaction category is missing.');
       if (!category) continue;
 
       let dateMatch = false;
-      if (cellDate instanceof Date) {
+      if (optStrict) {
+        const date = calendarDateParts(cellDate);
+        dateMatch = String(date.month).padStart(2, '0') + '.' + date.year === currentMonthYearStr;
+      } else if (cellDate instanceof Date) {
         const rowMonthYearStr = Utilities.formatDate(cellDate, tz, 'MM.yyyy');
         dateMatch = (rowMonthYearStr === currentMonthYearStr);
       } else if (typeof cellDate === 'string' && cellDate.trim()) {
@@ -173,14 +182,12 @@ function getCurrentMonthCategorySplits(ss, optDate, optStrict) {
 
       if (!dateMatch) continue;
 
-      const typeColC = String(row[2] || '').trim().replace(/\t/g, '');
-      if (optStrict && typeColC !== 'Расходы' && typeColC !== 'Обязательные расходы') continue;
       const catKey = category.toLowerCase();
       if (!splits[catKey]) {
         splits[catKey] = { discretionary: 0, committed: 0 };
       }
 
-      const amount = optStrict ? readCoachTransactionAmount(row, disp, true) : (typeof parseAmountNumber === 'function')
+      const amount = optStrict ? readMonthlyAmount(row[4], disp[4]) : (typeof parseAmountNumber === 'function')
         ? (parseAmountNumber(row[4], disp[4]) || parseAmountNumber(row[3], disp[3]) || 0)
         : (parseFloat(row[4]) || parseFloat(row[3]) || 0);
 
@@ -226,25 +233,24 @@ function buildMonthlyCoachPayload(ss, reportDate) {
     if (!ss || !ss.getSheetByName(monthTab)) return { period: 'monthly', error: 'missing_month', month_tab: monthTab, report_month: reportMonth };
     if (!ss.getSheetByName('Transactions')) throw new Error('Transactions is missing.');
     const pacing = get503020Status(ss, false, reportDate, true);
-    if (pacing.error || !pacing.target_header) throw new Error(pacing.message || pacing.error || 'Budget targets are unavailable.');
+    if (pacing.error || !pacing.target_header || /^#/.test(pacing.target_header)) throw new Error(pacing.message || pacing.error || 'Budget targets are unavailable.');
     const expected = getMandatoryExpenses(ss, reportDate, true);
     if (!expected.length) throw new Error('Mandatory plan is unavailable.');
     const logged = getLoggedMandatoryThisMonth(ss, reportDate, true);
-    const velocity = getCategoryVelocity(ss, reportDate, true);
     const splits = getCurrentMonthCategorySplits(ss, reportDate, true);
     const buckets = {};
     ['needs', 'wants', 'savings'].forEach(key => {
       const source = pacing[key];
       if (!source || !Number.isFinite(source.actual) || !Number.isFinite(source.target) ||
-          source.target_percent === undefined) throw new Error('Monthly bucket totals/targets are unavailable.');
-      buckets[key] = { actual: source.actual, target: source.target,
+          ![source.total_percent, source.target_percent].every(value => /^-?\d+(?:[.,]\d+)?%$/.test(String(value)))) throw new Error('Monthly bucket totals/targets are unavailable.');
+      buckets[key] = { actual: Number(source.actual.toFixed(2)), target: Number(source.target.toFixed(2)),
         actual_percent: source.total_percent, target_percent: source.target_percent };
     });
     const volatile = ['Рестораны', 'Развлечения', 'Дом', 'Подарки'].map(name => ({
-      name: name, actual: Number(((velocity[name] || {}).total || 0).toFixed(2))
+      name: name, actual: Number(((splits[name.toLowerCase()] || {}).discretionary || 0).toFixed(2))
     }));
     const categories = [...(pacing.needs.sub_categories || []), ...(pacing.wants.sub_categories || [])]
-      .map(category => ({ ...category, over_by: Number((category.actual - category.target).toFixed(2)),
+      .map(category => ({ ...category, actual: Number(category.actual.toFixed(2)), target: Number(category.target.toFixed(2)), over_by: Number((category.actual - category.target).toFixed(2)),
         discretionary_spend: Number(((splits[category.name.toLowerCase()] || {}).discretionary || 0).toFixed(2)),
         committed_spend: Number(((splits[category.name.toLowerCase()] || {}).committed || 0).toFixed(2)) }))
       .filter(category => category.actual > 0 && category.target > 0 && category.discretionary_spend > 0)
@@ -256,7 +262,8 @@ function buildMonthlyCoachPayload(ss, reportDate) {
         Number(Utilities.formatDate(reportDate, 'Asia/Singapore', 'M')), 0, 12)), 'Asia/Singapore', 'dd.MM.yyyy'),
       buckets: buckets, target_header: pacing.target_header, volatile_categories: volatile,
       category_focus: categories.length ? categories[0] : null,
-      mandatory_summary: summarizeMonthlyMandatory(expected, logged) };
+      mandatory_summary: summarizeMonthlyMandatory(expected, logged),
+      monthly_review: buildMonthlyReview(ss, reportDate, pacing, expected) };
   } catch (error) {
     return { period: 'monthly', error: 'monthly_read_error', message: error.message,
       month_tab: monthTab, report_month: reportMonth };
@@ -274,6 +281,7 @@ function generateCoachBrief(payload) {
   const ctx = payload || buildCoachPayload('daily');
   const fallback = ctx.period === 'monthly' ? buildFallbackMonthlyBrief : buildFallbackCoachBrief;
   if (ctx.error) return fallback(ctx);
+  if (ctx.period === 'monthly' && ctx.monthly_review) return renderMonthlyReview(ctx);
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   if (!apiKey) {
     if (ctx.period === 'monthly') return fallback(ctx);
@@ -283,7 +291,7 @@ function generateCoachBrief(payload) {
   const systemInstruction = ctx.period === 'monthly' ? `You are a sharp, warm financial coach for a Singapore family. Write a month-in-review using only this monthly JSON, in at most four short conversational sentences.
 Lead with the month_tab and compare the actual/target amounts and percentages for Needs, Wants and Savings. Include the mandatory_summary paid and unpaid counts; partial items are unpaid, and excluded planning lines are not payments. Do not call unpaid items late: no due dates are supplied.
 For each bucket use "Needs S$actual (actual_percent) vs S$target (target_percent)" (and likewise Wants and Savings). Use "N paid, N unpaid" for completion counts.
-Reference at most one category, using category_focus, and end with one concrete focus for next month. Do not advise cutting committed costs. Carry target_header as a short separate label so the target basis remains visible.
+Reference only category_focus, if present, using "NAME finished at S$actual vs S$target, including S$discretionary_spend discretionary spending". End with one concrete focus for next month. Do not advise cutting committed costs. Carry target_header as a short separate label so the target basis remains visible.
 USE ONLY numbers supplied in this payload. Never calculate a total from bucket amounts, invent a cap, infer a month-over-month trend, or quote daily pacing. All money must use S$; percentages must use %. No tables, bullet lists, or headings; use only <b> and <i> for Telegram HTML.` : `You are a sharp, warm financial coach for a Singapore family. From this JSON write a concise Telegram brief formatted as clean bullet points. At most 3 short sentences total.
 
 Structure as bullet points:
@@ -367,6 +375,7 @@ function generateDailyCoachBrief(contextJSON) {
 
 /** Reject generated monetary figures that cannot be traced to a money field. */
 function coachMoneyIsGrounded(text, payload) {
+  if (payload.monthly_review) return text === renderMonthlyReview(payload);
   const allowed = new Set();
   function add(value) {
     if (typeof value !== 'number' || !isFinite(value)) return;
@@ -392,48 +401,71 @@ function coachMoneyIsGrounded(text, payload) {
   return true;
 }
 
-/** Monthly prose must preserve the reporting identity, percentages and payment counts. */
+/** Accept only balanced <b>/<i> markup and decode the entities emitted by our renderer. */
+function monthlyCoachPlainText(text) {
+  const stack = [];
+  const tags = String(text).match(/<[^>]*>/g) || [];
+  for (const tag of tags) {
+    if (!/^<\/?[bi]>$/.test(tag)) return null;
+    if (tag[1] === '/') {
+      if (stack.pop() !== tag[2]) return null;
+    } else stack.push(tag[1]);
+  }
+  if (stack.length) return null;
+  const plain = String(text).replace(/<[^>]*>/g, '');
+  if (/[<>]/.test(plain) || /&(?!amp;|lt;|gt;)/.test(plain)) return null;
+  return plain.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+/**
+ * Check field-to-label associations, not just a global whitelist of numbers.
+ * After the permitted factual clauses are removed, prose cannot introduce any
+ * new numeric claims, categories, period comparisons or payment-date claims.
+ */
 function monthlyCoachBriefIsGrounded(text, payload) {
-  if (/<\/?(?!b\b|i\b)[a-z][^>]*>/i.test(text) || /[•|]|^\s*[-#]/m.test(text)) return false;
-  let plain = String(text).replace(/<[^>]*>/g, '');
+  if (payload.monthly_review) return text === renderMonthlyReview(payload);
+  let plain = monthlyCoachPlainText(text);
+  if (plain === null || /[•|]|^\s*[-#]/m.test(plain)) return false;
   if (!plain.includes(payload.month_tab) || !plain.includes(payload.target_header)) return false;
-  plain = plain.split(payload.month_tab).join('').split(payload.target_header).join('');
+  plain = plain.replace(payload.month_tab, '').replace(payload.target_header, '');
   if (plain.length > 1600 || (plain.match(/[.!?](?=\s|$)/g) || []).length > 4) return false;
-  if (/total (?:monthly )?(?:spend|budget)|volatile|month.over.month|daily (?:pace|allowance)|\blate\b|\boverdue\b/i.test(plain)) return false;
-  if (/(?:^|[^S])\$|\bSGD\b/i.test(plain)) return false;
-  // Verify the three comparisons against their own source fields, including their labels.
+  if (!/next month/i.test(plain)) return false;
+  if (/total (?:monthly )?(?:spend|budget)|volatile|month.over.month|last month|previous month|compared|improv|declin|\b(?:daily|today|late|overdue|missed|rose|fell|rising|falling)\b/i.test(plain)) return false;
+  const money = '(-?\\d[\\d,]*(?:\\.\\d+)?)';
+  const sameMoney = (text, value) => [Number(value.toFixed(2)), Math.round(value)].includes(Number(text.replace(/,/g, '')));
+  const percent = value => Number(String(value).replace('%', '').replace(',', '.'));
   for (const key of ['needs', 'wants', 'savings']) {
-    const comparison = new RegExp('\\b' + key + '\\b\\s*:?\\s*S\\$\\s*(-?\\d[\\d,]*(?:\\.\\d+)?)\\s*\\(([-\\d.,]+)%\\)\\s*vs\\.?\\s*S\\$\\s*(-?\\d[\\d,]*(?:\\.\\d+)?)\\s*\\(([-\\d.,]+)%\\)', 'i');
-    const match = plain.match(comparison), bucket = payload.buckets[key];
-    if (!match) return false;
-    const sameMoney = (text, value) => [Number(value.toFixed(2)), Math.round(value)].includes(Number(text.replace(/,/g, '')));
-    const percent = value => Number(String(value).replace('%', '').replace(',', '.'));
-    if (!sameMoney(match[1], bucket.actual) || !sameMoney(match[3], bucket.target) ||
+    const pattern = new RegExp('\\b' + key + '\\b\\s*:?\\s*S\\$\\s*' + money +
+      '\\s*\\(([-\\d.,]+)%\\)\\s*vs\\.?\\s*S\\$\\s*' + money + '\\s*\\(([-\\d.,]+)%\\)', 'i');
+    const match = plain.match(pattern), bucket = payload.buckets[key];
+    if (!match || !sameMoney(match[1], bucket.actual) || !sameMoney(match[3], bucket.target) ||
         percent(match[2]) !== percent(bucket.actual_percent) || percent(match[4]) !== percent(bucket.target_percent)) return false;
+    plain = plain.replace(match[0], '');
+    if (new RegExp('\\b' + key + '\\b', 'i').test(plain)) return false;
   }
-  const percentages = new Set();
-  Object.values(payload.buckets).forEach(bucket => {
-    [bucket.actual_percent, bucket.target_percent].forEach(value => {
-      percentages.add(Number(String(value).replace(/%/g, '').replace(',', '.')));
-    });
-  });
-  let valid = true;
-  plain = plain.replace(/(\d+(?:[.,]\d+)?)\s*%/g, (_, value) => {
-    if (!percentages.has(Number(value.replace(',', '.')))) valid = false;
-    return '';
-  });
-  plain = plain.replace(/S\$\s*-?\d[\d,]*(?:\.\d+)?/g, '');
   const counts = payload.mandatory_summary;
-  // Require unambiguous completion counts, rather than merely whitelisting any small integer.
   for (const label of ['paid', 'unpaid']) {
-    const expected = counts[label];
-    const pattern = new RegExp('\\b' + expected + '\\s+' + label + '\\b|\\b' + label + '\\s*:\\s*' + expected + '\\b', 'i');
-    if (!pattern.test(plain)) return false;
+    const pattern = new RegExp('\\b(\\d+)\\s+' + label + '\\b', 'gi');
+    const matches = Array.from(plain.matchAll(pattern));
+    if (matches.length !== 1 || Number(matches[0][1]) !== counts[label]) return false;
+    plain = plain.replace(matches[0][0], '');
   }
-  for (const number of plain.matchAll(/\d+(?:[.,]\d+)?/g)) {
-    if (![counts.paid, counts.unpaid, counts.excluded].includes(Number(number[0]))) valid = false;
+  const focus = payload.category_focus;
+  if (focus) {
+    const escapedName = focus.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(escapedName + '\\s+finished at S\\$' + money +
+      '\\s+vs S\\$' + money + ', including S\\$' + money + '\\s+discretionary spending', 'i');
+    const match = plain.match(pattern);
+    if (!match || !sameMoney(match[1], focus.actual) || !sameMoney(match[2], focus.target) ||
+        !sameMoney(match[3], focus.discretionary_spend)) return false;
+    plain = plain.replace(match[0], '');
+    // The focus may appear again in the action sentence; other categories may not.
+    plain = plain.replace(new RegExp(escapedName, 'gi'), '');
   }
-  return valid;
+  const otherCategories = CATEGORIES.filter(name => !focus || name !== focus.name);
+  if (otherCategories.some(name => plain.toLowerCase().includes(name.toLowerCase()))) return false;
+  if (/\d|%|\$|\bSGD\b|\b(?:committed|mortgage|loan|rent|taxes)\b/i.test(plain)) return false;
+  return true;
 }
 
 function escapeCoachHtml(value) {
@@ -691,7 +723,7 @@ function buildFallbackMandatoryReport(expected, logged) {
 /**
  * Generates an End-of-Month Retrospective Coach Brief using Gemini Flash AI.
  * 
- * @param {Object} [contextJSON] - Aggregated context object from reader.getBudgetCoachContext().
+ * @param {Object} [contextJSON] - Monthly payload from buildCoachPayload('monthly').
  * @return {string} Formatted Telegram HTML brief.
  */
 function generateMonthlyCoachBrief(contextJSON) {
@@ -709,6 +741,7 @@ function generateMonthlyCoachBrief(contextJSON) {
 function buildFallbackMonthlyBrief(ctx) {
   const month = escapeCoachHtml(ctx.month_tab || ctx.report_month || 'Selected month');
   if (ctx.error) return `<b>${month}</b>: monthly results are unavailable; check that month's tab and budget figures before requesting the report again.`;
+  if (ctx.monthly_review) return renderMonthlyReview(ctx);
   const money = value => 'S$' + Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const comparisons = ['needs', 'wants', 'savings'].map(key => {
     const bucket = ctx.buckets[key];
@@ -727,4 +760,23 @@ function buildFallbackMonthlyBrief(ctx) {
     sentences.push('Check the category targets before making discretionary purchases next month.');
   }
   return `<i>${escapeCoachHtml(ctx.target_header)}</i>\n` + sentences.join(' ');
+}
+
+/**
+ * Read-only monthly checkpoint. Returns payload and rendered text without sending
+ * Telegram or updating scheduler acceptance. Omit date for the completed month.
+ */
+function previewMonthlyCoach(optReportDate, optSs) {
+  const payload = buildCoachPayload('monthly', optSs, optReportDate);
+  const brief = generateMonthlyCoachBrief(payload);
+  Logger.log(JSON.stringify({ payload: payload, brief: brief }, null, 2));
+  return { payload: payload, brief: brief };
+}
+
+/** Sheet menu wrapper: easy to compare with the selected month's source cells. */
+function showMonthlyCoachPreview() {
+  const result = previewMonthlyCoach();
+  const plain = monthlyCoachPlainText(result.brief);
+  SpreadsheetApp.getUi().alert(plain === null ? 'Monthly preview could not be displayed.' : plain);
+  return result;
 }
