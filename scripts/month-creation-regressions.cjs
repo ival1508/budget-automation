@@ -297,4 +297,258 @@ module.exports = test => {
     headers[4] = 'Сумма';
     assert.throws(()=>c.readMonthCreationSnapshot(ss), /Unsupported Transactions header/);
   });
+
+  function buildSandboxWorkbook(c, s) {
+    const headers = ['Дата', 'Счёт', 'Тип', 'Сумма', 'Сумма в SGD', 'На счете до', 'На счете после', 'Категория', 'Где'];
+    let nextSheetId = 5000;
+    const deletedNames = [];
+    const parseA1 = a1 => {
+      const m = /^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/.exec(a1);
+      assert.ok(m, 'Unsupported A1 range in mock: ' + a1);
+      const col = letters => letters.charCodeAt(0) - 64;
+      const c1 = col(m[1]), r1 = Number(m[2]);
+      const c2 = m[3] ? col(m[3]) : c1, r2 = m[4] ? Number(m[4]) : r1;
+      return { r1, c1, rows: r2 - r1 + 1, cols: c2 - c1 + 1 };
+    };
+    const makeSheet = raw => {
+      const state = {
+        id: raw.id || (nextSheetId++),
+        name: raw.name,
+        values: JSON.parse(JSON.stringify(raw.values)),
+        formulas: JSON.parse(JSON.stringify(raw.formulas)),
+        notes: {},
+        wraps: {},
+        clearedValidations: [],
+        renameHistory: [raw.name]
+      };
+      const sheetObj = {
+        _state: state,
+        getName: () => state.name,
+        getSheetId: () => state.id,
+        setName: newName => {
+          if (state.failOnFinalRename && !newName.startsWith('_MonthCreate_')) {
+            throw new Error('Simulated rename failure');
+          }
+          state.name = newName;
+          state.renameHistory.push(newName);
+          return sheetObj;
+        },
+        copyTo: targetSs => {
+          const clone = makeSheet({
+            id: nextSheetId++,
+            name: 'Copy of ' + state.name,
+            values: state.values,
+            formulas: state.formulas
+          });
+          clone._state.notes = JSON.parse(JSON.stringify(state.notes));
+          if (state.onCopyMutate) state.onCopyMutate(clone);
+          targetSs._sheets.push(clone);
+          return clone;
+        },
+        getRange: a1 => {
+          if (a1 === 'A1:L70') {
+            return {
+              getValues: () => JSON.parse(JSON.stringify(state.values)),
+              getFormulas: () => JSON.parse(JSON.stringify(state.formulas))
+            };
+          }
+          const { r1, c1, rows, cols } = parseA1(a1);
+          return {
+            setValue: val => {
+              state.values[r1 - 1][c1 - 1] = val;
+              state.formulas[r1 - 1][c1 - 1] = '';
+            },
+            setValues: matrix => {
+              for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                  state.values[r1 - 1 + r][c1 - 1 + c] = matrix[r][c];
+                  state.formulas[r1 - 1 + r][c1 - 1 + c] = '';
+                }
+              }
+            },
+            setFormula: formula => {
+              state.formulas[r1 - 1][c1 - 1] = formula;
+              if (a1 === 'B6') state.values[r1 - 1][c1 - 1] = 0;
+              if (a1 === 'I38') state.values[r1 - 1][c1 - 1] = true;
+            },
+            setFormulas: matrix => {
+              for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                  const f = matrix[r][c];
+                  state.formulas[r1 - 1 + r][c1 - 1 + c] = f;
+                  if (a1 === 'B3:B4') {
+                    state.values[r1 - 1 + r][c1 - 1 + c] = r === 0 ? 32360 : 13220;
+                  } else if (a1 === 'G3:G13') {
+                    state.values[r1 - 1 + r][c1 - 1 + c] = r === 10 ? 'Не отслеживается' : 'Не оплачено · осталось S$100.00';
+                  } else if (a1 === 'I2:I32') {
+                    state.values[r1 - 1 + r][c1 - 1 + c] = '';
+                  }
+                }
+              }
+            },
+            clearDataValidations: () => { state.clearedValidations.push(a1); },
+            setWrap: flag => { state.wraps[a1] = flag; },
+            setNote: note => { state.notes[a1] = note; },
+            clearNote: () => { delete state.notes[a1]; }
+          };
+        }
+      };
+      return sheetObj;
+    };
+    const sheets = s.sheets.map(makeSheet);
+    const ledger = {
+      getMaxRows: () => 2566,
+      getLastRow: () => s.transactions.length + 1,
+      getRange: (...args) => {
+        if (args[0] === 'A1:I1') return { getValues: () => [headers] };
+        return {
+          getValues: () => s.transactions.map(t => [t.date, '', t.type, '', t.amountSgd, '', '', 'Дом', t.source])
+        };
+      }
+    };
+    const ss = {
+      _sheets: sheets,
+      _deletedNames: deletedNames,
+      getId: () => vm.runInContext('SHEET_FACTS.TEST_SPREADSHEET_ID', c),
+      getSheetByName: name => name === 'Transactions' ? ledger : (sheets.find(sh => sh.getName() === name) || null),
+      getSheets: () => sheets.slice(),
+      deleteSheet: sheetObj => {
+        const idx = sheets.indexOf(sheetObj);
+        if (idx >= 0) {
+          deletedNames.push(sheetObj.getName());
+          sheets.splice(idx, 1);
+        }
+      }
+    };
+    return ss;
+  }
+
+  test('Stage 6C: createMonthTab clones template under temp name, applies 7 edits, strips G checkboxes, wraps text and chains to December', c => {
+    const s = fixture();
+    // Make Rita's October salary missing so B4 is provisional (gets a review note) while B3 is ready (clears stale note).
+    const ritaOct = s.transactions.pop();
+    const ss = buildSandboxWorkbook(c, s);
+    ss._sheets[0]._state.notes.B3 = 'Stale note from October';
+    const octBefore = JSON.stringify(ss._sheets[0]._state.values);
+
+    const res = c.createMonthTab(2026, 11, ss);
+    assert.equal(res.status, 'created');
+    assert.equal(res.created, true);
+    assert.equal(res.sheetName, 'Ноябрь');
+    assert.equal(res.source, "Октябрь'26");
+
+    const nov = ss.getSheetByName('Ноябрь');
+    assert.ok(nov);
+    assert.ok(nov._state.renameHistory[1].startsWith('_MonthCreate_2026_11_'));
+    assert.equal(nov._state.renameHistory[2], 'Ноябрь');
+    assert.deepEqual(nov._state.clearedValidations, ['G3:G13']);
+    assert.equal(nov._state.wraps['G3:G13'], true);
+    assert.equal(nov._state.wraps['I2:I32'], true);
+    assert.equal(nov._state.notes.B3, undefined);
+    assert.match(nov._state.notes.B4, /Provisional salary baseline.*Kaspersky.*2026-10/);
+    assert.equal(nov._state.values[0][1], 46327);
+    assert.equal(nov._state.values[4][1], 0);
+    assert.equal(nov._state.formulas[37][8], '=H38<=$D$1');
+    assert.equal(JSON.stringify(ss._sheets[0]._state.values), octBefore);
+
+    // Repeat call is an idempotent no-op.
+    const repeat = c.createMonthTab(2026, 11, ss);
+    assert.equal(repeat.status, 'exists');
+    assert.equal(repeat.created, false);
+    assert.equal(repeat.sheetName, 'Ноябрь');
+    assert.equal(ss.getSheets().length, 2);
+
+    // Chaining: create December using the generated v2 November tab as template!
+    s.transactions.push(ritaOct);
+    s.transactions.push({ row: 10, date: serial('2026-11-24'), type: 'Доходы', amountSgd: 31500, source: 'Google Singapore' });
+    s.transactions.push({ row: 11, date: serial('2026-11-25'), type: 'Доходы', amountSgd: 12800, source: 'Kaspersky Lab' });
+    const dec = c.createMonthTab(2026, 12, ss);
+    assert.equal(dec.status, 'created');
+    assert.equal(dec.source, 'Ноябрь');
+    assert.equal(dec.sheetName, 'Декабрь');
+    assert.equal(ss.getSheets().length, 3);
+
+    // Partial or corrupted v2 formula in a generated template still blocks downstream creation.
+    const decSheet = ss.getSheetByName('Декабрь');
+    decSheet._state.formulas[5][6] = '=TRUE';
+    assert.throws(() => c.validateMonthCreationTemplate({
+      name: 'Декабрь',
+      values: decSheet._state.values,
+      formulas: decSheet._state.formulas
+    }), /Unsupported existing G status at row 6/);
+  });
+
+  test('Stage 6C: enforces sandbox while creationEnabled is false, handles lock contention, and cleans up temp tab on failure without touching user tabs', c => {
+    const s = fixture();
+    const ss = buildSandboxWorkbook(c, s);
+
+    // Live creation explicitly refused while creationEnabled === false.
+    assert.throws(() => c.createMonthTab(2026, 11, { spreadsheet: ss, sandbox: false }), /Live month creation is disabled/);
+
+    // Wrong spreadsheet ID rejected before lock or sheet access.
+    const wrongSs = { getId: () => 'live-id-not-sandbox', getSheetByName: () => { throw new Error('Should not read'); } };
+    assert.throws(() => c.createMonthTab(2026, 11, wrongSs), /Sandbox spreadsheet identity does not match TEST_SPREADSHEET_ID/);
+
+    // Blocked plan (malformed salary) throws without copying a sheet.
+    const badSalary = fixture();
+    badSalary.transactions[0].amountSgd = 'invalid';
+    const badSs = buildSandboxWorkbook(c, badSalary);
+    assert.throws(() => c.createMonthTab(2026, 11, badSs), /Month creation blocked/);
+    assert.equal(badSs.getSheets().length, 1);
+    assert.equal(badSs._deletedNames.length, 0);
+
+    // Failure during verification (e.g. formula evaluation error '#VALUE!') deletes only the temp sheet.
+    const errSs = buildSandboxWorkbook(c, fixture());
+    errSs._sheets[0]._state.onCopyMutate = clone => {
+      const origGetRange = clone.getRange;
+      clone.getRange = a1 => {
+        const r = origGetRange(a1);
+        if (a1 === 'A1:L70') {
+          return {
+            getValues: () => {
+              const v = r.getValues();
+              v[2][1] = '#VALUE!';
+              return v;
+            },
+            getFormulas: () => r.getFormulas()
+          };
+        }
+        return r;
+      };
+    };
+    assert.throws(() => c.createMonthTab(2026, 11, errSs), /Formula evaluation error at B3/);
+    assert.equal(errSs.getSheets().length, 1);
+    assert.equal(errSs.getSheets()[0].getName(), "Октябрь'26");
+    assert.equal(errSs._deletedNames.length, 1);
+    assert.match(errSs._deletedNames[0], /^_MonthCreate_2026_11_/);
+
+    // Failure during final rename also cleans up temp sheet and never deletes an existing target tab.
+    const raceSs = buildSandboxWorkbook(c, fixture());
+    raceSs._sheets[0]._state.onCopyMutate = clone => {
+      clone._state.failOnFinalRename = true;
+    };
+    assert.throws(() => c.createMonthTab(2026, 11, raceSs), /Simulated rename failure/);
+    assert.equal(raceSs.getSheets().length, 1);
+    assert.equal(raceSs._deletedNames.length, 1);
+
+    // Concurrent target appearance before final rename cleans up only the temp tab and preserves the concurrent target tab.
+    const concurrentSs = buildSandboxWorkbook(c, fixture());
+    const userCreatedNov = { getName: () => 'Ноябрь', getSheetId: () => 9999 };
+    concurrentSs._sheets[0]._state.onCopyMutate = () => {
+      concurrentSs._sheets.push(userCreatedNov);
+    };
+    assert.throws(() => c.createMonthTab(2026, 11, concurrentSs), /Target sheet was created concurrently: Ноябрь/);
+    assert.ok(concurrentSs.getSheets().includes(userCreatedNov));
+    assert.equal(concurrentSs._deletedNames.length, 1);
+    assert.match(concurrentSs._deletedNames[0], /^_MonthCreate_2026_11_/);
+
+    // Lock contention rejects before any sheet reads or copies.
+    const origLock = c.LockService;
+    try {
+      c.LockService = { getScriptLock: () => ({ hasLock: () => false, tryLock: () => false, releaseLock: () => {} }) };
+      assert.throws(() => c.createMonthTab(2026, 11, ss), /Budget write is busy/);
+    } finally {
+      c.LockService = origLock;
+    }
+  });
 };

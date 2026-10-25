@@ -1,4 +1,4 @@
-/** Stage 6B: read-only month creation plans. No creator or automatic reader hook. */
+/** Stage 6B–6C: month creation plans, preview and controlled sandbox-safe creator. */
 const MONTH_CREATION_NAMES = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 // Employer-only salary top-up. Employee rates describe the preserved E13 deduction.
@@ -36,10 +36,14 @@ function monthCreationCell(snapshot, row, col, formulas) {
   return ((formulas ? snapshot.formulas : snapshot.values)[row - 1] || [])[col - 1] ?? '';
 }
 
+function monthCreationNormalFormula(formula) {
+  return String(formula || '').replace(/\s/g, '').replace(/,/g, ';').toUpperCase();
+}
+
 function validateMonthCreationTemplate(source) {
   const v = (r, c) => monthCreationCell(source, r, c, false);
   const f = (r, c) => monthCreationCell(source, r, c, true);
-  const normal = formula => String(formula).replace(/\s/g, '').replace(/,/g, ';').toUpperCase();
+  const normal = monthCreationNormalFormula;
   const requireFormula = (r, c, expected) => {
     if (normal(f(r, c)) !== normal(expected)) throw new Error('Unsupported template formula at ' + String.fromCharCode(64 + c) + r);
   };
@@ -61,12 +65,31 @@ function validateMonthCreationTemplate(source) {
   if (v(13, 4) !== 'CPF' || cpfFormula !== '=(0.09*8000+0.15*8000)+(0.17*8000+0.2*8000)' || v(13, 5) !== 4880) {
     throw new Error('Unsupported CPF plan at E13; review the contribution rates and wage base.');
   }
+  let hasDescriptionFormulas = false;
+  for (let row = 2; row <= 32; row++) {
+    if (f(row, 9)) hasDescriptionFormulas = true;
+  }
+  let hasStatusFormulas = false;
+  for (let row = 3; row <= 13; row++) {
+    if (f(row, 7)) hasStatusFormulas = true;
+  }
+  const isGeneratedTemplate = hasDescriptionFormulas || hasStatusFormulas;
+  if (isGeneratedTemplate) {
+    requireFormula(38, 9, '=H38<=$D$1');
+    requireFormula(6, 2, monthCreationLightIncomeFormula());
+  }
   for (let row = 2; row <= 32; row++) {
     requireFormula(row, 8, '=IF(INDIRECT(ADDRESS(ROW()+36; COLUMN()+1));INDIRECT(ADDRESS(ROW()+36; COLUMN())); )');
     requireFormula(row, 10, '=SUMIFS(Transactions!E:E;Transactions!A:A;H' + row + ';Transactions!C:C;"Расходы";Transactions!H:H;"<>Отложения";Transactions!H:H;"<>Аренда")');
     requireFormula(row, 12, '=INDIRECT(ADDRESS(ROW(); COLUMN()-1))-INDIRECT(ADDRESS(ROW(); COLUMN()-2))');
     if (row > 2) requireFormula(row, 11, '=IF(INDIRECT(ADDRESS(ROW()+36; COLUMN()-2)); INDIRECT(ADDRESS(ROW()-1; COLUMN()+1))+D$17; INDIRECT(ADDRESS(ROW()-1; COLUMN()+1)))');
-    if (f(row, 9)) throw new Error('Description formula already exists at I' + row + '; review template version.');
+    if (isGeneratedTemplate) {
+      if (normal(f(row, 9)) !== normal(monthCreationDescriptionFormula(row))) {
+        throw new Error('Description formula already exists at I' + row + '; review template version.');
+      }
+    } else if (f(row, 9)) {
+      throw new Error('Description formula already exists at I' + row + '; review template version.');
+    }
   }
   for (let row = 39; row <= 68; row++) {
     requireFormula(row, 8, '=INDIRECT(ADDRESS(ROW()-1; COLUMN()))+1');
@@ -81,7 +104,14 @@ function validateMonthCreationTemplate(source) {
       if (categories.has(category)) throw new Error('Duplicate mandatory category: ' + label);
       categories.add(category);
     }
-    if (f(row, 7) || (flag !== '' && typeof flag !== 'boolean')) throw new Error('Unsupported existing G status at row ' + row);
+    if (isGeneratedTemplate) {
+      const validGeneratedFlag = flag === '' || (typeof flag === 'string' && !/^#|^Err:/i.test(flag.trim()));
+      if (normal(f(row, 7)) !== normal(monthCreationStatusFormula(row)) || !validGeneratedFlag) {
+        throw new Error('Unsupported existing G status at row ' + row);
+      }
+    } else if (f(row, 7) || (flag !== '' && typeof flag !== 'boolean')) {
+      throw new Error('Unsupported existing G status at row ' + row);
+    }
   }
   return true;
 }
@@ -348,4 +378,152 @@ function showMonthCreationPreview() {
   const plan = previewMonthCreation();
   SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(buildMonthCreationPreviewHtml(plan)).setWidth(900).setHeight(650), 'Preview next month');
   return plan;
+}
+
+/** Verify applied values, formulas and structural integrity before publishing final tab name. */
+function verifyCreatedMonthSheet(sheet, plan) {
+  const grid = sheet.getRange('A1:L70');
+  const values = grid.getValues();
+  const formulas = grid.getFormulas();
+  validateMonthCreationTemplate({ name: plan.target.name, values: values, formulas: formulas });
+  const normal = monthCreationNormalFormula;
+  const anchor = monthCreationAnchor(values[0][1]);
+  if ( formulas[0][1] || anchor.year !== plan.target.year || anchor.month !== plan.target.month || anchor.day !== 1 ) {
+    throw new Error('Created sheet B1 date verification failed.');
+  }
+  const salaryEdit = plan.edits.find(edit => edit.range === 'B3:B4');
+  if (normal(formulas[2][1]) !== normal(salaryEdit.formulas[0][0]) ||
+      normal(formulas[3][1]) !== normal(salaryEdit.formulas[1][0])) {
+    throw new Error('Created sheet B3:B4 salary formula verification failed.');
+  }
+  if (values[4][1] !== 0 || formulas[4][1]) {
+    throw new Error('Created sheet B5 reset verification failed.');
+  }
+  const lightEdit = plan.edits.find(edit => edit.range === 'B6');
+  if (normal(formulas[5][1]) !== normal(lightEdit.formula)) {
+    throw new Error('Created sheet B6 light-income formula verification failed.');
+  }
+  const checkNoError = (r, c, label) => {
+    const val = (values[r - 1] || [])[c - 1];
+    if (typeof val === 'string' && /^(#|Err:)/i.test(val.trim())) {
+      throw new Error('Formula evaluation error at ' + label + ': ' + val);
+    }
+  };
+  [[1, 2, 'B1'], [1, 4, 'D1'], [3, 2, 'B3'], [4, 2, 'B4'], [5, 2, 'B5'], [6, 2, 'B6'],
+   [14, 2, 'B14'], [14, 5, 'E14'], [15, 4, 'D15'], [17, 4, 'D17'], [19, 4, 'D19'], [38, 9, 'I38']].forEach(([r, c, label]) => checkNoError(r, c, label));
+  for (let row = 3; row <= 13; row++) checkNoError(row, 7, 'G' + row);
+  for (let row = 2; row <= 32; row++) checkNoError(row, 9, 'I' + row);
+  return true;
+}
+
+/**
+ * Stage 6C controlled creator. Enforces sandbox target while live creation is
+ * disabled, rechecks existence under the writer lock, builds under a temporary
+ * tab name, verifies all edits/formulas, and cleans up the temp tab on failure.
+ */
+function createMonthTab(year, month, options) {
+  if (year === undefined && month === undefined) {
+    const now = calendarDateParts(new Date());
+    year = now.year + (now.month === 12 ? 1 : 0);
+    month = now.month === 12 ? 1 : now.month + 1;
+  }
+  monthCreationPeriod(year, month);
+  const opts = options && typeof options.getSheetByName === 'function'
+    ? { spreadsheet: options }
+    : Object.assign({}, options || {});
+  const creationEnabled = Boolean(typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.monthTemplate && SHEET_FACTS.monthTemplate.creationEnabled);
+  if (!creationEnabled && opts.sandbox === false) {
+    throw new Error('Live month creation is disabled until sandbox acceptance passes.');
+  }
+  const useSandbox = opts.sandbox !== undefined ? Boolean(opts.sandbox) : !creationEnabled;
+  const ss = getTargetSpreadsheet(useSandbox, opts.spreadsheet);
+  return withBudgetWriteLock(() => {
+    const snapshot = readMonthCreationSnapshot(ss);
+    const plan = buildMonthCreationPlan(snapshot, year, month);
+    if (plan.status === 'exists') {
+      return { status: 'exists', created: false, sheetName: plan.existing, target: plan.target, plan: plan };
+    }
+    if (plan.status !== 'preview') {
+      throw new Error('Month creation blocked: ' + (plan.warnings || []).join(' '));
+    }
+    if (ss.getSheetByName(plan.target.name)) {
+      throw new Error('Target sheet name already exists: ' + plan.target.name);
+    }
+    const sourceSheet = ss.getSheetByName(plan.source);
+    if (!sourceSheet || (plan.sourceId !== undefined && typeof sourceSheet.getSheetId === 'function' && sourceSheet.getSheetId() !== plan.sourceId)) {
+      throw new Error('Source template sheet changed during creation: ' + plan.source);
+    }
+    const suffix = typeof Utilities !== 'undefined' && typeof Utilities.getUuid === 'function'
+      ? Utilities.getUuid().replace(/-/g, '').slice(0, 8)
+      : String(Date.now());
+    const tempName = '_MonthCreate_' + plan.target.year + '_' + String(plan.target.month).padStart(2, '0') + '_' + suffix;
+    if (ss.getSheetByName(tempName)) {
+      throw new Error('Temporary creation sheet already exists: ' + tempName);
+    }
+    let tempSheet = null;
+    let ownsTempSheet = false;
+    try {
+      tempSheet = sourceSheet.copyTo(ss);
+      ownsTempSheet = true;
+      tempSheet.setName(tempName);
+      plan.edits.forEach(edit => {
+        const range = tempSheet.getRange(edit.range);
+        if (Object.prototype.hasOwnProperty.call(edit, 'value')) {
+          range.setValue(edit.value);
+        } else if (Object.prototype.hasOwnProperty.call(edit, 'values')) {
+          range.setValues(edit.values);
+        } else if (Object.prototype.hasOwnProperty.call(edit, 'formula')) {
+          range.setFormula(edit.formula);
+        } else if (Object.prototype.hasOwnProperty.call(edit, 'formulas')) {
+          range.setFormulas(edit.formulas);
+        } else {
+          throw new Error('Unsupported month creation edit for ' + edit.range);
+        }
+      });
+      const statusRange = tempSheet.getRange('G3:G13');
+      if (typeof statusRange.clearDataValidations === 'function') statusRange.clearDataValidations();
+      else if (typeof statusRange.setDataValidation === 'function') statusRange.setDataValidation(null);
+      if (typeof statusRange.setWrap === 'function') statusRange.setWrap(true);
+      const descRange = tempSheet.getRange('I2:I32');
+      if (typeof descRange.setWrap === 'function') descRange.setWrap(true);
+      const periodLabel = plan.salary.period.year + '-' + String(plan.salary.period.month).padStart(2, '0');
+      plan.salary.entries.forEach(entry => {
+        const cellRange = tempSheet.getRange(entry.cell);
+        if (entry.status === 'provisional' && entry.fallback) {
+          if (typeof cellRange.setNote === 'function') {
+            cellRange.setNote('Provisional salary baseline (S$' + entry.fallback.amount.toFixed(2) + ' from ' +
+              entry.fallback.sheet + '!' + entry.fallback.cell + '). No regular Доходы salary for ' +
+              entry.employer + ' in ' + periodLabel + ' was logged at creation; formula updates automatically when logged.');
+          }
+        } else if (typeof cellRange.clearNote === 'function') {
+          cellRange.clearNote();
+        } else if (typeof cellRange.setNote === 'function') {
+          cellRange.setNote('');
+        }
+      });
+      if (typeof SpreadsheetApp !== 'undefined' && typeof SpreadsheetApp.flush === 'function') {
+        SpreadsheetApp.flush();
+      }
+      verifyCreatedMonthSheet(tempSheet, plan);
+      if (ss.getSheetByName(plan.target.name)) {
+        throw new Error('Target sheet was created concurrently: ' + plan.target.name);
+      }
+      tempSheet.setName(plan.target.name);
+      ownsTempSheet = false;
+      return {
+        status: 'created',
+        created: true,
+        sheetName: plan.target.name,
+        sheetId: typeof tempSheet.getSheetId === 'function' ? tempSheet.getSheetId() : null,
+        source: plan.source,
+        target: plan.target,
+        plan: plan
+      };
+    } catch (err) {
+      if (tempSheet && ownsTempSheet && typeof ss.deleteSheet === 'function') {
+        try { ss.deleteSheet(tempSheet); } catch (_) {}
+      }
+      throw err;
+    }
+  });
 }
