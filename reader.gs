@@ -82,26 +82,81 @@ function getCurrentMonthTabName(optDate) {
 }
 
 /**
- * STAGE 1: getActiveMonthTab() → returns correct tab via the month map.
- * If current month's tab does not exist yet (JIT created), returns clear missing signal.
- * Once Stage 6 exists, this routes through ensureMonthTab() to auto-create it.
+ * Resolves the monthly sheet for the given date in SGT, supporting both legacy
+ * "'YY"-suffixed tab names (e.g. "Октябрь'26") and Stage 6 yearless tab names
+ * (e.g. "Ноябрь") with B1 year/month verification and duplicate-alias protection.
+ *
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss]
  * @param {Date} [optDate]
+ * @return {{ sheet: GoogleAppsScript.Spreadsheet.Sheet|null, tabName: string }}
+ */
+function resolveMonthSheet(ss, optDate) {
+  const date = optDate instanceof Date ? optDate : new Date();
+  const legacyName = (typeof SHEET_FACTS !== 'undefined' && typeof SHEET_FACTS.getMonthTabName === 'function')
+    ? SHEET_FACTS.getMonthTabName(optDate)
+    : getCurrentMonthTabName(optDate);
+  if (!ss || typeof ss.getSheetByName !== 'function') {
+    return { sheet: null, tabName: legacyName };
+  }
+  const monthNum = parseInt(Utilities.formatDate(date, 'Asia/Singapore', 'M'), 10);
+  const targetYear = parseInt(Utilities.formatDate(date, 'Asia/Singapore', 'yyyy'), 10);
+  const yearlessName = (typeof MONTH_CREATION_NAMES !== 'undefined' && MONTH_CREATION_NAMES[monthNum - 1]) || '';
+  const legacySheet = ss.getSheetByName(legacyName);
+  const yearlessSheet = (yearlessName && yearlessName !== legacyName) ? ss.getSheetByName(yearlessName) : null;
+  if (legacySheet && yearlessSheet) {
+    throw new Error('Multiple tabs represent month ' + monthNum + ': ' + legacyName + ' and ' + yearlessName);
+  }
+  if (yearlessSheet) {
+    if (typeof yearlessSheet.getRange === 'function' && typeof monthCreationAnchor === 'function') {
+      const b1Range = yearlessSheet.getRange('B1');
+      const b1Val = typeof b1Range.getValue === 'function'
+        ? b1Range.getValue()
+        : (typeof b1Range.getValues === 'function' ? (b1Range.getValues()[0] || [])[0] : '');
+      const anchor = monthCreationAnchor(b1Val);
+      if (anchor.year !== targetYear || anchor.month !== monthNum || anchor.day !== 1) {
+        throw new Error('Month tab name/date mismatch: ' + yearlessName);
+      }
+    }
+    return { sheet: yearlessSheet, tabName: yearlessName };
+  }
+  if (legacySheet) {
+    return { sheet: legacySheet, tabName: legacyName };
+  }
+  return { sheet: null, tabName: legacyName };
+}
+
+/**
+ * STAGE 1: getActiveMonthTab() → returns correct tab via the month map.
+ * If current month's tab does not exist yet (JIT created), returns clear missing signal.
+ * Once Stage 6 exists, operational current-month reads route through ensureMonthTab() to auto-create it.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss]
+ * @param {Date} [optDate]
+ * @param {Object} [optOptions]
  * @return {Object} { tabName, sheet, exists, status, message }
  */
-function getActiveMonthTab(ss, optDate) {
+function getActiveMonthTab(ss, optDate, optOptions) {
   const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
   if (!spreadsheet) return { exists: false, status: 'NO_SPREADSHEET', error: 'No active spreadsheet found.' };
-  
-  const tabName = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.getMonthTabName) 
-    ? SHEET_FACTS.getMonthTabName(optDate) 
-    : getCurrentMonthTabName(optDate);
-    
-  let sheet = spreadsheet.getSheetByName(tabName);
-  
-  // Hook for Stage 6 automated JIT creation once ensureMonthTab exists
-  if (!sheet && typeof ensureMonthTab === 'function') {
+
+  const resolved = resolveMonthSheet(spreadsheet, optDate);
+  let tabName = resolved.tabName;
+  let sheet = resolved.sheet;
+
+  const readOnly = Boolean(optOptions && optOptions.readOnly);
+  const isCurrentOperationalMonth = (() => {
+    if (readOnly) return false;
+    const target = optDate instanceof Date ? optDate : new Date();
+    const now = new Date();
+    return Utilities.formatDate(target, 'Asia/Singapore', 'yyyy-MM') ===
+           Utilities.formatDate(now, 'Asia/Singapore', 'yyyy-MM');
+  })();
+
+  // Hook for Stage 6 automated JIT creation on operational current-month reads only
+  if (!sheet && isCurrentOperationalMonth && typeof ensureMonthTab === 'function') {
     sheet = ensureMonthTab(spreadsheet, tabName, optDate);
+    if (sheet && typeof sheet.getName === 'function') {
+      tabName = sheet.getName();
+    }
   }
   
   if (!sheet) {
@@ -130,7 +185,7 @@ function getActiveMonthTab(ss, optDate) {
  */
 function getMandatoryExpenses(ss, optDate, optStrict) {
   try {
-    const activeInfo = getActiveMonthTab(ss, optDate);
+    const activeInfo = getActiveMonthTab(ss, optDate, { readOnly: Boolean(optStrict || optDate) });
     if (!activeInfo || !activeInfo.exists) {
       if (optStrict) throw new Error('Mandatory plan sheet is unavailable.');
       Logger.log(`⚠️ Warning: ${activeInfo ? activeInfo.message : 'Sheet not found'}`);
@@ -154,7 +209,10 @@ function getMandatoryExpenses(ss, optDate, optStrict) {
         : parseAmountNumber(rangeValues[i][1], rangeDisp[i][1]);
       // Col G is index 3 in D:G range (Col D=0, Col E=1, Col F=2, Col G=3)
       const rawCheck = rangeValues[i].length > 3 ? rangeValues[i][3] : rangeValues[i][2];
-      if (optStrict && validLabel && /^#/.test(String(rawCheck))) throw new Error('Unreadable mandatory completion flag.');
+      const rawCheckStr = String(rawCheck || '').trim();
+      if (optStrict && validLabel && (/^#/.test(rawCheckStr) || /^(Данные недоступны|Проверьте категорию)$/i.test(rawCheckStr))) {
+        throw new Error('Unreadable mandatory completion flag.');
+      }
       const nonLedger = isNonLedgerMandatory(label);
       const paidFlag = amount === 0 || nonLedger || rawCheck === true || String(rawCheck).toUpperCase() === 'TRUE';
 
@@ -978,8 +1036,9 @@ function getRecentDailyTrends(ss, optDate) {
     const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
     if (!spreadsheet) return defaultResult;
 
-    const tabName = getCurrentMonthTabName(optDate);
-    const sheet = spreadsheet.getSheetByName(tabName);
+    const resolved = resolveMonthSheet(spreadsheet, optDate);
+    const tabName = resolved.tabName;
+    const sheet = resolved.sheet;
     if (!sheet) {
       Logger.log(`⚠️ Warning: Sheet "${tabName}" not found for recent daily trends.`);
       return defaultResult;
@@ -1080,7 +1139,7 @@ function getBudgetCoachContext(ss, optDate) {
   const now = optDate || new Date();
 
   const currentDateStr = Utilities.formatDate(now, 'Asia/Singapore', 'dd.MM.yyyy');
-  const monthTab = getCurrentMonthTabName(now);
+  const monthTab = resolveMonthSheet(spreadsheet, now).tabName;
 
   const dailyStatus = getDailyBudgetStatus(spreadsheet, now);
   let mandatory;
@@ -1629,14 +1688,9 @@ function getMonthlyTabDaySpend(optDate, optSs) {
       targetYear = parseInt(p[2], 10);
     }
 
-    const monthTabMap = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.MONTH_TAB_NAMES) || {
-      1: "Я'26", 2: "Ф'26", 3: "М'26", 4: "А'26",
-      5: "Май'26", 6: "Июнь'26", 7: "Июль'26", 8: "Август'26",
-      9: "Сентябрь'26", 10: "Октябрь'26", 11: "Ноябрь'26", 12: "Декабрь'26"
-    };
-
-    const tabName = monthTabMap[targetMonth] || '';
-    const sheet = ss.getSheetByName(tabName);
+    const resolved = resolveMonthSheet(ss, new Date(Date.UTC(targetYear, targetMonth - 1, Math.max(1, targetDay), 12)));
+    const tabName = resolved.tabName;
+    const sheet = resolved.sheet;
     if (!sheet) {
       Logger.log(`⚠️ Monthly sheet "${tabName}" for month ${targetMonth} (date: ${optDate}) not found.`);
       return null;

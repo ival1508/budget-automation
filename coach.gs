@@ -227,10 +227,14 @@ function summarizeMonthlyMandatory(expected, logged) {
 /** Assemble only the selected month's numbers; never label daily pacing as monthly results. */
 function buildMonthlyCoachPayload(ss, reportDate) {
   if (!(reportDate instanceof Date) || !Number.isFinite(reportDate.getTime())) throw new Error('A valid monthly report date is required.');
-  const monthTab = getCurrentMonthTabName(reportDate);
+  let monthTab = getCurrentMonthTabName(reportDate);
   const reportMonth = Utilities.formatDate(reportDate, 'Asia/Singapore', 'yyyy-MM');
   try {
-    if (!ss || !ss.getSheetByName(monthTab)) return { period: 'monthly', error: 'missing_month', month_tab: monthTab, report_month: reportMonth };
+    const resolved = typeof resolveMonthSheet === 'function'
+      ? resolveMonthSheet(ss, reportDate)
+      : { sheet: ss && ss.getSheetByName(monthTab), tabName: monthTab };
+    monthTab = resolved.tabName || monthTab;
+    if (!ss || !resolved.sheet) return { period: 'monthly', error: 'missing_month', month_tab: monthTab, report_month: reportMonth };
     if (!ss.getSheetByName('Transactions')) throw new Error('Transactions is missing.');
     const pacing = get503020Status(ss, false, reportDate, true);
     if (pacing.error || !pacing.target_header || /^#/.test(pacing.target_header)) throw new Error(pacing.message || pacing.error || 'Budget targets are unavailable.');

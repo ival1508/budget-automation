@@ -12,7 +12,7 @@ module.exports = test => {
     assert.equal(p.target.name,'Ноябрь'); assert.equal(p.target.days,30); assert.equal(p.source,"Октябрь'26");
     assert.deepEqual(Array.from(p.edits,e=>e.range),['B1','B3:B4','B5','B6','I38','G3:G13','I2:I32']);
     assert.equal(p.edits[0].value,46327); assert.equal(p.edits[4].formula,'=H38<=$D$1');
-    assert.equal(p.salary.entries[0].amount,32360); assert.equal(p.edits[1].formulas.length,2); assert.equal(p.edits[5].formulas.length,11); assert.equal(p.edits[6].formulas.length,31);
+    assert.equal(p.salary.entries[0].amount,32360); assert.equal(p.edits[1].formulas.length,2); assert.equal(p.edits[5].values.length,11); assert.equal(p.edits[6].formulas.length,31);
   });
   test('Stage 6B: derives compensation from ledger income and replaces stale light-income inputs', c => {
     for (const templateValue of [99000, '#REF!', '']) {
@@ -253,12 +253,14 @@ module.exports = test => {
       t=>{t.values[2][0]='other';},t=>{t.values[36][7]='other';}
     ]){const s=fixture();mutate(s.sheets[0]);assert.throws(()=>c.buildMonthCreationPlan(s,2026,11));}
   });
-  test('Stage 6B: status formulas expose partial/refund arithmetic, exclusions and data failures', c => {
-    const p=c.buildMonthCreationPlan(fixture(),2026,11), formulas=p.edits.find(e=>e.range==='G3:G13').formulas;
-    assert.match(formulas[10][0],/label;LOWER\(TRIM\(D13\)\)/);
-    assert.match(formulas[10][0],/label="cpf";"Не отслеживается"/);
-    assert.match(formulas[2][0],/Проверьте категорию/);
-    const f=formulas[0][0];assert.match(f,/MIN\(\$D\$1;TODAY\(\)\)/);assert.match(f,/ROUND\(plan\*100;0\)-paid/);
+  test('Stage 6B: G3:G13 is cleared to blank in plan while status formula builder retains partial/refund arithmetic', c => {
+    const p=c.buildMonthCreationPlan(fixture(),2026,11), values=p.edits.find(e=>e.range==='G3:G13').values;
+    assert.equal(values.length, 11);
+    assert.ok(values.every(row => row[0] === ''));
+    assert.match(c.monthCreationStatusFormula(13, 'CPF'),/label;LOWER\(TRIM\(D13\)\)/);
+    assert.match(c.monthCreationStatusFormula(13, 'CPF'),/label="cpf";"Не отслеживается"/);
+    assert.match(c.monthCreationStatusFormula(5, 'Родители'),/Проверьте категорию/);
+    const f=c.monthCreationStatusFormula(3, 'Квартира');assert.match(f,/MIN\(\$D\$1;TODAY\(\)\)/);assert.match(f,/ROUND\(plan\*100;0\)-paid/);
     assert.match(f,/Частично/);assert.match(f,/Данные недоступны/);assert.match(f,/ISNUMBER\(amounts\)/);
     assert.match(f,/ROWS\(Transactions!\$A:\$A\)/);assert.match(f,/LOWER\(TRIM\(cats\)\)/);
   });
@@ -325,6 +327,8 @@ module.exports = test => {
         _state: state,
         getName: () => state.name,
         getSheetId: () => state.id,
+        getLastRow: () => state.values.length,
+        getLastColumn: () => (state.values[0] || []).length,
         setName: newName => {
           if (state.failOnFinalRename && !newName.startsWith('_MonthCreate_')) {
             throw new Error('Simulated rename failure');
@@ -345,15 +349,47 @@ module.exports = test => {
           targetSs._sheets.push(clone);
           return clone;
         },
-        getRange: a1 => {
+        getRange: (...args) => {
+          const a1 = typeof args[0] === 'string' ? args[0] : null;
           if (a1 === 'A1:L70') {
             return {
               getValues: () => JSON.parse(JSON.stringify(state.values)),
               getFormulas: () => JSON.parse(JSON.stringify(state.formulas))
             };
           }
-          const { r1, c1, rows, cols } = parseA1(a1);
+          const { r1, c1, rows, cols } = a1
+            ? parseA1(a1)
+            : { r1: Number(args[0]), c1: Number(args[1]), rows: Number(args[2] || 1), cols: Number(args[3] || 1) };
+          const sliceValues = () => {
+            const out = [];
+            for (let r = 0; r < rows; r++) {
+              const srcRow = state.values[r1 - 1 + r] || [];
+              const rowArr = [];
+              for (let colIdx = 0; colIdx < cols; colIdx++) {
+                rowArr.push(srcRow[c1 - 1 + colIdx] !== undefined ? srcRow[c1 - 1 + colIdx] : '');
+              }
+              out.push(rowArr);
+            }
+            return out;
+          };
+          const sliceFormulas = () => {
+            const out = [];
+            for (let r = 0; r < rows; r++) {
+              const srcRow = state.formulas[r1 - 1 + r] || [];
+              const rowArr = [];
+              for (let colIdx = 0; colIdx < cols; colIdx++) {
+                rowArr.push(srcRow[c1 - 1 + colIdx] || '');
+              }
+              out.push(rowArr);
+            }
+            return out;
+          };
           return {
+            getValue: () => sliceValues()[0][0],
+            getDisplayValue: () => String(sliceValues()[0][0] ?? ''),
+            getValues: () => sliceValues(),
+            getDisplayValues: () => sliceValues().map(r => r.map(v => String(v ?? ''))),
+            getFormulas: () => sliceFormulas(),
             setValue: val => {
               state.values[r1 - 1][c1 - 1] = val;
               state.formulas[r1 - 1][c1 - 1] = '';
@@ -442,7 +478,7 @@ module.exports = test => {
     assert.ok(nov._state.renameHistory[1].startsWith('_MonthCreate_2026_11_'));
     assert.equal(nov._state.renameHistory[2], 'Ноябрь');
     assert.deepEqual(nov._state.clearedValidations, ['G3:G13']);
-    assert.equal(nov._state.wraps['G3:G13'], true);
+    assert.equal(nov._state.wraps['G3:G13'], undefined);
     assert.equal(nov._state.wraps['I2:I32'], true);
     assert.equal(nov._state.notes.B3, undefined);
     assert.match(nov._state.notes.B4, /Provisional salary baseline.*Kaspersky.*2026-10/);
@@ -481,74 +517,337 @@ module.exports = test => {
   test('Stage 6C: enforces sandbox while creationEnabled is false, handles lock contention, and cleans up temp tab on failure without touching user tabs', c => {
     const s = fixture();
     const ss = buildSandboxWorkbook(c, s);
-
-    // Live creation explicitly refused while creationEnabled === false.
-    assert.throws(() => c.createMonthTab(2026, 11, { spreadsheet: ss, sandbox: false }), /Live month creation is disabled/);
-
-    // Wrong spreadsheet ID rejected before lock or sheet access.
-    const wrongSs = { getId: () => 'live-id-not-sandbox', getSheetByName: () => { throw new Error('Should not read'); } };
-    assert.throws(() => c.createMonthTab(2026, 11, wrongSs), /Sandbox spreadsheet identity does not match TEST_SPREADSHEET_ID/);
-
-    // Blocked plan (malformed salary) throws without copying a sheet.
-    const badSalary = fixture();
-    badSalary.transactions[0].amountSgd = 'invalid';
-    const badSs = buildSandboxWorkbook(c, badSalary);
-    assert.throws(() => c.createMonthTab(2026, 11, badSs), /Month creation blocked/);
-    assert.equal(badSs.getSheets().length, 1);
-    assert.equal(badSs._deletedNames.length, 0);
-
-    // Failure during verification (e.g. formula evaluation error '#VALUE!') deletes only the temp sheet.
-    const errSs = buildSandboxWorkbook(c, fixture());
-    errSs._sheets[0]._state.onCopyMutate = clone => {
-      const origGetRange = clone.getRange;
-      clone.getRange = a1 => {
-        const r = origGetRange(a1);
-        if (a1 === 'A1:L70') {
-          return {
-            getValues: () => {
-              const v = r.getValues();
-              v[2][1] = '#VALUE!';
-              return v;
-            },
-            getFormulas: () => r.getFormulas()
-          };
-        }
-        return r;
-      };
-    };
-    assert.throws(() => c.createMonthTab(2026, 11, errSs), /Formula evaluation error at B3/);
-    assert.equal(errSs.getSheets().length, 1);
-    assert.equal(errSs.getSheets()[0].getName(), "Октябрь'26");
-    assert.equal(errSs._deletedNames.length, 1);
-    assert.match(errSs._deletedNames[0], /^_MonthCreate_2026_11_/);
-
-    // Failure during final rename also cleans up temp sheet and never deletes an existing target tab.
-    const raceSs = buildSandboxWorkbook(c, fixture());
-    raceSs._sheets[0]._state.onCopyMutate = clone => {
-      clone._state.failOnFinalRename = true;
-    };
-    assert.throws(() => c.createMonthTab(2026, 11, raceSs), /Simulated rename failure/);
-    assert.equal(raceSs.getSheets().length, 1);
-    assert.equal(raceSs._deletedNames.length, 1);
-
-    // Concurrent target appearance before final rename cleans up only the temp tab and preserves the concurrent target tab.
-    const concurrentSs = buildSandboxWorkbook(c, fixture());
-    const userCreatedNov = { getName: () => 'Ноябрь', getSheetId: () => 9999 };
-    concurrentSs._sheets[0]._state.onCopyMutate = () => {
-      concurrentSs._sheets.push(userCreatedNov);
-    };
-    assert.throws(() => c.createMonthTab(2026, 11, concurrentSs), /Target sheet was created concurrently: Ноябрь/);
-    assert.ok(concurrentSs.getSheets().includes(userCreatedNov));
-    assert.equal(concurrentSs._deletedNames.length, 1);
-    assert.match(concurrentSs._deletedNames[0], /^_MonthCreate_2026_11_/);
-
-    // Lock contention rejects before any sheet reads or copies.
-    const origLock = c.LockService;
+    const origEnabled = vm.runInContext('SHEET_FACTS.monthTemplate.creationEnabled', c);
+    vm.runInContext('SHEET_FACTS.monthTemplate.creationEnabled = false;', c);
     try {
-      c.LockService = { getScriptLock: () => ({ hasLock: () => false, tryLock: () => false, releaseLock: () => {} }) };
-      assert.throws(() => c.createMonthTab(2026, 11, ss), /Budget write is busy/);
+      // Live creation explicitly refused while creationEnabled === false.
+      assert.throws(() => c.createMonthTab(2026, 11, { spreadsheet: ss, sandbox: false }), /Live month creation is disabled/);
+
+      // Wrong spreadsheet ID rejected before lock or sheet access.
+      const wrongSs = { getId: () => 'live-id-not-sandbox', getSheetByName: () => { throw new Error('Should not read'); } };
+      assert.throws(() => c.createMonthTab(2026, 11, wrongSs), /Sandbox spreadsheet identity does not match TEST_SPREADSHEET_ID/);
+
+      // Blocked plan (malformed salary) throws without copying a sheet.
+      const badSalary = fixture();
+      badSalary.transactions[0].amountSgd = 'invalid';
+      const badSs = buildSandboxWorkbook(c, badSalary);
+      assert.throws(() => c.createMonthTab(2026, 11, badSs), /Month creation blocked/);
+      assert.equal(badSs.getSheets().length, 1);
+      assert.equal(badSs._deletedNames.length, 0);
+
+      // Failure during verification (e.g. formula evaluation error '#VALUE!') deletes only the temp sheet.
+      const errSs = buildSandboxWorkbook(c, fixture());
+      errSs._sheets[0]._state.onCopyMutate = clone => {
+        const origGetRange = clone.getRange;
+        clone.getRange = a1 => {
+          const r = origGetRange(a1);
+          if (a1 === 'A1:L70') {
+            return {
+              getValues: () => {
+                const v = r.getValues();
+                v[2][1] = '#VALUE!';
+                return v;
+              },
+              getFormulas: () => r.getFormulas()
+            };
+          }
+          return r;
+        };
+      };
+      assert.throws(() => c.createMonthTab(2026, 11, errSs), /Formula evaluation error at B3/);
+      assert.equal(errSs.getSheets().length, 1);
+      assert.equal(errSs.getSheets()[0].getName(), "Октябрь'26");
+      assert.equal(errSs._deletedNames.length, 1);
+      assert.match(errSs._deletedNames[0], /^_MonthCreate_2026_11_/);
+
+      // Failure during final rename also cleans up temp sheet and never deletes an existing target tab.
+      const raceSs = buildSandboxWorkbook(c, fixture());
+      raceSs._sheets[0]._state.onCopyMutate = clone => {
+        clone._state.failOnFinalRename = true;
+      };
+      assert.throws(() => c.createMonthTab(2026, 11, raceSs), /Simulated rename failure/);
+      assert.equal(raceSs.getSheets().length, 1);
+      assert.equal(raceSs._deletedNames.length, 1);
+
+      // Concurrent target appearance before final rename cleans up only the temp tab and preserves the concurrent target tab.
+      const concurrentSs = buildSandboxWorkbook(c, fixture());
+      const userCreatedNov = { getName: () => 'Ноябрь', getSheetId: () => 9999 };
+      concurrentSs._sheets[0]._state.onCopyMutate = () => {
+        concurrentSs._sheets.push(userCreatedNov);
+      };
+      assert.throws(() => c.createMonthTab(2026, 11, concurrentSs), /Target sheet was created concurrently: Ноябрь/);
+      assert.ok(concurrentSs.getSheets().includes(userCreatedNov));
+      assert.equal(concurrentSs._deletedNames.length, 1);
+      assert.match(concurrentSs._deletedNames[0], /^_MonthCreate_2026_11_/);
+
+      // Lock contention rejects before any sheet reads or copies.
+      const origLock = c.LockService;
+      try {
+        c.LockService = { getScriptLock: () => ({ hasLock: () => false, tryLock: () => false, releaseLock: () => {} }) };
+        assert.throws(() => c.createMonthTab(2026, 11, ss), /Budget write is busy/);
+      } finally {
+        c.LockService = origLock;
+      }
     } finally {
-      c.LockService = origLock;
+      vm.runInContext(`SHEET_FACTS.monthTemplate.creationEnabled = ${Boolean(origEnabled)};`, c);
+    }
+  });
+
+  test('Stage 6D: resolveMonthSheet and readers support yearless Ноябрь, reject B1 year mismatch and duplicate aliases, and reject status error strings in strict mandatory reads', c => {
+    const ss = buildSandboxWorkbook(c, fixture());
+    c.createMonthTab(2026, 11, ss);
+    const novDate = vm.runInContext("new Date('2026-11-15T04:00:00Z')", c);
+
+    // 1. resolveMonthSheet and getActiveMonthTab resolve yearless 'Ноябрь'
+    const resolved = c.resolveMonthSheet(ss, novDate);
+    assert.equal(resolved.tabName, 'Ноябрь');
+    assert.ok(resolved.sheet);
+    const active = c.getActiveMonthTab(ss, novDate);
+    assert.equal(active.exists, true);
+    assert.equal(active.tabName, 'Ноябрь');
+    assert.equal(active.status, 'ACTIVE');
+
+    // 2. getDailyPacing and getMandatoryExpenses read cleanly from yearless 'Ноябрь'
+    const pacing = c.getDailyPacing(novDate, ss);
+    assert.equal(pacing.error, undefined);
+    assert.equal(pacing.days_left, 16);
+    const mandatory = c.getMandatoryExpenses(ss, novDate, true);
+    assert.equal(mandatory.length, 11);
+    assert.equal(mandatory[0].is_checked, false);
+    assert.equal(mandatory[10].label.toLowerCase(), 'cpf');
+    assert.equal(mandatory[10].is_checked, true);
+
+    // 3. Strict mandatory reader rejects Stage 6 status formula error strings ('Данные недоступны' / 'Проверьте категорию')
+    const novSheet = ss.getSheetByName('Ноябрь');
+    const savedG3 = novSheet._state.values[2][6];
+    for (const badStatus of ['Данные недоступны', 'Проверьте категорию', '#NA']) {
+      novSheet._state.values[2][6] = badStatus;
+      assert.throws(() => c.getMandatoryExpenses(ss, novDate, true), /Unreadable mandatory completion flag/);
+      const nonStrict = c.getMandatoryExpenses(ss, novDate, false);
+      assert.equal(nonStrict[0].is_checked, false);
+    }
+    novSheet._state.values[2][6] = savedG3;
+
+    // 4. B1 year mismatch on yearless tab is rejected
+    novSheet._state.values[0][1] = serial('2025-11-01');
+    assert.throws(() => c.resolveMonthSheet(ss, novDate), /Month tab name\/date mismatch: Ноябрь/);
+    novSheet._state.values[0][1] = serial('2026-11-01');
+
+    // 5. Duplicate legacy + yearless aliases for the same month are rejected
+    ss._sheets.push({ getName: () => "Ноябрь'26", getSheetId: () => 8888 });
+    assert.throws(() => c.resolveMonthSheet(ss, novDate), /Multiple tabs represent month 11/);
+  });
+
+  function setClock(c, iso) {
+    if (!c.monthlyTestClockInstalled) {
+      vm.runInContext(`const MonthlyOriginalDate = Date;
+        Date = class extends MonthlyOriginalDate {
+          constructor(...args) { super(...(args.length ? args : [monthlyTestEpoch])); }
+          static now() { return monthlyTestEpoch; }
+        };`, c);
+      c.monthlyTestClockInstalled = true;
+    }
+    c.monthlyTestEpoch = Date.parse(iso);
+  }
+
+  test('Stage 6D: ensureMonthTab is disabled by default, recovers only the current SGT operational month when enabled, and keeps historical reads strictly read-only', c => {
+    const ss = buildSandboxWorkbook(c, fixture());
+    const prevEpoch = c.monthlyTestEpoch;
+    setClock(c, '2026-11-15T04:00:00Z');
+    const fixedNov15 = vm.runInContext("new Date('2026-11-15T04:00:00Z')", c);
+    const sep15 = vm.runInContext("new Date('2026-09-15T04:00:00Z')", c);
+    const dec15 = vm.runInContext("new Date('2026-12-15T04:00:00Z')", c);
+    const propStore = {};
+    const origProps = c.PropertiesService;
+
+    try {
+      c.PropertiesService = {
+        getScriptProperties: () => ({
+          getProperty: k => propStore[k] || null,
+          setProperty: (k, v) => { propStore[k] = String(v); },
+          deleteProperty: k => { delete propStore[k]; }
+        })
+      };
+
+      // 1. Default creationEnabled === false: getActiveMonthTab does not create Ноябрь
+      vm.runInContext('SHEET_FACTS.monthTemplate.creationEnabled = false;', c);
+      const missingNov = c.getActiveMonthTab(ss, fixedNov15);
+      assert.equal(missingNov.exists, false);
+      assert.equal(ss.getSheetByName('Ноябрь'), null);
+
+      // 2. Enable creationEnabled === true: historical and future months still never auto-create
+      vm.runInContext('SHEET_FACTS.monthTemplate.creationEnabled = true;', c);
+      const missingSep = c.getActiveMonthTab(ss, sep15);
+      assert.equal(missingSep.exists, false);
+      assert.equal(ss.getSheetByName('Сентябрь'), null);
+      assert.throws(() => c.getMandatoryExpenses(ss, sep15, true), /Mandatory plan sheet is unavailable/);
+      const monthlySep = c.buildMonthlyCoachPayload(ss, sep15);
+      assert.equal(monthlySep.error, 'missing_month');
+      assert.equal(ss.getSheetByName('Сентябрь'), null);
+
+      const missingDec = c.getActiveMonthTab(ss, dec15);
+      assert.equal(missingDec.exists, false);
+      assert.equal(ss.getSheetByName('Декабрь'), null);
+
+      // 3. Read-only current month query also does not auto-create
+      const readOnlyNov = c.getActiveMonthTab(ss, fixedNov15, { readOnly: true });
+      assert.equal(readOnlyNov.exists, false);
+      assert.equal(ss.getSheetByName('Ноябрь'), null);
+
+      // 4. Operational current-month read (getActiveMonthTab / getDailyPacing) self-heals by creating Ноябрь
+      const createdNov = c.getActiveMonthTab(ss, fixedNov15);
+      assert.equal(createdNov.exists, true);
+      assert.equal(createdNov.tabName, 'Ноябрь');
+      assert.ok(ss.getSheetByName('Ноябрь'));
+      assert.equal(propStore['month_created_2026-11'], 'Ноябрь');
+    } finally {
+      vm.runInContext('SHEET_FACTS.monthTemplate.creationEnabled = true;', c);
+      c.monthlyTestEpoch = prevEpoch;
+      c.PropertiesService = origProps;
+    }
+  });
+
+  test('Stage 6D: runScheduledMonthCreation creates next month as soon as the last day of the previous month starts in SGT, recovers missed current month, and skips cross-year', c => {
+    const s = fixture();
+    // Add November salaries so December can also be created on 30 November
+    s.transactions.push(
+      { row: 10, date: serial('2026-11-23'), type: 'Доходы', amountSgd: 31000, source: 'Google' },
+      { row: 11, date: serial('2026-11-24'), type: 'Доходы', amountSgd: 12500, source: 'Kaspersky' }
+    );
+    const ss = buildSandboxWorkbook(c, s);
+    const propStore = {};
+    const origProps = c.PropertiesService;
+
+    const oct30LateSgt = vm.runInContext("new Date('2026-10-30T15:59:00Z')", c);  // 2026-10-30 23:59 SGT (not last day)
+    const oct31StartSgt = vm.runInContext("new Date('2026-10-30T16:00:00Z')", c); // 2026-10-31 00:00 SGT (start of last day!)
+    const oct31NextHeartbeat = vm.runInContext("new Date('2026-10-30T16:15:00Z')", c); // 2026-10-31 00:15 SGT
+    const nov30StartSgt = vm.runInContext("new Date('2026-11-29T16:00:00Z')", c); // 2026-11-30 00:00 SGT (start of last day of Nov)
+    const dec31StartSgt = vm.runInContext("new Date('2026-12-30T16:00:00Z')", c); // 2026-12-31 00:00 SGT (start of last day of Dec)
+
+    try {
+      c.PropertiesService = {
+        getScriptProperties: () => ({
+          getProperty: k => propStore[k] || null,
+          setProperty: (k, v) => { propStore[k] = String(v); },
+          deleteProperty: k => { delete propStore[k]; }
+        })
+      };
+
+      // 1. Disabled when creationEnabled is false
+      vm.runInContext('SHEET_FACTS.monthTemplate.creationEnabled = false;', c);
+      const disabledRes = c.runScheduledMonthCreation(oct31StartSgt, ss);
+      assert.equal(disabledRes.status, 'disabled');
+      assert.equal(ss.getSheetByName('Ноябрь'), null);
+
+      // 2. Enabled: on 30 Oct 23:59 SGT (not yet the last day), does NOT create Ноябрь
+      vm.runInContext('SHEET_FACTS.monthTemplate.creationEnabled = true;', c);
+      const oct30Res = c.runScheduledMonthCreation(oct30LateSgt, ss);
+      assert.equal(oct30Res.status, 'ok');
+      assert.equal(oct30Res.actions.length, 0);
+      assert.equal(ss.getSheetByName('Ноябрь'), null);
+
+      // 3. On 31 Oct 00:00 SGT (as soon as the last day of October starts), creates Ноябрь!
+      const oct31Res = c.runScheduledMonthCreation(oct31StartSgt, ss);
+      assert.equal(oct31Res.status, 'ok');
+      assert.equal(oct31Res.actions.length, 1);
+      assert.equal(oct31Res.actions[0].trigger, 'last_day_rollover');
+      assert.equal(oct31Res.actions[0].status, 'created');
+      assert.equal(oct31Res.actions[0].sheetName, 'Ноябрь');
+      assert.ok(ss.getSheetByName('Ноябрь'));
+      assert.equal(propStore['month_created_2026-11'], 'Ноябрь');
+
+      // 4. Subsequent 15-minute heartbeats on 31 Oct are idempotent no-ops
+      const repeatRes = c.runScheduledMonthCreation(oct31NextHeartbeat, ss);
+      assert.equal(repeatRes.actions.length, 1);
+      assert.equal(repeatRes.actions[0].status, 'exists');
+      assert.equal(repeatRes.actions[0].created, false);
+
+      // 5. On 30 Nov 00:00 SGT (as soon as the last day of November starts), chains from Ноябрь to create Декабрь
+      const nov30Res = c.runScheduledMonthCreation(nov30StartSgt, ss);
+      assert.equal(nov30Res.actions.length, 1);
+      assert.equal(nov30Res.actions[0].trigger, 'last_day_rollover');
+      assert.equal(nov30Res.actions[0].status, 'created');
+      assert.equal(nov30Res.actions[0].sheetName, 'Декабрь');
+      assert.equal(nov30Res.actions[0].source, 'Ноябрь');
+      assert.ok(ss.getSheetByName('Декабрь'));
+      assert.equal(propStore['month_created_2026-12'], 'Декабрь');
+
+      // 6. On 31 Dec 00:00 SGT, skips cross-year January 2027 cleanly
+      const dec31Res = c.runScheduledMonthCreation(dec31StartSgt, ss);
+      assert.equal(dec31Res.actions.length, 1);
+      assert.equal(dec31Res.actions[0].status, 'cross_year_skipped');
+      assert.equal(dec31Res.actions[0].created, false);
+
+      // 7. If 31 Oct rollover was missed and 1 Nov 00:05 SGT arrives without Ноябрь, current_month_recovery creates it
+      const missedSs = buildSandboxWorkbook(c, fixture());
+      const nov1StartSgt = vm.runInContext("new Date('2026-10-31T16:05:00Z')", c); // 2026-11-01 00:05 SGT
+      const recoveryRes = c.runScheduledMonthCreation(nov1StartSgt, missedSs);
+      assert.equal(recoveryRes.actions.length, 1);
+      assert.equal(recoveryRes.actions[0].trigger, 'current_month_recovery');
+      assert.equal(recoveryRes.actions[0].status, 'created');
+      assert.equal(recoveryRes.actions[0].sheetName, 'Ноябрь');
+      assert.ok(missedSs.getSheetByName('Ноябрь'));
+    } finally {
+      vm.runInContext('SHEET_FACTS.monthTemplate.creationEnabled = true;', c);
+      c.PropertiesService = origProps;
+    }
+  });
+
+  test('Stage 6D: dispatch() invokes runScheduledMonthCreation on last-day heartbeat and isolates creation errors from Telegram deliveries', c => {
+    const ss = buildSandboxWorkbook(c, fixture());
+    const prevEpoch = c.monthlyTestEpoch;
+    const origGetActiveSs = c.SpreadsheetApp.getActiveSpreadsheet;
+    const origUsers = c.getActiveTelegramUsers;
+    const origDeliver = c.deliverScheduledMessage;
+    const origAlerts = c.runMandatorySameDayAlerts;
+    const origScan = c.scanConfiguredStatementInbox;
+    const deliveredKeys = [];
+
+    try {
+      setClock(c, '2026-10-30T16:00:00Z'); // 2026-10-31 00:00 SGT
+      c.SpreadsheetApp.getActiveSpreadsheet = () => ss;
+      c.getActiveTelegramUsers = () => [{ name: 'Val', chat_id: '96069960', morning_time: '08:00' }];
+      c.deliverScheduledMessage = key => { deliveredKeys.push(key); return true; };
+      c.runMandatorySameDayAlerts = () => {};
+      c.scanConfiguredStatementInbox = () => {};
+      vm.runInContext('SHEET_FACTS.monthTemplate.creationEnabled = true;', c);
+
+      // 1. At 00:00 SGT on 31 Oct, dispatch() creates Ноябрь
+      c.dispatch();
+      assert.ok(ss.getSheetByName('Ноябрь'));
+
+      // 2. If runScheduledMonthCreation throws during 08:05 SGT heartbeat, dispatch() logs and still delivers morning coach
+      setClock(c, '2026-10-31T00:05:00Z'); // 2026-10-31 08:05 SGT
+      const origScheduled = c.runScheduledMonthCreation;
+      c.runScheduledMonthCreation = () => { throw new Error('Simulated creation error'); };
+      try {
+        c.dispatch();
+      } finally {
+        c.runScheduledMonthCreation = origScheduled;
+      }
+      assert.ok(deliveredKeys.includes('morning_coach_96069960'));
+
+      // 3. Manual menu trigger (createNextMonthFromMenu) creates next month in the active main workbook even while creationEnabled is false
+      vm.runInContext('SHEET_FACTS.monthTemplate.creationEnabled = false;', c);
+      setClock(c, '2026-10-25T05:00:00Z'); // 2026-10-25 13:00 SGT
+      const liveMainSs = buildSandboxWorkbook(c, fixture());
+      liveMainSs.getId = () => '1ufn6CoHqxEUPwqBf--RX2H2DR_C1t1CfyG6QxSUVvR8';
+      let activatedSheet = null;
+      liveMainSs.setActiveSheet = sh => { activatedSheet = sh; };
+      c.SpreadsheetApp.getActiveSpreadsheet = () => liveMainSs;
+      const menuRes = c.createNextMonthFromMenu();
+      assert.equal(menuRes.status, 'created');
+      assert.equal(menuRes.sheetName, 'Ноябрь');
+      assert.ok(liveMainSs.getSheetByName('Ноябрь'));
+      assert.equal(activatedSheet && activatedSheet.getName(), 'Ноябрь');
+    } finally {
+      vm.runInContext('SHEET_FACTS.monthTemplate.creationEnabled = true;', c);
+      c.monthlyTestEpoch = prevEpoch;
+      c.SpreadsheetApp.getActiveSpreadsheet = origGetActiveSs;
+      c.getActiveTelegramUsers = origUsers;
+      c.deliverScheduledMessage = origDeliver;
+      c.runMandatorySameDayAlerts = origAlerts;
+      c.scanConfiguredStatementInbox = origScan;
     }
   });
 };

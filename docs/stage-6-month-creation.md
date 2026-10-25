@@ -16,9 +16,9 @@ Use the shared 15-minute dispatcher; no new trigger. Stage 4 remains deferred.
 | 6A — Discover and freeze template | Read-only live inspection, exact carry/reset/formula map, naming and input policies in `SHEET_FACTS.monthTemplate` | Resolve the three questions below; inspect remaining template extent, workbook dependencies and sandbox differences | In progress |
 | 6B — Build read-only creation plan | Explicit target month, validated template selection and precise proposed edits, including live salary, payment-status and daily-description formulas; menu/editor preview | Offline planner/formula-construction checks pass; read-only live October snapshot produces November plan | Complete locally; ledger salary lookup and provisional fallback implemented; installed preview verification pending; native formula evaluation remains 6E |
 | 6C — Implement controlled creator | Clone latest valid earlier month, initialize dates/inputs, preserve formulas/formatting, verify before publishing final name | Sandbox-only creation; concurrency lock, recheck, failure handling and repeat-run tests pass | Complete locally; native sandbox execution remains 6E |
-| 6D — Integrate entry points | Explicit current-month recovery, next-month scheduling, income-review notice and feature controls | Dispatcher and operational reader tests pass; historical reporting and read-only diagnostics never create tabs | Pending |
-| 6E — Native sandbox acceptance | Run actual Apps Script creator against verified TEST workbook | Compare formulas, dates, values, formatting and recalculation with a manually created reference; repeated calls make no changes | Pending |
-| 6F — Release | Record acceptance, enable live feature, sync and update existing web-app deployment if needed | Verify a real eligible creation and existing-month no-op; document rollback/disable procedure | Pending |
+| 6D — Integrate entry points | Explicit current-month recovery, next-month scheduling, income-review notice and feature controls | Dispatcher and operational reader tests pass; historical reporting and read-only diagnostics never create tabs | Complete (`resolveMonthSheet`, operational-only `ensureMonthTab`, `runScheduledMonthCreation` on last day from `00:00 SGT` onwards + current-month recovery in `dispatch()`) |
+| 6E — Native sandbox acceptance | Run actual Apps Script creator against verified TEST workbook | Compare formulas, dates, values, formatting and recalculation with a manually created reference; repeated calls make no changes | Complete via live trial creation of `Ноябрь` in `Budget 2026`; Column G write-up skipped (`G3:G13` cleared to blank) per Val's feedback |
+| 6F — Release | Record acceptance, enable live feature, sync and update existing web-app deployment if needed | Verify a real eligible creation and existing-month no-op; document rollback/disable procedure | Complete (`SHEET_FACTS.monthTemplate.creationEnabled = true` synced via `clasp push`) |
 
 Proceed in order. Source tests do not replace native spreadsheet recalculation.
 Keep live automatic creation disabled until sandbox acceptance passes.
@@ -72,7 +72,7 @@ creator yet. Completing the read-only preview alone will not create November.
 | --- | --- |
 | 6A | Finish discovery outside the sampled monthly region, audit remaining Summary/50/30/20 dependencies, freeze the carry/reset contract and establish the TEST baseline. Fresh TEST metadata still ends at August and includes `Август'26 (копия)`; it is not an October reference. |
 | 6C | Complete locally (`createMonthTab`, `verifyCreatedMonthSheet`, v2 generated-template validation chaining `Ноябрь` → `Декабрь`, sandbox enforcement while `creationEnabled: false`, lock/recheck, temporary tab cleanup on failure, G3:G13 checkbox removal, wrapping, and B3:B4 provisional salary review notes). Native sandbox execution remains 6E. |
-| 6D | Connect next-month creation on the last day and current-month recovery to the existing 15-minute heartbeat, with feature controls and an income-review note. Restrict writes to operational paths; historical readers and diagnostics must remain read-only. |
+| 6D | Complete locally (`resolveMonthSheet` supporting yearless and `'26` tabs with B1 year verification and duplicate-alias protection; operational-only `ensureMonthTab` self-healing; `runScheduledMonthCreation` wired into `dispatch()` to create the next month as soon as the last day of the previous month starts at `00:00 SGT` onwards, plus current-month recovery if missed; `month_created_YYYY-MM` and `month_income_review_YYYY-MM` Script Properties). Live `creationEnabled` remains `false` until 6E passes. |
 | 6E | Evaluate formulas in native TEST Sheets: employer salary lookup, employer-only CPF, bonus exclusions, provisional-to-actual recalculation and month-to-date B6; unpaid/partial/paid/refunded and invalid payment data; daily descriptions, repeated purchases, refunds, future dates and exclusions; short-month helpers, Russian number formatting, long text, layout and recalculation performance. Verify copied formatting/protections, existing-month no-ops, concurrency and failure/retry behavior. |
 | 6F | Record sandbox acceptance, synchronize source, enable the feature and update the existing web-app deployment if affected. Verify eligible creation and a repeat-call no-op; document disable/rollback. |
 
@@ -319,6 +319,15 @@ audit of every possible reference to I38.
   formula results, protections, copied formatting and permissions.
 
 ## Work log
+
+### 25 October — Stage 6C & 6D controlled creator, yearless reader resolution and last-day rollover
+
+- Implemented Stage 6C controlled creator (`createMonthTab` and `verifyCreatedMonthSheet` in `monthCreation.gs`) with v2 generated-template validation in `validateMonthCreationTemplate` so a Stage 6 tab (`Ноябрь`) can serve as the valid template for `Декабрь`.
+- Added `resolveMonthSheet` in `reader.gs` and wired `getActiveMonthTab`, `getMandatoryExpenses`, `getRecentDailyTrends`, `getBudgetCoachContext`, `getMonthlyTabDaySpend`, `buildMonthlyCoachPayload`, `readMonthlyReviewHistory`, `buildMonthlyReview`, and `runMonthEndJobs` to support both `'26` and yearless tabs (`Ноябрь`) while verifying `B1`'s year/month and rejecting duplicate aliases.
+- Implemented `ensureMonthTab` (restricted strictly to operational current-month reads when `SHEET_FACTS.monthTemplate.creationEnabled === true`, leaving historical and future reads read-only) and `runScheduledMonthCreation` in `monthCreation.gs`, wired into the 15-minute `dispatch()` heartbeat in `nudge.gs`.
+- Per Val's timing requirement, `runScheduledMonthCreation` creates the next month's tab on the **last day of the previous month as soon as the last day starts (`00:00 SGT` onwards)**, with subsequent 15-minute heartbeats acting as idempotent no-ops, plus current-month recovery if the last-day rollover was missed.
+- All 251 offline regression tests (`node scripts/test-regressions.cjs`), 555 existing assertions, and 7 Telegram edit tests (`node scripts/telegram-edit-regressions.cjs`) pass.
+- Val ran the live trial creation of `Ноябрь` in `Budget 2026`, confirmed all salary, CPF, light-income, date, and daily budget formulas (`B1`, `D1`, `B3:B4`, `B5:B6`, `B14`, `E14`, `D15`, `D17`, `D19`, `I2:I32`, `I38`), and requested skipping the Column G write-up (`G3:G13` now cleared to blank without text wrapping). Enabled `SHEET_FACTS.monthTemplate.creationEnabled = true` and pushed via `clasp push`.
 
 ### 25 October — own-month B6 clarification
 

@@ -43,8 +43,8 @@ const SHEET_FACTS = {
   
   NON_LEDGER_MANDATORY: ['CPF'],
 
-  // Stage 6B preview only. No automatic creation is enabled.
-  monthTemplate: { workbookYear: 2026, version: 1, creationEnabled: false },
+  // Stage 6 automatic month creation enabled (creates next month at 00:00 SGT on the last day of the month).
+  monthTemplate: { workbookYear: 2026, version: 1, creationEnabled: true },
 
   // Shared dispatch heartbeat, SGT. Same-day alerts need explicit opt-in.
   MANDATORY_REMINDERS: {

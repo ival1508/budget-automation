@@ -47,7 +47,8 @@ function readMonthlyReviewHistory(ss, reportDate, transactions) {
     const month = calendarDateParts(date);
     const label = Utilities.formatDate(date, 'Asia/Singapore', 'yyyy-MM');
     const rows = transactions.filter(row => row.monthIndex === month.monthIndex);
-    if (!ss.getSheetByName(getCurrentMonthTabName(date)) || !rows.length) {
+    const resolved = typeof resolveMonthSheet === 'function' ? resolveMonthSheet(ss, date) : { sheet: ss.getSheetByName(getCurrentMonthTabName(date)) };
+    if (!resolved.sheet || !rows.length) {
       unavailable.push(label); continue; // Absent history is not a zero-spend month.
     }
     const budget = get503020Status(ss, false, date, true);
@@ -136,7 +137,7 @@ function analyzeMonthlyReview(transactions, reportDate, budget, history, ordinar
 function buildMonthlyReview(ss, reportDate, budget, plans) {
   const transactions = readMonthlyReviewTransactions(ss, reportDate);
   const history = readMonthlyReviewHistory(ss, reportDate, transactions);
-  const sheet = ss.getSheetByName(getCurrentMonthTabName(reportDate));
+  const sheet = typeof resolveMonthSheet === 'function' ? resolveMonthSheet(ss, reportDate).sheet : ss.getSheetByName(getCurrentMonthTabName(reportDate));
   const plan = readMonthlyContextAmount(sheet, SHEET_FACTS.MONTHLY_TAB_STRUCTURE.ORDINARY_MONTHLY_BUDGET_CELL);
   const review = analyzeMonthlyReview(transactions, reportDate, budget, history, plan, plans);
   review.allocations = readMonthlyAllocationTotal(ss, reportDate);

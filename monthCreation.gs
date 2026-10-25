@@ -69,11 +69,7 @@ function validateMonthCreationTemplate(source) {
   for (let row = 2; row <= 32; row++) {
     if (f(row, 9)) hasDescriptionFormulas = true;
   }
-  let hasStatusFormulas = false;
-  for (let row = 3; row <= 13; row++) {
-    if (f(row, 7)) hasStatusFormulas = true;
-  }
-  const isGeneratedTemplate = hasDescriptionFormulas || hasStatusFormulas;
+  const isGeneratedTemplate = hasDescriptionFormulas;
   if (isGeneratedTemplate) {
     requireFormula(38, 9, '=H38<=$D$1');
     requireFormula(6, 2, monthCreationLightIncomeFormula());
@@ -104,12 +100,7 @@ function validateMonthCreationTemplate(source) {
       if (categories.has(category)) throw new Error('Duplicate mandatory category: ' + label);
       categories.add(category);
     }
-    if (isGeneratedTemplate) {
-      const validGeneratedFlag = flag === '' || (typeof flag === 'string' && !/^#|^Err:/i.test(flag.trim()));
-      if (normal(f(row, 7)) !== normal(monthCreationStatusFormula(row)) || !validGeneratedFlag) {
-        throw new Error('Unsupported existing G status at row ' + row);
-      }
-    } else if (f(row, 7) || (flag !== '' && typeof flag !== 'boolean')) {
+    if (f(row, 7) || (flag !== '' && typeof flag !== 'boolean')) {
       throw new Error('Unsupported existing G status at row ' + row);
     }
   }
@@ -307,7 +298,7 @@ function buildMonthCreationPlan(snapshot, year, month) {
     { range: 'B5', value: 0, purpose: 'Reset carried balance' },
     { range: 'B6', formula: monthCreationLightIncomeFormula(), purpose: 'Live light income in SGD for this tab\'s month, through today' },
     { range: 'I38', formula: '=H38<=$D$1', purpose: 'Correct date-in-month helper' },
-    { range: 'G3:G13', formulas: Array.from({ length: 11 }, (_, index) => [monthCreationStatusFormula(index + 3, monthCreationCell(source, index + 3, 4))]), purpose: 'Live mandatory payment status; replace inherited checkbox validation' },
+    { range: 'G3:G13', values: Array.from({ length: 11 }, () => ['']), purpose: 'Clear mandatory payment status column G (leave blank)' },
     { range: 'I2:I32', formulas: Array.from({ length: 31 }, (_, index) => [monthCreationDescriptionFormula(index + 2)]), purpose: 'Live descriptions matching daily spending filters' }
   ];
   return { status: 'preview', target: target, source: source.name, sourceId: source.id,
@@ -432,10 +423,11 @@ function createMonthTab(year, month, options) {
     ? { spreadsheet: options }
     : Object.assign({}, options || {});
   const creationEnabled = Boolean(typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.monthTemplate && SHEET_FACTS.monthTemplate.creationEnabled);
-  if (!creationEnabled && opts.sandbox === false) {
+  const allowManualLive = Boolean(opts.allowManualLive);
+  if (!creationEnabled && !allowManualLive && opts.sandbox === false) {
     throw new Error('Live month creation is disabled until sandbox acceptance passes.');
   }
-  const useSandbox = opts.sandbox !== undefined ? Boolean(opts.sandbox) : !creationEnabled;
+  const useSandbox = opts.sandbox !== undefined ? Boolean(opts.sandbox) : (!creationEnabled && !allowManualLive);
   const ss = getTargetSpreadsheet(useSandbox, opts.spreadsheet);
   return withBudgetWriteLock(() => {
     const snapshot = readMonthCreationSnapshot(ss);
@@ -483,7 +475,6 @@ function createMonthTab(year, month, options) {
       const statusRange = tempSheet.getRange('G3:G13');
       if (typeof statusRange.clearDataValidations === 'function') statusRange.clearDataValidations();
       else if (typeof statusRange.setDataValidation === 'function') statusRange.setDataValidation(null);
-      if (typeof statusRange.setWrap === 'function') statusRange.setWrap(true);
       const descRange = tempSheet.getRange('I2:I32');
       if (typeof descRange.setWrap === 'function') descRange.setWrap(true);
       const periodLabel = plan.salary.period.year + '-' + String(plan.salary.period.month).padStart(2, '0');
@@ -526,4 +517,152 @@ function createMonthTab(year, month, options) {
       throw err;
     }
   });
+}
+
+function recordMonthCreationProperty(year, month, result) {
+  if (typeof PropertiesService === 'undefined' || typeof PropertiesService.getScriptProperties !== 'function') return;
+  const props = PropertiesService.getScriptProperties();
+  if (!props || typeof props.setProperty !== 'function') return;
+  const ym = year + '-' + String(month).padStart(2, '0');
+  if (result && result.sheetName) {
+    props.setProperty('month_created_' + ym, String(result.sheetName));
+  }
+  const reviewKey = 'month_income_review_' + ym;
+  if (result && result.plan && result.plan.salary) {
+    if (result.plan.salary.provisional) {
+      props.setProperty(reviewKey, JSON.stringify({
+        warnings: result.plan.salary.warnings || [],
+        entries: (result.plan.salary.entries || [])
+          .filter(entry => entry.status === 'provisional')
+          .map(entry => ({ cell: entry.cell, employer: entry.employer, amount: entry.amount }))
+      }));
+    } else if (typeof props.deleteProperty === 'function') {
+      props.deleteProperty(reviewKey);
+    }
+  }
+}
+
+/**
+ * Stage 6D operational self-healing hook for getActiveMonthTab().
+ * Only creates the current SGT calendar month when creationEnabled is true.
+ * Never creates historical or future months.
+ */
+function ensureMonthTab(spreadsheet, tabName, optDate) {
+  if (typeof SHEET_FACTS === 'undefined' || !SHEET_FACTS.monthTemplate || SHEET_FACTS.monthTemplate.creationEnabled !== true) {
+    return null;
+  }
+  const targetDate = optDate instanceof Date ? optDate : new Date();
+  const targetParts = calendarDateParts(targetDate);
+  const nowParts = calendarDateParts(new Date());
+  if (targetParts.year !== nowParts.year || targetParts.month !== nowParts.month) {
+    return null;
+  }
+  if (targetParts.year !== SHEET_FACTS.monthTemplate.workbookYear) {
+    return null;
+  }
+  if (typeof tabName === 'string' && tabName.trim()) {
+    const id = monthCreationIdentity(tabName);
+    if (!id || id.month !== targetParts.month || (id.year && id.year !== targetParts.year)) {
+      return null;
+    }
+  }
+  const ss = spreadsheet || getTargetSpreadsheet(false);
+  if (!ss) return null;
+  if (typeof resolveMonthSheet === 'function') {
+    const existing = resolveMonthSheet(ss, targetDate);
+    if (existing && existing.sheet) return existing.sheet;
+  }
+  const res = createMonthTab(targetParts.year, targetParts.month, { spreadsheet: ss, sandbox: false });
+  recordMonthCreationProperty(targetParts.year, targetParts.month, res);
+  return ss.getSheetByName(res.sheetName);
+}
+
+/**
+ * Stage 6D scheduled month creator invoked from the 15-minute dispatch() heartbeat.
+ * 1. Recovers the current SGT calendar month if missing (e.g. if last-day rollover was missed).
+ * 2. On the last day of the month (from 00:00 SGT onwards), creates the next month's tab
+ *    so it is ready before the new month starts.
+ */
+function runScheduledMonthCreation(optNow, optSs) {
+  if (typeof SHEET_FACTS === 'undefined' || !SHEET_FACTS.monthTemplate || SHEET_FACTS.monthTemplate.creationEnabled !== true) {
+    return { status: 'disabled', actions: [] };
+  }
+  const now = optNow instanceof Date ? optNow : new Date();
+  const parts = calendarDateParts(now);
+  const workbookYear = SHEET_FACTS.monthTemplate.workbookYear;
+  const ss = optSs || getTargetSpreadsheet(false);
+  if (!ss) return { status: 'no_spreadsheet', actions: [] };
+  const actions = [];
+
+  if (parts.year === workbookYear) {
+    const currentAnchorDate = new Date(Date.UTC(parts.year, parts.month - 1, 15, 12));
+    const currentResolved = typeof resolveMonthSheet === 'function'
+      ? resolveMonthSheet(ss, currentAnchorDate)
+      : { sheet: ss.getSheetByName(MONTH_CREATION_NAMES[parts.month - 1]) };
+    if (!currentResolved.sheet) {
+      const res = createMonthTab(parts.year, parts.month, { spreadsheet: ss, sandbox: false });
+      recordMonthCreationProperty(parts.year, parts.month, res);
+      actions.push(Object.assign({ trigger: 'current_month_recovery' }, res));
+    }
+  }
+
+  const lastDay = new Date(Date.UTC(parts.year, parts.month, 0)).getUTCDate();
+  if (parts.day === lastDay) {
+    const nextYear = parts.month === 12 ? parts.year + 1 : parts.year;
+    const nextMonth = parts.month === 12 ? 1 : parts.month + 1;
+    if (nextYear !== workbookYear) {
+      actions.push({
+        trigger: 'last_day_rollover',
+        status: 'cross_year_skipped',
+        created: false,
+        target: { year: nextYear, month: nextMonth }
+      });
+    } else {
+      const nextAnchorDate = new Date(Date.UTC(nextYear, nextMonth - 1, 15, 12));
+      const nextResolved = typeof resolveMonthSheet === 'function'
+        ? resolveMonthSheet(ss, nextAnchorDate)
+        : { sheet: ss.getSheetByName(MONTH_CREATION_NAMES[nextMonth - 1]) };
+      if (nextResolved.sheet) {
+        actions.push({
+          trigger: 'last_day_rollover',
+          status: 'exists',
+          created: false,
+          sheetName: nextResolved.tabName,
+          target: { year: nextYear, month: nextMonth, name: nextResolved.tabName }
+        });
+      } else {
+        const res = createMonthTab(nextYear, nextMonth, { spreadsheet: ss, sandbox: false });
+        recordMonthCreationProperty(nextYear, nextMonth, res);
+        actions.push(Object.assign({ trigger: 'last_day_rollover' }, res));
+      }
+    }
+  }
+
+  return { status: 'ok', actions: actions };
+}
+
+function createNextMonthFromMenu() {
+  const ss = typeof SpreadsheetApp !== 'undefined' && typeof SpreadsheetApp.getActiveSpreadsheet === 'function'
+    ? SpreadsheetApp.getActiveSpreadsheet()
+    : null;
+  const res = createMonthTab(undefined, undefined, { spreadsheet: ss, sandbox: false, allowManualLive: true });
+  if (res && res.target) {
+    recordMonthCreationProperty(res.target.year, res.target.month, res);
+  }
+  if (ss && res && res.sheetName && typeof ss.getSheetByName === 'function' && typeof ss.setActiveSheet === 'function') {
+    const createdSheet = ss.getSheetByName(res.sheetName);
+    if (createdSheet) ss.setActiveSheet(createdSheet);
+  }
+  const lines = [
+    res.created
+      ? ('Created tab "' + res.sheetName + '" from "' + res.source + '".')
+      : ('Tab "' + res.sheetName + '" already exists.')
+  ];
+  if (res && res.plan && res.plan.salary && Array.isArray(res.plan.salary.warnings) && res.plan.salary.warnings.length) {
+    lines.push('', 'Income notes:', ...res.plan.salary.warnings);
+  }
+  if (typeof SpreadsheetApp !== 'undefined' && typeof SpreadsheetApp.getUi === 'function') {
+    try { SpreadsheetApp.getUi().alert(lines.join('\n')); } catch (_) {}
+  }
+  return res;
 }

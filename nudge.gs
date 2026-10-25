@@ -383,7 +383,10 @@ function runMonthEndJobs(reportDate, optSs, optSlot) {
       const reminded = deliverScheduledMessage(prefix + '_reminder', slot, user.chat_id, () => {
         const inboxId = props.getProperty('STATEMENT_INBOX_ID');
         const destination = inboxId ? 'the configured statement inbox in Drive' : 'your statement inbox (set it up from the Budget menu)';
-        return `Please upload the bank statements for <b>${escapeCoachHtml(getCurrentMonthTabName(reportDate))}</b> to ${destination}, then review and import the reconciliation proposals.`;
+        const monthTabLabel = (optSs && typeof resolveMonthSheet === 'function')
+          ? resolveMonthSheet(optSs, reportDate).tabName
+          : getCurrentMonthTabName(reportDate);
+        return `Please upload the bank statements for <b>${escapeCoachHtml(monthTabLabel)}</b> to ${destination}, then review and import the reconciliation proposals.`;
       }, prefix + '_reminder');
       if (!reminded) continue;
       deliverScheduledMessage(prefix + '_coach', slot, user.chat_id, () => {
@@ -406,6 +409,10 @@ function runMonthEndJobs(reportDate, optSs, optSlot) {
  */
 function dispatch() {
   const now = new Date();
+  if (typeof runScheduledMonthCreation === 'function') {
+    try { runScheduledMonthCreation(now); }
+    catch (error) { Logger.log('Scheduled month creation failed: ' + error.message); }
+  }
   const users = getActiveTelegramUsers();
   let morningBrief = null, recap = null, weeklyReport = null;
   const nudgeSlot = getDailyDeliverySlot(now, '21:00', 60);

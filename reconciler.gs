@@ -5058,6 +5058,7 @@ function buildBudgetMenu(ui) {
     .addItem('Run morning coach now', 'sendMorningCoach')
     .addItem('Preview monthly coach', 'showMonthlyCoachPreview')
     .addItem('Preview next month (read-only)', 'showMonthCreationPreview')
+    .addItem('Create next month tab now', 'createNextMonthFromMenu')
     .addToUi();
 }
 
