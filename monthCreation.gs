@@ -74,13 +74,88 @@ function validateMonthCreationTemplate(source) {
     }
     if (f(row, 7) || (flag !== '' && typeof flag !== 'boolean')) throw new Error('Unsupported existing G status at row ' + row);
   }
-  [3, 4].forEach(row => { if (typeof v(row, 2) !== 'number' || !Number.isFinite(v(row, 2)) || v(row, 2) < 0) throw new Error('Invalid salary at B' + row); });
   return true;
+}
+
+/** Salary baseline is the preceding calendar month's regular employer income in SGD. */
+function buildMonthCreationSalaries(transactions, year, month, template) {
+  if (!Array.isArray(transactions)) throw new Error('Transactions salary history is required.');
+  const previous = new Date(Date.UTC(year, month - 2, 1));
+  const period = monthCreationPeriod(previous.getUTCFullYear(), previous.getUTCMonth() + 1);
+  const periodLabel = period.year + '-' + String(period.month).padStart(2, '0');
+  const entries = [
+    { cell: 'B3', person: 'Валера', employer: 'Google', pattern: /\bgoogle\b/i },
+    { cell: 'B4', person: 'Рита', employer: 'Kaspersky', pattern: /\bkaspersky\b/i }
+  ].map(entry => ({ ...entry, amount: null, basis: null, transactions: [], errors: [] }));
+  transactions.forEach(transaction => {
+    if (calendarText(transaction.type).toLowerCase() !== 'доходы') return;
+    const source = calendarText(transaction.source);
+    const matching = entries.filter(entry => entry.pattern.test(source));
+    if (!matching.length) return;
+    const fail = message => matching.forEach(entry => entry.errors.push(message + ' at Transactions row ' + transaction.row));
+    if (typeof transaction.date !== 'number' && !(transaction.date instanceof Date)) {
+      fail('Invalid salary date'); return;
+    }
+    let date;
+    try { date = monthCreationAnchor(transaction.date); }
+    catch (_) { fail('Invalid salary date'); return; }
+    if (date.year !== period.year || date.month !== period.month) return;
+    if (matching.length !== 1) { fail('Ambiguous salary employer'); return; }
+    const amount = transaction.amountSgd;
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || !Number.isSafeInteger(Math.round(amount * 100))) {
+      fail('Invalid salary SGD amount'); return;
+    }
+    matching[0].transactions.push({ row: transaction.row,
+      date: periodLabel + '-' + String(date.day).padStart(2, '0'), source: source, amount: amount });
+  });
+  const blockers = [], warnings = [];
+  entries.forEach(entry => {
+    delete entry.pattern;
+    const templateAmount = template && monthCreationCell(template, Number(entry.cell.slice(1)), 2);
+    if (typeof templateAmount === 'number' && Number.isFinite(templateAmount) && templateAmount >= 0 && Number.isSafeInteger(Math.round(templateAmount * 100))) {
+      entry.fallback = { sheet: template.name, cell: entry.cell, amount: Math.round(templateAmount * 100) / 100 };
+    }
+    const cents = entry.transactions.reduce((total, transaction) =>
+      total + Math.sign(transaction.amount) * Math.round(Math.abs(transaction.amount) * 100), 0);
+    if (entry.errors.length) {
+      entry.status = 'invalid'; blockers.push(...entry.errors);
+    } else if (!entry.transactions.length) {
+      if (entry.fallback) {
+        entry.status = 'provisional'; entry.basis = 'template'; entry.amount = entry.fallback.amount;
+        warnings.push('No regular Доходы salary for ' + entry.employer + ' in ' + periodLabel +
+          '; provisional S$' + entry.amount.toFixed(2) + ' from ' + template.name + '!' + entry.cell + '. The new salary formula updates when the transaction is logged.');
+      } else {
+        entry.status = 'missing'; blockers.push('No regular Доходы salary for ' + entry.employer + ' in ' + periodLabel + '; a valid template amount is required.');
+      }
+    } else if (!Number.isSafeInteger(cents) || cents <= 0) {
+      entry.status = 'invalid'; blockers.push('Salary total for ' + entry.employer + ' in ' + periodLabel + ' must be positive.');
+    } else {
+      entry.status = 'ready'; entry.basis = 'ledger'; entry.amount = cents / 100;
+    }
+  });
+  return { period: period, entries: entries, ready: blockers.length === 0,
+    provisional: entries.some(entry => entry.basis === 'template'), blockers: blockers, warnings: warnings };
 }
 
 /** Dynamic endpoints follow the allocated ledger grid, including subsequently added rows. */
 function monthCreationLedgerColumn(col) {
   return 'Transactions!$' + col + '$2:INDEX(Transactions!$' + col + ':$' + col + ';ROWS(Transactions!$A:$A))';
+}
+
+/** Live salary lookup replaces a provisional baseline as soon as payroll is logged. */
+function monthCreationSalaryFormula(entry) {
+  if (!['Google', 'Kaspersky'].includes(entry.employer)) throw new Error('Unsupported salary employer.');
+  const employer = entry.employer.toLowerCase(), other = employer === 'google' ? 'kaspersky' : 'google';
+  const fallback = entry.fallback ? Math.round(entry.fallback.amount * 100) + '/100' : 'NA()';
+  return '=IFERROR(LET(dates;' + monthCreationLedgerColumn('A') + ';types;' + monthCreationLedgerColumn('C') +
+    ';amounts;' + monthCreationLedgerColumn('E') + ';sources;' + monthCreationLedgerColumn('I') +
+    ';employer;ARRAYFORMULA(REGEXMATCH(LOWER(sources);"\\b' + employer + '\\b"));' +
+    'regular;ARRAYFORMULA(LOWER(TRIM(types))="доходы");' +
+    'selected;ARRAYFORMULA((dates>=EDATE($B$1;-1))*(dates<$B$1)*regular*employer);' +
+    'bad;SUM(ARRAYFORMULA(selected*(1-ISNUMBER(amounts))))+SUM(ARRAYFORMULA(regular*employer*(1-ISNUMBER(dates))))+' +
+    'SUM(ARRAYFORMULA(selected*REGEXMATCH(LOWER(sources);"\\b' + other + '\\b")));' +
+    'count;SUM(selected);cents;SUM(ARRAYFORMULA(IF(selected;ROUND(amounts*100;0);0)));' +
+    'IF(bad>0;NA();IF(count=0;' + fallback + ';IF(cents<=0;NA();cents/100))));NA())';
 }
 
 function monthCreationStatusFormula(row) {
@@ -128,21 +203,27 @@ function buildMonthCreationPlan(snapshot, year, month) {
   if (!prior) throw new Error('No earlier month template exists in this annual workbook.');
   const source = prior.sheet;
   validateMonthCreationTemplate(source);
+  const salary = buildMonthCreationSalaries(snapshot.transactions, year, month, source);
+  const warnings = ['Read-only plan; formulas have not been evaluated by Google Sheets.',
+    'Creation, live reader integration and deployment are separate steps.',
+    'Salary B3:B4 uses the preceding month\'s regular Доходы from Google (Валера) and Kaspersky (Рита), with a provisional template amount for any missing salary. Review matched transactions and mandatory amounts.',
+    'Native sandbox must verify formula recalculation, Russian number formatting, long descriptions and wrapped status layout.',
+    'Summary and 50/30/20 are not modified.'].concat(salary.warnings);
+  if (!salary.ready) return { status: 'blocked', target: target, source: source.name, sourceId: source.id,
+    salary: salary, edits: [], warnings: warnings.concat(salary.blockers,
+      ['Resolve the salary data or template baseline, then preview again.']) };
   const edits = [
     { range: 'B1', value: Math.round((Date.UTC(year, month - 1, 1) - Date.UTC(1899, 11, 30)) / 86400000), purpose: 'First day; existing date formatting retained' },
-    { range: 'B3:B4', values: [[monthCreationCell(source, 3, 2)], [monthCreationCell(source, 4, 2)]], purpose: 'Carry calculated salary amounts as fixed numbers; review before use' },
+    { range: 'B3:B4', formulas: salary.entries.map(entry => [monthCreationSalaryFormula(entry)]), purpose: 'Live previous-month salary lookup: Google → Валера, Kaspersky → Рита; missing salaries use provisional template amounts until payroll is logged' },
     { range: 'B5:B6', values: [[0], [0]], purpose: 'Reset balance and extra income' },
     { range: 'I38', formula: '=H38<=$D$1', purpose: 'Correct date-in-month helper' },
     { range: 'G3:G13', formulas: Array.from({ length: 11 }, (_, index) => [monthCreationStatusFormula(index + 3, monthCreationCell(source, index + 3, 4))]), purpose: 'Live mandatory payment status; replace inherited checkbox validation' },
     { range: 'I2:I32', formulas: Array.from({ length: 31 }, (_, index) => [monthCreationDescriptionFormula(index + 2)]), purpose: 'Live descriptions matching daily spending filters' }
   ];
   return { status: 'preview', target: target, source: source.name, sourceId: source.id,
+    salary: salary,
     edits: edits, preserve: ['D1', 'D3:F13', 'B14', 'E14', 'D15', 'D17', 'D19', 'H2:H32', 'J2:L33', 'H38:H68', 'I39:I68'],
-    warnings: ['Read-only plan; formulas have not been evaluated by Google Sheets.',
-      'Creation, live reader integration and deployment are separate steps.',
-      'Salary B3:B4 will be stored as fixed numbers; review carried salary and mandatory amounts. Annual workbook boundary is enforced.',
-      'Native sandbox must verify formula recalculation, Russian number formatting, long descriptions and wrapped status layout.',
-      'Summary and 50/30/20 are not modified.'] };
+    warnings: warnings };
 }
 
 /** Explicit read adapter; never calls active-month readers that may acquire creation hooks. */
@@ -151,12 +232,20 @@ function readMonthCreationSnapshot(ss) {
   if (!config || !Number.isInteger(config.workbookYear)) throw new Error('Month template workbook year is not configured.');
   const ledger = ss.getSheetByName('Transactions');
   if (!ledger || ledger.getMaxRows() < 2) throw new Error('Transactions ledger is missing.');
+  const headers = ledger.getRange('A1:I1').getValues()[0] || [];
+  [[0, 'Дата'], [2, 'Тип'], [4, 'Сумма в SGD'], [8, 'Где']].forEach(([column, expected]) => {
+    if (calendarText(headers[column]) !== expected) throw new Error('Unsupported Transactions header: expected ' + expected);
+  });
+  const lastRow = ledger.getLastRow();
+  const transactions = lastRow < 2 ? [] : ledger.getRange(2, 1, lastRow - 1, 9).getValues().map((row, index) => ({
+    row: index + 2, date: row[0], type: row[2], amountSgd: row[4], source: row[8]
+  }));
   const sheets = ss.getSheets().filter(sheet => monthCreationIdentity(sheet.getName())).map(sheet => {
     const grid = sheet.getRange('A1:L70');
     const values = grid.getValues();
     return { id: sheet.getSheetId(), name: sheet.getName(), anchor: values[0][1], values: values, formulas: grid.getFormulas() };
   });
-  return { year: config.workbookYear, sheets: sheets };
+  return { year: config.workbookYear, sheets: sheets, transactions: transactions };
 }
 
 /** Default previews next month; explicit (year, month, ss) supports current-month inspection. */
@@ -173,9 +262,18 @@ function previewMonthCreation(year, month, ss) {
 
 function buildMonthCreationPreviewHtml(plan) {
   const escape = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  const title = plan.status === 'exists' ? 'Already exists — no changes: ' + plan.existing : plan.source + ' → ' + plan.target.name;
+  const title = plan.status === 'exists' ? 'Already exists — no changes: ' + plan.existing :
+    plan.source + ' → ' + plan.target.name + (plan.status === 'blocked' ? ' — salary lookup incomplete' : '');
+  const salary = !plan.salary ? '' : '<h3>Salary basis: ' + escape(plan.salary.period.year + '-' + String(plan.salary.period.month).padStart(2, '0')) +
+    '</h3><table border="1" cellpadding="6" style="border-collapse:collapse"><thead><tr><th>Cell / person</th><th>Employer</th><th>SGD / status</th><th>Evidence</th></tr></thead><tbody>' +
+    plan.salary.entries.map(entry => '<tr><td>' + escape(entry.cell + ' · ' + entry.person) + '</td><td>' + escape(entry.employer) +
+      '</td><td>' + escape(entry.amount !== null ? 'S$' + entry.amount.toFixed(2) + ' · ' + entry.status : entry.status) + '</td><td style="white-space:pre-wrap">' +
+      escape(entry.transactions.map(transaction => 'Transactions row ' + transaction.row + ' · ' + transaction.date + ' · ' + transaction.source + ' · S$' + transaction.amount.toFixed(2)).join('\n') ||
+        (entry.fallback ? 'Provisional template amount: ' + entry.fallback.sheet + '!' + entry.fallback.cell + '. Review when the salary transaction is logged.' : 'No matching salary transaction.')) +
+      '</td></tr>').join('') + '</tbody></table>';
   return '<!doctype html><html><body style="font:14px sans-serif;padding:16px"><h2>' + escape(title) + '</h2><p>Read-only preview. No cells or tabs are changed.</p>' +
     '<p>' + escape(plan.target.year + '-' + String(plan.target.month).padStart(2, '0') + ' · ' + plan.target.days + ' days') + '</p>' +
+    salary +
     plan.edits.map(edit => '<h3>' + escape(edit.range) + '</h3><p>' + escape(edit.purpose) + '</p><details><summary>Exact proposed values / formulas</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">' + escape(JSON.stringify(edit, null, 2)) + '</pre></details>').join('') +
     '<ul>' + plan.warnings.map(w => '<li>' + escape(w) + '</li>').join('') + '</ul></body></html>';
 }

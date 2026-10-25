@@ -101,6 +101,9 @@ name, source template and exact cell edits without changing the workbook.
 The optional spreadsheet defaults to the bound workbook. With no arguments,
 it previews next month. After syncing source and reloading Sheets, use
 **Budget → Preview next month (read-only)** for the same plan in a dialog.
+The preview shows prior-month regular salary income from Google for Валера and
+Kaspersky for Рита, with transaction evidence. Missing salaries use provisional
+template amounts; proposed salary formulas update when payroll is logged.
 Existing months are no-ops; creation across the configured workbook year is
 refused. Formula construction is offline-tested; actual formula recalculation
 remains a sandbox acceptance step. No automatic creator is enabled.

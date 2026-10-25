@@ -1,5 +1,9 @@
 {
   "year": 2026,
+  "transactions": [
+    { "row": 2, "date": 46317, "type": "Доходы", "amountSgd": 31000, "source": "Google Singapore salary" },
+    { "row": 3, "date": 46322, "type": "Доходы", "amountSgd": 12500, "source": "Kaspersky Lab salary" }
+  ],
   "sheets": [
     {
       "name": "Октябрь'26",
