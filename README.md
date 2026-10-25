@@ -105,7 +105,7 @@ The preview shows prior-month regular salary income from Google for Валера
 Kaspersky for Рита, with transaction evidence and employer-only CPF additions
 (17% and 9% on the existing wage base). Missing salaries use provisional template
 compensation unchanged; proposed salary formulas update when payroll is logged.
-B6 follows the full quarter-to-date light-income total, while B5 starts at zero.
+B6 follows the tab's own month-to-date light-income total, while B5 starts at zero.
 Existing months are no-ops; creation across the configured workbook year is
 refused. Formula construction is offline-tested; actual formula recalculation
 remains a sandbox acceptance step. No automatic creator is enabled.

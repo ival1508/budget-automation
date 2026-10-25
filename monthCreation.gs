@@ -150,13 +150,12 @@ function buildMonthCreationSalaries(transactions, year, month, template) {
     provisional: entries.some(entry => entry.basis === 'template'), blockers: blockers, warnings: warnings };
 }
 
-/** Quarter-to-date light income is independent of the previous-month salary lookup. */
+/** Light income follows the tab's own month, independently of the salary lookup. */
 function buildMonthCreationLightIncome(transactions, year, month, asOf) {
   if (!Array.isArray(transactions)) throw new Error('Transactions income history is required.');
   monthCreationPeriod(year, month);
-  const firstMonth = Math.floor((month - 1) / 3) * 3 + 1;
-  const start = Math.round((Date.UTC(year, firstMonth - 1, 1) - Date.UTC(1899, 11, 30)) / 86400000);
-  const end = Math.round((Date.UTC(year, firstMonth + 2, 1) - Date.UTC(1899, 11, 30)) / 86400000);
+  const start = Math.round((Date.UTC(year, month - 1, 1) - Date.UTC(1899, 11, 30)) / 86400000);
+  const end = Math.round((Date.UTC(year, month, 1) - Date.UTC(1899, 11, 30)) / 86400000);
   const today = monthCreationAnchor(asOf === undefined ? new Date() : asOf);
   const through = Math.min(end - 1, Math.round((Date.UTC(today.year, today.month - 1, today.day) - Date.UTC(1899, 11, 30)) / 86400000));
   const evidence = [], blockers = [];
@@ -178,8 +177,8 @@ function buildMonthCreationLightIncome(transactions, year, month, asOf) {
   const cents = evidence.reduce((total, transaction) => total + Math.sign(transaction.amount) * Math.round(Math.abs(transaction.amount) * 100), 0);
   if (!Number.isSafeInteger(cents)) blockers.push('Light-income total exceeds the supported amount range.');
   const cutoff = monthCreationAnchor(through);
-  return { period: { year: year, quarter: Math.floor((month - 1) / 3) + 1,
-      through: cutoff.year + '-' + String(cutoff.month).padStart(2, '0') + '-' + String(cutoff.day).padStart(2, '0') },
+  return { period: { year: year, month: month,
+      through: through < start ? null : cutoff.year + '-' + String(cutoff.month).padStart(2, '0') + '-' + String(cutoff.day).padStart(2, '0') },
     amount: blockers.length ? null : cents / 100, ready: blockers.length === 0, transactions: evidence, blockers: blockers };
 }
 
@@ -208,8 +207,8 @@ function monthCreationSalaryFormula(entry) {
 
 function monthCreationLightIncomeFormula() {
   return '=IFERROR(LET(dates;' + monthCreationLedgerColumn('A') + ';types;' + monthCreationLedgerColumn('C') +
-    ';amounts;' + monthCreationLedgerColumn('E') + ';start;DATE(YEAR($B$1);INT((MONTH($B$1)-1)/3)*3+1;1);' +
-    'end;MIN(EDATE(start;3);TODAY()+1);' +
+    ';amounts;' + monthCreationLedgerColumn('E') + ';start;$B$1;' +
+    'end;MIN(EDATE(start;1);TODAY()+1);' +
     'easy;ARRAYFORMULA(REGEXMATCH(SUBSTITUTE(LOWER(TRIM(types));"ё";"е");"^доходы?\\s*[-–—]\\s*легкие\\s+деньги$"));' +
     'selected;ARRAYFORMULA((dates>=start)*(dates<end)*easy);' +
     'bad;SUM(ARRAYFORMULA(selected*(1-ISNUMBER(amounts))))+SUM(ARRAYFORMULA(easy*(1-ISNUMBER(dates))));' +
@@ -266,7 +265,7 @@ function buildMonthCreationPlan(snapshot, year, month) {
   const warnings = ['Read-only plan; formulas have not been evaluated by Google Sheets.',
     'Creation, live reader integration and deployment are separate steps.',
     'Salary B3:B4 adds employer CPF only: Google 17% and Kaspersky 9% on the existing wage base. E13 is preserved. Provisional template compensation is carried unchanged.',
-    'B6 tracks quarter-to-date light income through today, including signed corrections; B5 starts at zero.',
+    'B6 tracks this tab\'s month-to-date light income, including signed corrections; B5 starts at zero.',
     'Native sandbox must verify formula recalculation, Russian number formatting, long descriptions and wrapped status layout.',
     'Summary and 50/30/20 are not modified.'].concat(salary.warnings);
   if (!salary.ready || !lightIncome.ready) return { status: 'blocked', target: target, source: source.name, sourceId: source.id,
@@ -276,7 +275,7 @@ function buildMonthCreationPlan(snapshot, year, month) {
     { range: 'B1', value: Math.round((Date.UTC(year, month - 1, 1) - Date.UTC(1899, 11, 30)) / 86400000), purpose: 'First day; existing date formatting retained' },
     { range: 'B3:B4', formulas: salary.entries.map(entry => [monthCreationSalaryFormula(entry)]), purpose: 'Previous-month banked salaries plus employer CPF only; missing salaries use provisional template compensation unchanged' },
     { range: 'B5', value: 0, purpose: 'Reset carried balance' },
-    { range: 'B6', formula: monthCreationLightIncomeFormula(), purpose: 'Live quarter-to-date light income in SGD, through today' },
+    { range: 'B6', formula: monthCreationLightIncomeFormula(), purpose: 'Live light income in SGD for this tab\'s month, through today' },
     { range: 'I38', formula: '=H38<=$D$1', purpose: 'Correct date-in-month helper' },
     { range: 'G3:G13', formulas: Array.from({ length: 11 }, (_, index) => [monthCreationStatusFormula(index + 3, monthCreationCell(source, index + 3, 4))]), purpose: 'Live mandatory payment status; replace inherited checkbox validation' },
     { range: 'I2:I32', formulas: Array.from({ length: 31 }, (_, index) => [monthCreationDescriptionFormula(index + 2)]), purpose: 'Live descriptions matching daily spending filters' }
@@ -334,8 +333,9 @@ function buildMonthCreationPreviewHtml(plan) {
         (entry.transactions.map(transaction => 'Transactions row ' + transaction.row + ' · ' + transaction.date + ' · ' + transaction.source + ' · S$' + transaction.amount.toFixed(2)).join('\n') ||
         (entry.fallback ? 'Provisional template amount: ' + entry.fallback.sheet + '!' + entry.fallback.cell + '. Review when the salary transaction is logged.' : 'No matching salary transaction.'))) +
       '</td></tr>').join('') + '</tbody></table>';
-  const lightIncome = !plan.lightIncome ? '' : '<h3>Light income: ' + escape(plan.lightIncome.period.year + ' Q' + plan.lightIncome.period.quarter) +
-    '</h3><p>' + escape((plan.lightIncome.ready ? 'S$' + plan.lightIncome.amount.toFixed(2) : 'Unavailable') + ' through ' + plan.lightIncome.period.through) + '</p><details><summary>Matched transactions</summary><pre style="white-space:pre-wrap">' +
+  const lightIncome = !plan.lightIncome ? '' : '<h3>Light income: ' + escape(plan.lightIncome.period.year + '-' + String(plan.lightIncome.period.month).padStart(2, '0')) +
+    '</h3><p>' + escape((plan.lightIncome.ready ? 'S$' + plan.lightIncome.amount.toFixed(2) : 'Unavailable') +
+      (plan.lightIncome.period.through ? ' through ' + plan.lightIncome.period.through : ' · month has not started')) + '</p><details><summary>Matched transactions</summary><pre style="white-space:pre-wrap">' +
     escape(plan.lightIncome.transactions.map(transaction => 'Transactions row ' + transaction.row + ' · ' + transaction.date + ' · ' + transaction.source + ' · S$' + transaction.amount.toFixed(2)).join('\n') || 'No matching light-income transactions.') + '</pre></details>';
   return '<!doctype html><html><body style="font:14px sans-serif;padding:16px"><h2>' + escape(title) + '</h2><p>Read-only preview. No cells or tabs are changed.</p>' +
     '<p>' + escape(plan.target.year + '-' + String(plan.target.month).padStart(2, '0') + ' · ' + plan.target.days + ' days') + '</p>' +

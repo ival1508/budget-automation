@@ -53,53 +53,67 @@ module.exports = test => {
     s.sheets[0].formulas[12][4] = '=0';
     assert.throws(()=>c.buildMonthCreationPlan(s, 2026, 11), /Unsupported CPF plan at E13/);
   });
-  test('Stage 6B: B6 totals quarter-to-date light income with type aliases and signed corrections', c => {
-    const s = fixture();
+  test('Stage 6B: B6 totals its own month-to-date income with type aliases and signed corrections', c => {
+    const s = fixture();s.asOf=serial('2026-11-25');
     const row = (day, type, amount, source='Test income') => ({row:s.transactions.length+2,date:serial(day),type,amountSgd:amount,source});
-    s.transactions.push(row('2026-10-01','Доходы - лёгкие деньги',10.10));
-    s.transactions.push(row('2026-10-10','Доход - Лёгкие деньги',20.20));
-    s.transactions.push(row('2026-10-20',' доходы – легкие деньги ',-2.05));
-    s.transactions.push(row('2026-10-25','ДОХОДЫ — ЛЁГКИЕ ДЕНЬГИ',1,'<img src=x>'));
-    for(const day of ['2026-09-30','2026-10-26','2027-01-01'])s.transactions.push(row(day,'Доходы - лёгкие деньги',99999));
-    for(const type of ['Доходы','Доходы - премия','Получение денег','Доходы - лёгкие деньги - премия'])s.transactions.push(row('2026-10-10',type,99999));
+    s.transactions.push(row('2026-11-01','Доходы - лёгкие деньги',10.10));
+    s.transactions.push(row('2026-11-10','Доход - Лёгкие деньги',20.20));
+    s.transactions.push(row('2026-11-20',' доходы – легкие деньги ',-2.05));
+    s.transactions.push(row('2026-11-25','ДОХОДЫ — ЛЁГКИЕ ДЕНЬГИ',1,'<img src=x>'));
+    for(const day of ['2026-10-31','2026-11-26','2026-12-01','2025-11-10'])s.transactions.push(row(day,'Доходы - лёгкие деньги',99999));
+    for(const type of ['Доходы','Доходы - премия','Получение денег','Доходы - лёгкие деньги - премия'])s.transactions.push(row('2026-11-10',type,99999));
     const p = c.buildMonthCreationPlan(s,2026,11);
     assert.equal(p.lightIncome.amount,29.25); assert.equal(p.lightIncome.transactions.length,4);
-    assert.equal(p.lightIncome.period.quarter,4); assert.equal(p.lightIncome.period.through,'2026-10-25');
+    assert.equal(p.lightIncome.period.month,11); assert.equal(p.lightIncome.period.through,'2026-11-25');
     assert.ok(p.edits.find(e=>e.range==='B6').formula);
     const html = c.buildMonthCreationPreviewHtml(p);
-    assert.ok(html.includes('Light income: 2026 Q4'));assert.ok(html.includes('&lt;img'));assert.ok(!html.includes('<img'));
+    assert.ok(html.includes('Light income: 2026-11'));assert.ok(html.includes('&lt;img'));assert.ok(!html.includes('<img'));
   });
-  test('Stage 6B: light-income quarter boundaries, closed quarters and SGT day boundaries are exact', c => {
-    for(const firstMonth of [1,4,7,10]) {
+  test('Stage 6B: light-income month boundaries, closed months and SGT day boundaries are exact', c => {
+    for(const month of [1,2,3,4,5,6,7,8,9,10,11,12]) {
       const pad=n=>String(n).padStart(2,'0');
-      const first=`2026-${pad(firstMonth)}-01`;
-      const last=`2026-${pad(firstMonth+2)}-${new Date(Date.UTC(2026,firstMonth+2,0)).getUTCDate()}`;
+      const first=`2026-${pad(month)}-01`;
+      const last=`2026-${pad(month)}-${new Date(Date.UTC(2026,month,0)).getUTCDate()}`;
       const tx=(date,amount)=>({row:2,date,type:'Доходы - лёгкие деньги',amountSgd:amount,source:'Test income'});
       const rows=[tx(serial(first),10),tx(serial(last),20),tx(serial(first)-1,999),tx(serial(last)+1,999)];
-      assert.equal(c.buildMonthCreationLightIncome(rows,2026,firstMonth,serial('2027-01-01')).amount,30);
-      assert.equal(c.buildMonthCreationLightIncome(rows,2026,firstMonth,serial(first)-1).amount,0);
+      assert.equal(c.buildMonthCreationLightIncome(rows,2026,month,serial('2027-01-01')).amount,30);
+      const early=c.buildMonthCreationLightIncome(rows,2026,month,serial(first)-1);
+      assert.equal(early.amount,0);assert.equal(early.period.through,null);
     }
     const tx=date=>({row:2,date,type:'Доход - Лёгкие деньги',amountSgd:10,source:'Test income'});
     const rows=[tx(vm.runInContext("new Date('2026-09-30T16:00:00Z')",c)),tx(vm.runInContext("new Date('2026-09-30T15:59:00Z')",c))];
-    assert.equal(c.buildMonthCreationLightIncome(rows,2026,11,serial('2026-10-01')).amount,10);
+    assert.equal(c.buildMonthCreationLightIncome(rows,2026,10,serial('2026-10-01')).amount,10);
+    assert.equal(c.buildMonthCreationLightIncome(rows,2026,11,serial('2026-11-01')).amount,0);
+    const leap=[tx(serial('2028-02-29'))];
+    assert.equal(c.buildMonthCreationLightIncome(leap,2028,2,serial('2028-03-01')).amount,10);
+  });
+  test('Stage 6B: November B6 starts at zero and excludes October even when salary uses October', c => {
+    const s=fixture();
+    s.transactions.push({row:4,date:serial('2026-10-20'),type:'Доходы - лёгкие деньги',amountSgd:500,source:'October income'});
+    const early=c.buildMonthCreationPlan(s,2026,11);
+    assert.equal(early.salary.period.month,10);assert.equal(early.lightIncome.period.month,11);
+    assert.equal(early.lightIncome.amount,0);
+    s.asOf=serial('2026-11-30');
+    s.transactions.push({row:5,date:serial('2026-11-20'),type:'Доходы - лёгкие деньги',amountSgd:350,source:'November income'});
+    assert.equal(c.buildMonthCreationPlan(s,2026,11).lightIncome.amount,350);
   });
   test('Stage 6B: malformed light-income evidence blocks the plan while empty and negative totals remain factual', c => {
     for(const amount of ['',null,'10',NaN,Infinity]) {
-      const s=fixture();s.transactions.push({row:4,date:serial('2026-10-02'),type:'Доходы - лёгкие деньги',amountSgd:amount,source:'Test income'});
+      const s=fixture();s.asOf=serial('2026-11-25');s.transactions.push({row:4,date:serial('2026-11-02'),type:'Доходы - лёгкие деньги',amountSgd:amount,source:'Test income'});
       const p=c.buildMonthCreationPlan(s,2026,11);
       assert.equal(p.status,'blocked');assert.equal(p.edits.length,0);
       assert.match(p.lightIncome.blockers.join(' '),/Invalid light-income SGD amount/);
     }
-    const rows=[{row:2,date:serial('2026-10-02'),type:'Доходы - лёгкие деньги',amountSgd:-5,source:'Correction'}];
-    assert.equal(c.buildMonthCreationLightIncome(rows,2026,11,serial('2026-10-25')).amount,-5);
-    assert.equal(c.buildMonthCreationLightIncome([],2026,11,serial('2026-10-25')).amount,0);
+    const rows=[{row:2,date:serial('2026-11-02'),type:'Доходы - лёгкие деньги',amountSgd:-5,source:'Correction'}];
+    assert.equal(c.buildMonthCreationLightIncome(rows,2026,11,serial('2026-11-25')).amount,-5);
+    assert.equal(c.buildMonthCreationLightIncome([],2026,11,serial('2026-11-25')).amount,0);
     rows[0].date='invalid';
-    assert.match(c.buildMonthCreationLightIncome(rows,2026,11,serial('2026-10-25')).blockers.join(' '),/Invalid light-income date/);
+    assert.match(c.buildMonthCreationLightIncome(rows,2026,11,serial('2026-11-25')).blockers.join(' '),/Invalid light-income date/);
   });
-  test('Stage 6B: B6 formula selects the target quarter through today using bounded SGD ledger ranges', c => {
+  test('Stage 6B: B6 formula selects the tab month through today using bounded SGD ledger ranges', c => {
     const f=c.monthCreationLightIncomeFormula();
-    assert.match(f,/DATE\(YEAR\(\$B\$1\);INT\(\(MONTH\(\$B\$1\)-1\)\/3\)\*3\+1;1\)/);
-    assert.match(f,/MIN\(EDATE\(start;3\);TODAY\(\)\+1\)/);
+    assert.match(f,/start;\$B\$1;/);
+    assert.match(f,/MIN\(EDATE\(start;1\);TODAY\(\)\+1\)/);
     assert.match(f,/\(dates>=start\)\*\(dates<end\)/);
     assert.match(f,/amounts;Transactions!\$E\$2:/);
     assert.ok(f.includes('^доходы?\\s*[-–—]\\s*легкие\\s+деньги$'));
