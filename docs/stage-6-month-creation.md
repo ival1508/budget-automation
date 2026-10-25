@@ -31,14 +31,14 @@ creator yet. Completing the read-only preview alone will not create November.
 
 ### 6B verified now
 
-- [x] Re-run `node scripts/test-regressions.cjs`: 239 tests passed, including all
-  17 Stage 6B checks; 555 existing assertions checked; all `.gs` files parsed.
+- [x] Re-run `node scripts/test-regressions.cjs`: 244 tests passed, including all
+  22 Stage 6B checks; 555 existing assertions checked; all `.gs` files parsed.
 - [x] Refresh live workbook metadata: October is present, November is absent,
   locale remains `ru_RU`, and timezone remains `Asia/Kuala_Lumpur` (UTC+8).
 - [x] Read live October A1:L70 and B1 for the other nine monthly tabs. Running
   the local planner against this fresh connector snapshot selects
-  `Октябрь'26` → `Ноябрь`, 30 days, and proposes exactly B1, B3:B4, B5:B6,
-  I38, G3:G13 and I2:I32. Existing October returns `exists` with zero edits.
+  `Октябрь'26` → `Ноябрь`, 30 days. The updated plan proposes B1, B3:B4, B5,
+  B6, I38, G3:G13 and I2:I32. Existing October returns `exists` with zero edits.
   This validates the plan against current source cells, not native recalculation.
 
 ### 6B closure checklist
@@ -47,8 +47,13 @@ creator yet. Completing the read-only preview alone will not create November.
   Валера; B4 looks up Kaspersky income for Рита. Use the preceding calendar
   month's exact `Доходы` type and SGD amounts. Missing income uses the template
   amount provisionally, as selected by Val. New lookup formulas recalculate when
-  the missing transaction arrives. B5:B6 start at zero. Preview includes employer,
-  source period, amount, ledger row evidence and provisional status.
+  the missing transaction arrives. B5 starts at zero; B6 tracks quarter-to-date
+  light income. Preview includes employer, source period, cash/CPF breakdown,
+  ledger row evidence, provisional status and the quarter's light-income total.
+- [x] Apply Val's confirmed CPF policy: add employer CPF only to ledger salary,
+  17% for Google/Валера and 9% for Kaspersky/Рита on the existing wage base.
+  Preserve E13 and carry provisional template compensation unchanged. Use the
+  full quarter-to-date light-income total in B6, without dividing it by three.
 - [x] Verify the revised planner against fresh read-only income/template cells:
   November resolves Валера from the preceding month's Google income and Рита
   provisionally from the template. A completed prior month independently resolves
@@ -66,9 +71,9 @@ creator yet. Completing the read-only preview alone will not create November.
 | Step | Remaining work |
 | --- | --- |
 | 6A | Finish discovery outside the sampled monthly region, audit remaining Summary/50/30/20 dependencies, freeze the carry/reset contract and establish the TEST baseline. Fresh TEST metadata still ends at August and includes `Август'26 (копия)`; it is not an October reference. |
-| 6C | Implement the sandbox-only creator with a shared lock, target recheck, temporary tab, six planned edits, checkbox removal, wrapped status/descriptions, verification, failure cleanup and repeat-call no-ops. Support subsequent months cloned from generated G/I formulas; the current validator rejects those formulas as an unsupported template version. |
+| 6C | Implement the sandbox-only creator with a shared lock, target recheck, temporary tab, seven planned edits, checkbox removal, wrapped status/descriptions, verification, failure cleanup and repeat-call no-ops. Support subsequent months cloned from generated G/I formulas; the current validator rejects those formulas as an unsupported template version. |
 | 6D | Connect next-month creation on the last day and current-month recovery to the existing 15-minute heartbeat, with feature controls and an income-review note. Restrict writes to operational paths; historical readers and diagnostics must remain read-only. |
-| 6E | Evaluate formulas in native TEST Sheets: employer salary lookup, bonus exclusions and provisional-to-actual recalculation; unpaid/partial/paid/refunded and invalid payment data; daily descriptions, repeated purchases, refunds, future dates and exclusions; short-month helpers, Russian number formatting, long text, layout and recalculation performance. Verify copied formatting/protections, existing-month no-ops, concurrency and failure/retry behavior. |
+| 6E | Evaluate formulas in native TEST Sheets: employer salary lookup, employer-only CPF, bonus exclusions, provisional-to-actual recalculation and quarter-to-date B6; unpaid/partial/paid/refunded and invalid payment data; daily descriptions, repeated purchases, refunds, future dates and exclusions; short-month helpers, Russian number formatting, long text, layout and recalculation performance. Verify copied formatting/protections, existing-month no-ops, concurrency and failure/retry behavior. |
 | 6F | Record sandbox acceptance, synchronize source, enable the feature and update the existing web-app deployment if affected. Verify eligible creation and a repeat-call no-op; document disable/rollback. |
 
 Readiness targets: finish the 6A/6B handoff first, complete creator/integration
@@ -111,8 +116,9 @@ Source: connected Google Sheets reads on 3 October 2026.
 | --- | --- | --- |
 | B1 | Literal first-of-month date | Set target month's first day in workbook timezone |
 | D1 | `=EOMONTH(B1;0)` | Preserve; verify resulting last day |
-| A3:B4 | Salary labels and formulas | Preserve labels; install previous-month employer-income lookup formulas, using template amounts provisionally when missing; mark for owner review |
-| B5:B6 | Remaining balance and extra income | Start at zero; show separately from salary lookup in the preview |
+| A3:B4 | Salary labels and formulas | Preserve labels; install previous-month income lookup plus employer-only CPF; use template compensation provisionally when missing |
+| B5 | Remaining balance | Start at zero |
+| B6 | Light income | Install a live full quarter-to-date SGD income formula, bounded by the tab's quarter and today |
 | D3:E13 | Mandatory labels and planned amounts, including formulas | Carry forward exactly; amounts may need owner review |
 | F3:F13 | Allocation percentage formulas | Preserve |
 | G3:G13 | Mandatory payment status | Install ledger-derived live status formulas in new tabs: paid, unpaid or partial with remaining SGD; exclude CPF/zero plans explicitly |
@@ -142,7 +148,8 @@ not the owner's historical workflow or whether checkbox validation is present.
    Live October A3:B6 confirms Зарплата В = S$34,035; Зарплата Р = S$14,439;
    Остаток = S$0; Лёгкие деньги = S$0. Salary total = S$48,474. Superseded on
    25 October by the employer-income lookup policy below. Existing template salary
-   amounts are now provisional fallbacks only; balance/extra income start at zero.
+   amounts are now provisional fallbacks only; balance starts at zero, and B6
+   follows the full quarter-to-date light-income total under the feedback below.
 3. Resolved after diagnosis: Val selected `=H38<=$D$1` for I38.
 4. Scope extension from Val: G3:G13 must show live payment status, including
    partial-payment remainder, and I2:I32 must generate daily spend descriptions.
@@ -165,19 +172,41 @@ ordinary month creation; an existing month remains a no-op.
 - Sum split salary receipts and signed corrections in cents. A malformed date,
   nonnumeric SGD amount, ambiguous employer or nonpositive matched net total
   requires review and blocks a usable creation plan.
+- Add **employer CPF only**, as explicitly selected by Val: Google/Валера 17%
+  and Kaspersky/Рита 9% on the existing S$8,000 wage base. Preview shows banked
+  salary, employer CPF and resulting compensation separately. Do not add the
+  employee share. E13 retains its existing employer-plus-employee deduction;
+  unsupported CPF formula/rate/base changes require review before creation.
 - Val selected **use the template amount temporarily** for a missing salary.
   Use the selected template's calculated B3/B4 amount if finite and nonnegative;
-  otherwise block the plan. Label the fallback as provisional with its source.
+  otherwise block the plan. Label the fallback as provisional with its source;
+  it already represents template compensation and receives no extra CPF top-up.
 - Install native lookup formulas in new tabs so a provisional amount updates
   automatically when the preceding month's income is logged or corrected. Embed
   fallback cents as integer arithmetic to avoid locale-dependent decimal literals.
   Missing salary plus an invalid fallback yields an unavailable result, never an
   invented zero. Source tabs and existing historical tabs are not migrated.
-- Show the source month, employer/person, current amount, ledger rows and any
-  provisional template source in the read-only preview. Preserve the six edit
-  ranges; B3:B4 now contains two proposed formulas rather than numeric edits.
+- Show the source month, employer/person, current compensation, ledger rows and
+  any provisional template source in the read-only preview. The plan has seven
+  edits because B5's zero reset and B6's income formula are separate operations.
 - Validate formula results and provisional-to-actual recalculation natively in
   6E; offline tests verify evidence selection and formula construction only.
+
+### B6 — full quarter-to-date light income (confirmed 25 October)
+
+- Sum Transactions E for light-income types in C, with dates from A. Accept
+  `Доходы - лёгкие деньги` and the requested singular `Доход - Лёгкие деньги`,
+  normalizing case, `е`/`ё`, spacing and hyphen/en-dash/em-dash separators.
+- Derive the calendar quarter from the new tab's B1. Include its first day through
+  today, capped at quarter end; never include future dates or another quarter/year.
+  The full total belongs in B6, without monthly averaging or division by three.
+- Include all matching sources and signed corrections; exclude regular salary,
+  bonuses, transfers and spending. An empty matching set is zero. Malformed
+  relevant dates or amounts show an unavailable result rather than a fabricated zero.
+- Use a native bounded-range formula so ledger additions and corrections update
+  B6 without script writes. Preview shows the quarter, cutoff, total and evidence.
+  Each tab in one quarter follows that same cumulative total; this is the user's
+  selected quarter tracking policy rather than a per-month income measure.
 
 ### G3:G13 — mandatory payment status
 
@@ -274,7 +303,8 @@ audit of every possible reference to I38.
 - Existing target unchanged; manually created tab races; duplicate alias refusal.
 - Latest earlier valid template selected; no template and structural drift fail
   before publishing a tab.
-- Salary lookup and provisional-to-actual recalculation match ledger evidence;
+- Salary lookup, employer-only CPF and provisional-to-actual recalculation match ledger evidence;
+  B6 follows quarter-to-date light income with exact quarter/SGT day boundaries;
   mandatory plan formulas and formatting preserved; chosen transient inputs reset;
   no source sheet or Transactions writes.
 - G live paid/partial/unpaid results and I daily descriptions match ledger edits
@@ -288,6 +318,16 @@ audit of every possible reference to I38.
   formula results, protections, copied formatting and permissions.
 
 ## Work log
+
+### 25 October — employer CPF and quarter light-income feedback
+
+- Val selected employer-only CPF additions to banked salaries, preserving E13
+  and avoiding a second CPF addition to provisional template compensation.
+- Val selected the full quarter-to-date light-income total for B6. Split its
+  formula from the B5 zero reset; the plan now has seven precise change ranges.
+- Added synthetic regressions for CPF/fallback consistency, quarter and SGT day
+  boundaries, income type aliases, corrections and invalid data. All 244 offline
+  tests and 555 existing assertions pass; native evaluation remains pending.
 
 ### 25 October — 6B employer salary lookup and temporary fallback
 
