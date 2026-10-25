@@ -130,7 +130,7 @@ function buildMonthCreationPlan(snapshot, year, month) {
   validateMonthCreationTemplate(source);
   const edits = [
     { range: 'B1', value: Math.round((Date.UTC(year, month - 1, 1) - Date.UTC(1899, 11, 30)) / 86400000), purpose: 'First day; existing date formatting retained' },
-    { range: 'B3:B4', values: [[monthCreationCell(source, 3, 2)], [monthCreationCell(source, 4, 2)]], purpose: 'Fixed salary baseline from template; review before use' },
+    { range: 'B3:B4', values: [[monthCreationCell(source, 3, 2)], [monthCreationCell(source, 4, 2)]], purpose: 'Carry calculated salary amounts as fixed numbers; review before use' },
     { range: 'B5:B6', values: [[0], [0]], purpose: 'Reset balance and extra income' },
     { range: 'I38', formula: '=H38<=$D$1', purpose: 'Correct date-in-month helper' },
     { range: 'G3:G13', formulas: Array.from({ length: 11 }, (_, index) => [monthCreationStatusFormula(index + 3, monthCreationCell(source, index + 3, 4))]), purpose: 'Live mandatory payment status; replace inherited checkbox validation' },
@@ -140,7 +140,7 @@ function buildMonthCreationPlan(snapshot, year, month) {
     edits: edits, preserve: ['D1', 'D3:F13', 'B14', 'E14', 'D15', 'D17', 'D19', 'H2:H32', 'J2:L33', 'H38:H68', 'I39:I68'],
     warnings: ['Read-only plan; formulas have not been evaluated by Google Sheets.',
       'Creation, live reader integration and deployment are separate steps.',
-      'Review carried salary and mandatory amounts; annual workbook boundary is enforced.',
+      'Salary B3:B4 will be stored as fixed numbers; review carried salary and mandatory amounts. Annual workbook boundary is enforced.',
       'Native sandbox must verify formula recalculation, Russian number formatting, long descriptions and wrapped status layout.',
       'Summary and 50/30/20 are not modified.'] };
 }

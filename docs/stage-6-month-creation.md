@@ -14,7 +14,7 @@ Use the shared 15-minute dispatcher; no new trigger. Stage 4 remains deferred.
 | Step | Deliverable | Completion checkpoint | Status |
 | --- | --- | --- | --- |
 | 6A — Discover and freeze template | Read-only live inspection, exact carry/reset/formula map, naming and input policies in `SHEET_FACTS.monthTemplate` | Resolve the three questions below; inspect remaining template extent, workbook dependencies and sandbox differences | In progress |
-| 6B — Build read-only creation plan | Explicit target month, validated template selection and precise proposed edits, including live payment-status and daily-description formulas; menu/editor preview | Offline planner/formula-construction checks pass; read-only live October snapshot produces November plan | Complete locally; salary contract alignment and installed preview verification pending; native formula evaluation remains 6E |
+| 6B — Build read-only creation plan | Explicit target month, validated template selection and precise proposed edits, including live payment-status and daily-description formulas; menu/editor preview | Offline planner/formula-construction checks pass; read-only live October snapshot produces November plan | Complete locally; fixed salary policy aligned; installed preview verification pending; native formula evaluation remains 6E |
 | 6C — Implement controlled creator | Clone latest valid earlier month, initialize dates/inputs, preserve formulas/formatting, verify before publishing final name | Sandbox-only creation; concurrency lock, recheck, failure handling and repeat-run tests pass | Pending |
 | 6D — Integrate entry points | Explicit current-month recovery, next-month scheduling, income-review notice and feature controls | Dispatcher and operational reader tests pass; historical reporting and read-only diagnostics never create tabs | Pending |
 | 6E — Native sandbox acceptance | Run actual Apps Script creator against verified TEST workbook | Compare formulas, dates, values, formatting and recalculation with a manually created reference; repeated calls make no changes | Pending |
@@ -31,8 +31,8 @@ creator yet. Completing the read-only preview alone will not create November.
 
 ### 6B verified now
 
-- [x] Re-run `node scripts/test-regressions.cjs`: 232 tests passed, including all
-  10 Stage 6B checks; 555 existing assertions checked; all `.gs` files parsed.
+- [x] Re-run `node scripts/test-regressions.cjs`: 233 tests passed, including all
+  11 Stage 6B checks; 555 existing assertions checked; all `.gs` files parsed.
 - [x] Refresh live workbook metadata: October is present, November is absent,
   locale remains `ru_RU`, and timezone remains `Asia/Kuala_Lumpur` (UTC+8).
 - [x] Read live October A1:L70 and B1 for the other nine monthly tabs. Running
@@ -41,14 +41,14 @@ creator yet. Completing the read-only preview alone will not create November.
   I38, G3:G13 and I2:I32. Existing October returns `exists` with zero edits.
   This validates the plan against current source cells, not native recalculation.
 
-### 6B still to close
+### 6B closure checklist
 
-- [ ] Align the salary storage contract across the design and planner. October
-  B3:B4 contain arithmetic formulas; `buildMonthCreationPlan` currently proposes
-  their calculated amounts as fixed numeric values. The income policy describes
-  a fixed baseline, while the later design requirement says to carry salary
-  formulas. Resolve that inconsistency before a creator consumes the plan and
-  verify the chosen behavior in the preview.
+- [x] Align the salary storage contract with the earlier fixed-baseline request.
+  New B3:B4 receive the selected template's calculated amounts as fixed numbers,
+  whether the source salaries are formulas or literal values. B5:B6 start at
+  zero. Preview text explicitly describes this policy; source salary cells stay
+  untouched. A regression covers formula/literal salaries, nonzero one-off
+  income, source immutability and the frozen planned amounts.
 - [ ] Verify the installed Apps Script editor/menu preview. Confirm source sync
   status, sync if needed, reload the workbook, and run the explicit November
   preview and **Budget → Preview next month (read-only)**. Record that both show
@@ -105,7 +105,7 @@ Source: connected Google Sheets reads on 3 October 2026.
 | --- | --- | --- |
 | B1 | Literal first-of-month date | Set target month's first day in workbook timezone |
 | D1 | `=EOMONTH(B1;0)` | Preserve; verify resulting last day |
-| A3:B4 | Salary labels and formulas | Carry forward; mark for owner review |
+| A3:B4 | Salary labels and formulas | Preserve labels; store calculated salary amounts as fixed numbers in B3:B4; mark for owner review |
 | B5:B6 | Remaining balance and extra income | Start at zero with the fixed salary baseline; show explicitly in preview |
 | D3:E13 | Mandatory labels and planned amounts, including formulas | Carry forward exactly; amounts may need owner review |
 | F3:F13 | Allocation percentage formulas | Preserve |
@@ -134,10 +134,12 @@ not the owner's historical workflow or whether checkbox validation is present.
    Do not create January of the next year in this workbook automatically.
 2. Val requested confirmation of current values and a simple fixed salary basis.
    Live October A3:B6 confirms Зарплата В = S$34,035; Зарплата Р = S$14,439;
-   Остаток = S$0; Лёгкие деньги = S$0. Salary total = S$48,474. Proposed contract:
-   carry these salary amounts as the baseline, with zero balance/extra income
-   unless explicitly supplied. Do not infer historical extra income as recurring.
-   Distinguish values from storage: existing salary cells contain arithmetic formulas.
+   Остаток = S$0; Лёгкие деньги = S$0. Salary total = S$48,474. Fixed-baseline
+   contract: copy the selected template's calculated salary amounts into new
+   B3:B4 as numeric values, with zero balance/extra income. Do not infer historical
+   extra income as recurring. Source salary cells may contain arithmetic formulas;
+   only their calculated amounts are carried into the new month. Show the amounts
+   and storage policy in the preview for owner review.
 3. Resolved after diagnosis: Val selected `=H38<=$D$1` for I38.
 4. Scope extension from Val: G3:G13 must show live payment status, including
    partial-payment remainder, and I2:I32 must generate daily spend descriptions.
@@ -228,7 +230,8 @@ audit of every possible reference to I38.
 - Reuse the heartbeat. Proposed policy: attempt next-month creation during the
   last day of the month, with repeat calls becoming no-ops; recover current month
   after rollover if an execution was missed. Errors must not block other jobs.
-- Carry salary formulas and mandatory plans forward with a visible review note.
+- Carry calculated salary amounts as fixed numeric values and preserve mandatory
+  plan values/formulas, with a visible review note.
   Any Telegram notification requires explicit messaging authorization; a sheet
   note/menu result is sufficient for initial implementation.
 - Inspect Summary/50/30/20 dependencies: determine whether a new month needs
@@ -242,8 +245,8 @@ audit of every possible reference to I38.
 - Existing target unchanged; manually created tab races; duplicate alias refusal.
 - Latest earlier valid template selected; no template and structural drift fail
   before publishing a tab.
-- Salary/mandatory formulas and formatting preserved; chosen transient inputs
-  reset; no source sheet or Transactions writes.
+- Salary amounts stored as fixed numbers; mandatory plan formulas and formatting
+  preserved; chosen transient inputs reset; no source sheet or Transactions writes.
 - G live paid/partial/unpaid results and I daily descriptions match ledger edits
   and refunds; historical boolean readers remain compatible.
 - Helper dates and transaction formulas scope to target; no accidental inherited
@@ -255,6 +258,16 @@ audit of every possible reference to I38.
   formula results, protections, copied formatting and permissions.
 
 ## Work log
+
+### 25 October — 6B salary policy aligned
+
+- Retained the planner's fixed-value salary behavior, consistent with the earlier
+  request for a simple salary baseline. Updated the template map, requirements,
+  acceptance matrix and preview wording to state that B3:B4 receive calculated
+  amounts as numbers and B5:B6 start at zero.
+- Added a regression covering formula/literal salaries and nonzero transient
+  income without source mutation. All 233 offline tests and 555 existing
+  assertions pass. Native installed preview verification is the next 6B item.
 
 ### 6B implementation checkpoint
 

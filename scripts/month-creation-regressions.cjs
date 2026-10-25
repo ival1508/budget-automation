@@ -12,6 +12,26 @@ module.exports = test => {
     assert.equal(p.edits[0].value,46327); assert.equal(p.edits[3].formula,'=H38<=$D$1');
     assert.equal(p.edits[1].values[0][0],30000); assert.equal(p.edits[4].formulas.length,11); assert.equal(p.edits[5].formulas.length,31);
   });
+  test('Stage 6B: freezes calculated salaries and resets one-off income', c => {
+    for (const useFormulas of [true, false]) {
+      const s = fixture(), source = s.sheets[0];
+      source.formulas[2][1] = useFormulas ? '=28000+2000' : '';
+      source.formulas[3][1] = useFormulas ? '=9000+3000' : '';
+      source.values[4][1] = 4000;
+      source.values[5][1] = 2000;
+      source.formulas[5][1] = '=1500+500';
+      const before = JSON.stringify(s), plan = c.buildMonthCreationPlan(s, 2026, 11);
+      const salary = plan.edits.find(edit => edit.range === 'B3:B4');
+      const extra = plan.edits.find(edit => edit.range === 'B5:B6');
+      assert.deepEqual(JSON.parse(JSON.stringify(salary.values)), [[30000], [12000]]);
+      assert.equal(salary.formulas, undefined);
+      assert.deepEqual(JSON.parse(JSON.stringify(extra.values)), [[0], [0]]);
+      assert.equal(extra.formulas, undefined);
+      assert.equal(JSON.stringify(s), before);
+      source.values[2][1] = 31000;
+      assert.equal(salary.values[0][0], 30000);
+    }
+  });
   test('Stage 6B: existing legacy and yearless targets are no-ops, even without template formulas', c => {
     for(const name of ["Октябрь'26",'Октябрь']) {
       const s=fixture();s.sheets[0].name=name;s.sheets[0].formulas=[];
