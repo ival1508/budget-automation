@@ -616,7 +616,7 @@ ${csvText.slice(0, 50000)}
     const rows = rawTxns.map(item => {
       const normDate = parseStatementDate(item.date);
       const num = Number(item.amount) || 0;
-      const isPayment = (item.type === 'Получение денег' || String(item.merchant || '').toUpperCase().includes('PAYMENT') || num < 0);
+      const isPayment = (item.type === 'Получение денег' || num < 0);
       return {
         date: normDate || item.date,
         amount: isPayment ? -Math.abs(num) : Math.abs(num),
@@ -750,7 +750,7 @@ RULES:
     const rows = rawTxns.map(item => {
       const normDate = parseStatementDate(item.date);
       const num = Number(item.amount) || 0;
-      const isPayment = (item.type === 'Получение денег' || String(item.merchant || '').toUpperCase().includes('PAYMENT') || num < 0);
+      const isPayment = (item.type === 'Получение денег' || num < 0);
       return {
         date: normDate || item.date,
         amount: isPayment ? -Math.abs(num) : Math.abs(num),
@@ -1139,7 +1139,7 @@ function normalizeRows(rows) {
       if (!normPostDate) normPostDate = String(rawPostDate || '').trim();
     }
 
-    normalizedRows.push({
+    normalizedRows.push(applyDbsSgdCorrection({
       date: normDate,
       posting_date: normPostDate,
       amount: finalAmount,
@@ -1154,7 +1154,7 @@ function normalizeRows(rows) {
       card_type: cardType,
       currency: currency,
       raw_row: row
-    });
+    }));
   }
 
   return normalizedRows;
@@ -3471,14 +3471,18 @@ function stageProposalsUnlocked(proposals, ambiguous, optSpreadsheet, optLedgerR
 
   for (let i = 0; i < stagingQueue.length; i++) {
     const entry = stagingQueue[i];
-    const r = entry.item;
+    const r = applyDbsSgdCorrection(entry.item);
+    entry.item = r;
     const rawMerchant = String(r.raw_merchant || r.merchant || r.description || r.where || '').trim();
     entry.rawMerchant = rawMerchant;
 
     let proposedCat = '';
     let catInference = null;
 
-    if (r.category && r.category !== 'Другое') {
+    if (r.dbs_correction) {
+      proposedCat = r.category;
+      catInference = { category: proposedCat, matchedMerchant: r.where, similarity: 1.0, source: 'user_confirmed_dbs', confidence: 1.0 };
+    } else if (r.category && r.category !== 'Другое') {
       proposedCat = r.category;
       catInference = { category: proposedCat, matchedMerchant: rawMerchant, similarity: 1.0, source: 'existing', confidence: 0.9 };
     } else if (r.proposed_category && r.proposed_category !== 'Другое') {

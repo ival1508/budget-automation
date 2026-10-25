@@ -69,6 +69,7 @@ ${previousProposalText}
 1. ACCOUNTS [account]:
 [${accountsList}]
 - Infer from screenshot source/app header or visible card last-4 digits if present.
+- DBS eMulti-Currency Autosave with SGD transactions is "DBS SGD". The header identifies the account, never the merchant/payor.
 - Use "${defaultAccount}" if card/account cannot be determined.
 
 2. TYPES [type]:
@@ -92,6 +93,7 @@ ${previousProposalText}
    - If year is omitted in input (e.g. "17 Jul"), assume current year 2026.
 
 2. CURRENCY & AMOUNT:
+   - For DBS deposit-account screenshots, SGD minus is an outflow ("Расходы") and SGD plus is an inflow ("Получение денег"). Return positive amounts; preserve direction in type. Words such as PAYMENTS or QR PAYMENT do not indicate an inflow.
    - Default currency is "SGD".
    - If currency is "SGD": set "amount_sgd" equal to "amount".
    - If a transaction displays ONLY foreign currency without an SGD settlement amount:
@@ -116,6 +118,7 @@ ${previousProposalText}
      * 'Guzman' or 'GYG' -> 'Guzman y Gomez'
      * 'Mcd' or 'macs' -> 'McDonald\'s'
    - Keep verbatim raw text in "raw_snippet".
+   - For bank transfers, raw_snippet must contain the COMPLETE descriptor for THIS transaction, including recipient, bank/account reference, transfer ID and memo. Never put another transaction or the screen header in raw_snippet. Do not guess a merchant from an opaque transfer code.
 
 4. LEARNED MERCHANT MEMORY & NAMING CONVENTIONS:
    - If context.learned_merchants is provided, compare the input or raw terminal snippet against the learned canonical merchants and aliases.

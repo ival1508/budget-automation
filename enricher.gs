@@ -345,20 +345,74 @@ function generateFuzzyDedupeKeys(date, account, amount, where) {
   return keys;
 }
 
-/**
- * Deterministically enriches a parsed transaction object with 50/30/20 bucket,
- * currency calculations, default inferences, and a deduplication key.
- * 
- * @param {Object} parsedRow - The raw/parsed transaction object from LLM or input parser.
- * @param {Object<string, string>} [categoryBucketMap] - Optional pre-loaded category-to-bucket map. If omitted, loaded via getCategoryBucketMap().
- * @return {Object} The enriched transaction object ready for confirmation / writing.
+/** User-confirmed DBS SGD identities (feedback dated 3 October 2026).
+ * Opaque gateway/credit references are transaction-specific, never global aliases.
+ * Match only this row's descriptors; the account header is not a counterparty.
  */
+function getDbsSgdCorrection(row) {
+  if (!row || row.manual_merchant_category || row.account !== 'DBS SGD' ||
+      String(row.currency || 'SGD').toUpperCase() !== 'SGD') return null;
+  const descriptors = [row.raw_snippet, row.raw_merchant, row.description, row.raw_where, row.where, row.merchant]
+    .filter(Boolean).map(value => String(value).replace(/\s+/g, ' ').trim());
+  const has = pattern => descriptors.some(value => pattern.test(value));
+  const received = row.type === TRANSACTION_TYPES.RECEIVED || Number(row.amount) < 0;
+  const result = (where, category, type, notes) => ({ where, category, type, notes });
+  if (received) {
+    if (has(/\bQAA1C320602F03DG\b/i) && has(/\b0016IT4980042\b/i) &&
+        normalizeDateString(row.date) === '02.10.2026' && Math.abs(Number(row.amount)) === 465.98) {
+      return result('Allianz', 'Медицина', TRANSACTION_TYPES.RECEIVED, 'Medical insurance reimbursement');
+    }
+    return null;
+  }
+  if (has(/\bSTRIPE PAYMENTS SINGAPORE\b/i) && has(/\b5676456\b/) &&
+      normalizeDateString(row.date) === '02.10.2026' && Number(row.amount) === 20) {
+    return result('GOE.sg', 'Школа & Детский сад', TRANSACTION_TYPES.EXPENSE, "Glasha's school meals");
+  }
+  if (has(/^(?:GOE\.sg)$/i)) return result('GOE.sg', 'Школа & Детский сад', TRANSACTION_TYPES.EXPENSE, "Glasha's school meals");
+  if (has(/\bGROUND UP CLIMBING\b/i)) return result('Ground Up Climbing', 'Школа & Детский сад', TRANSACTION_TYPES.FIXED_EXPENSE);
+  if (has(/^Maple\s*bear$/i) || has(/\bUOB\s*:\s*1203122050\s*:\s*I-BANK\b/i)) {
+    return result('Maplebear', 'Школа & Детский сад', TRANSACTION_TYPES.FIXED_EXPENSE);
+  }
+  if (has(/\bIDT\s+REVDDT\d+\b/i) || has(/^Revolut$/i)) return result('Extra Fund', 'Extra fund', TRANSACTION_TYPES.FIXED_EXPENSE);
+  if (has(/\bONX\s+FUXX\s+LOONGX+\s+FANGLX+\b/i)) {
+    return result('Ivan Ong', 'Рестораны', TRANSACTION_TYPES.EXPENSE, "Rita's Kaspersky coworker; reimbursement for shared meals");
+  }
+  if (has(/^Wang Hwt3lar$/i) || has(/^Heavenly Wang$/i) ||
+      has(/\bPOS NETS QR PAYMENT\s+627407494336497\s+TO:\s*WANG\b/i)) {
+    return result('Heavenly Wang', 'Рестораны', TRANSACTION_TYPES.EXPENSE);
+  }
+  if (has(/\bSCL\s*:\s*0118025813\s*:\s*I-BANK\b/i) && has(/\bmortgage\b/i)) {
+    return result('Standard Chartered Mortgage', 'Квартира', TRANSACTION_TYPES.FIXED_EXPENSE);
+  }
+  return null;
+}
+
+function applyDbsSgdCorrection(row) {
+  const correction = getDbsSgdCorrection(row);
+  if (!correction) return row;
+  // Preserve evidence and any unrelated review reasons. Category confidence alone
+  // is corrected; amount/date confidence and flags must not be upgraded here.
+  return {
+    ...row,
+    raw_where: row.raw_where || row.where || row.merchant || '',
+    where: correction.where,
+    merchant: correction.where,
+    category: correction.category,
+    type: correction.type,
+    confidence: { ...(row.confidence || {}), category: 1 },
+    notes: correction.notes && !String(row.notes || '').includes(correction.notes)
+      ? [row.notes, correction.notes].filter(Boolean).join('; ') : (row.notes || ''),
+    dbs_correction: true
+  };
+}
+
+/** Enrich a parsed transaction with merchant preferences, bucket, currency and dedupe key. */
 function enrichTransaction(parsedRow, categoryBucketMap) {
   if (!parsedRow || typeof parsedRow !== 'object') {
     throw new Error('enrichTransaction requires a valid transaction object.');
   }
 
-  parsedRow = applyTelegramCorrectionRule(parsedRow);
+  parsedRow = applyTelegramCorrectionRule(applyDbsSgdCorrection(parsedRow));
 
   // 1. Merchant Aliases & Learned Naming / Category Recovery
   let where = parsedRow.where || '';
@@ -368,7 +422,7 @@ function enrichTransaction(parsedRow, categoryBucketMap) {
   const rawNorm = normaliseWhere(where);
   const rawSnippetNorm = normaliseWhere(parsedRow.raw_snippet || '');
   // Explicit transaction edits take precedence over learned merchant defaults.
-  const aliasMatch = parsedRow.manual_merchant_category ? null :
+  const aliasMatch = (parsedRow.manual_merchant_category || parsedRow.dbs_correction) ? null :
     (aliases[rawNorm] || (rawSnippetNorm ? aliases[rawSnippetNorm] : null));
 
   if (aliasMatch) {

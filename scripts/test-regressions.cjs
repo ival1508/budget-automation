@@ -254,6 +254,23 @@ function storage(c) {
   return { ledger, staging, ss, lock };
 }
 function staged(merchant, amount = 20) { return [true, '15.08.2026', 'DBS CC SGD', 'Val', 'Расходы', amount, merchant, 'Другое', 'Wants', 1, 'Statement row', 'proposed']; }
+test('DBS SGD staging preserves confirmed mandatory classification and medical credits without ledger writes', c => {
+  const { staging, ledger, ss } = storage(c);
+  const before = structuredClone(ledger.data);
+  c.stageProposals([
+    { date: '02.10.2026', account: 'DBS SGD', amount: 400, type: 'Расходы', category: 'Развлечения', merchant: 'GROUND UP CLIMBING PTE. LTD.' },
+    { date: '02.10.2026', account: 'DBS SGD', amount: -465.98, type: 'Получение денег', merchant: 'ITT QAA1C320602F03DG 0016IT4980042' }
+  ], [], ss, []);
+  assert.equal(staging.data[1][4], 'Обязательные расходы');
+  assert.equal(staging.data[1][6], 'Ground Up Climbing');
+  assert.equal(staging.data[1][7], 'Школа & Детский сад');
+  assert.equal(staging.data[1][8], 'Needs');
+  assert.equal(staging.data[2][4], 'Получение денег');
+  assert.equal(staging.data[2][5], -465.98);
+  assert.equal(staging.data[2][6], 'Allianz');
+  assert.equal(staging.data[2][7], 'Медицина');
+  assert.deepEqual(ledger.data, before);
+});
 test('sandbox dry-run and real commit reuse the verified instance and remain idempotent', c => {
   const { ledger, staging, ss } = storage(c);
   const sandboxId = vm.runInContext('SHEET_FACTS.TEST_SPREADSHEET_ID', c);
@@ -874,6 +891,7 @@ test('Telegram proposal rejection is surfaced while an unchanged overlap is harm
   description = 'Bad Request: message is not modified';
   assert.doesNotThrow(() => c.sendConfirmationMessage(42, 'token', [], true));
 });
+require('./dbs-sgd-regressions.cjs')(test);
 require('./proposal-comment-regressions.cjs')(test);
 require('./monthly-coach-regressions.cjs')(test);
 require('./stage5-regressions.cjs')(test);

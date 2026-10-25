@@ -38,6 +38,14 @@
 
 ---
 
+## End-of-October requirement — bonus, GSU and savings drawdowns
+
+**Recorded 3 October 2026 · Target: 31 October 2026 · Status: requirements/design only; not implemented.** Add a monthly section below row 26 of `50/30/20` to show cash bonuses, GSU vesting, retained savings and major spending funded from accumulated assets. Keep the regular three-bucket calculation independent. Transfers to ETFs/SRS/CPF and GSU reinvestment preserve savings; donations and purchases consume savings. Show GSU sales and the subsequent use of proceeds separately so a sale is not mistaken for either new income or spending.
+
+The [monthly bonus and savings view specification](bonus-gsu-savings-view.md) defines the proposed rows, funding attribution, forecast/actual separation, reconciliation rules and October acceptance criteria. The requested placement is below row 26; exact ranges and existing content must be inspected before workbook changes. This extends the earlier Phase 3 deferral for tracking CPF/SRS transfers and recorded compulsory CPF asset additions in this view, not contribution planning or automated transfers.
+
+**4 October refinement — monthly funding discipline (corrected to the user's accounting):** reuse the existing `Assets` / `Asset_details` tabs. Positive Difference increases monthly `Отложения`; additional spending reduces them. Keep one Difference field, with no before/after display; any shortage beyond available monthly savings requires explicit funding (Wise, Revolut, SAYE, GSU/ETF or another confirmed source). `Отдых` already recorded as `Обязательные расходы` must not become `Расходы` again: a S$3,000 holiday payment covered by S$2,000 already accounted for on Wise adds only S$1,000 current-month `Расходы`. Transfer the covered amount to the debit account for settlement without duplicate spending. Record RUB holiday funding once at transfer, using already-accounted holiday funds and charging only the uncovered portion as additional holiday spending; no subsequent RUB-card purchase tracking is required. Monthly `Отложения` shows the balancing effect. Reconcile the summary to the monthly tab and debit cash coverage of outstanding obligations. The specification includes these rules and acceptance cases; live balances and the historical renovation-reserve note remain unverified.
+
 ## How to run this doc in Antigravity
 
 A **staged build spec**. Each stage is self‑contained: **Objective → Build → Acceptance criteria → Checkpoint**. Feed the stages to the agent **one at a time, in order**. Don't start a stage until the previous checkpoint passes.
