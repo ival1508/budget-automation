@@ -165,7 +165,7 @@ function test_stage3GMenuAndScheduler() {
   assertEq(menuName, '💰 Budget', 'Menu is available in Sheets');
   ['reconcileFromDrive', 'reviewReconcileStaging', 'importReviewedReconciliation', 'dismissSelectedReconcileRows',
     'archiveCompletedReconcileRows', 'openReconcileHistory', 'refreshPendingReconciliation',
-    'repairTransactionDerivedFormulas'].forEach(name => assertEq(items.includes(name), true, 'Menu includes ' + name));
+    'repairTransactionDerivedFormulas', 'repairMissingTransactionBalances'].forEach(name => assertEq(items.includes(name), true, 'Menu includes ' + name));
   let created = 0; const triggers = [];
   const chain = { timeBased: () => chain, everyMinutes: minutes => { assertEq(minutes, 15, 'Use existing 15-minute cadence'); return chain; },
     create: () => { created++; triggers.push({ getHandlerFunction: () => 'dispatch' }); } };

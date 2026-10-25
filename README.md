@@ -335,6 +335,13 @@ After syncing this update, reload the sheet and choose
 headers and the `-` reference table before replacing existing E and K values with
 row formulas. Future imports create these formulas automatically.
 
+For existing blank balance cells in F:G, choose
+**💰 Budget → Repair missing transaction balances** after updating Apps Script and
+reloading the sheet. This fills only empty balance cells on transaction rows using
+the workbook's existing formulas, preserving populated balances, formulas, and
+opening seeds. It does not re-import transactions. Future multi-row submissions
+fill F:G for every row, even when the previous row has missing balances.
+
 ### Active reconciliation queue and history
 
 After syncing and reloading Sheets, use **💰 Budget → Reviewed — do not import selected rows**

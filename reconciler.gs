@@ -4029,7 +4029,10 @@ function commitStaged(useTestSheet, optDryRun, optSpreadsheet) {
     const transSheet = ss.getSheetByName('Transactions');
     let gFormulaAddExpected = true;
     if (transSheet && transSheet.getLastRow() >= 2) {
-      const sampleGFormula = String(transSheet.getRange(transSheet.getLastRow(), 7).getFormula() || '').toUpperCase();
+      const balanceTemplate = getTransactionBalanceTemplates(transSheet)[1];
+      const sampleGFormula = balanceTemplate
+        ? String(transSheet.getRange(balanceTemplate.row, 7).getFormula() || '').toUpperCase()
+        : '';
       Logger.log(`[commitStaged] Sample Column G formula in Transactions: "${sampleGFormula}"`);
       // If formula is standard `=F - D` without type checking, negative amount is required for F - (-D) = F + D.
       // If formula branches on type (e.g. IF(C="Получение денег", F + D, ...)), positive amount is required.
@@ -5052,6 +5055,7 @@ function buildBudgetMenu(ui) {
     .addItem('Repair staging dropdowns', 'repairReconcileDropdowns')
     .addItem('Repair staging dates', 'repairReconcileDates')
     .addItem('Repair Transactions formulas', 'repairTransactionDerivedFormulas')
+    .addItem('Repair missing transaction balances', 'repairMissingTransactionBalances')
     .addSeparator()
     .addItem('Seed / review mandatory calendar draft', 'seedCalendarFromMenu')
     .addItem('Check mandatory payments now', 'checkMandatoryPaymentsNow')

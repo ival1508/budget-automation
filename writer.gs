@@ -43,6 +43,73 @@ function transactionBucketFormula(rowNumber) {
   return `=IF(H${row}="";"";IFNA(VLOOKUP(H${row};'-'!$B:$C;2;FALSE);"UNKNOWN"))`;
 }
 
+/** Find the latest real F/G formulas independently, skipping blanks and opening seeds. */
+function getTransactionBalanceTemplates(sheet) {
+  const templates = [null, null];
+  const rowCount = Math.max(0, sheet.getLastRow() - 1);
+  if (!rowCount) return templates;
+  const formulas = sheet.getRange(2, 6, rowCount, 2).getFormulasR1C1();
+  for (let r = formulas.length - 1; r >= 0; r--) {
+    for (let col = 0; col < 2; col++) {
+      if (!templates[col] && formulas[r][col]) {
+        templates[col] = { row: r + 2, formula: formulas[r][col] };
+      }
+    }
+    if (templates[0] && templates[1]) break;
+  }
+  return templates;
+}
+
+/** Fill only missing F/G cells on existing transaction rows; retain all balances and seeds. */
+function repairMissingTransactionBalances(ss) {
+  return withBudgetWriteLock(() => {
+    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = getTransactionsSheet(spreadsheet);
+    const headers = sheet.getRange(1, 1, 1, 7).getDisplayValues()[0]
+      .map(value => String(value || '').trim().toLowerCase().replace(/ё/g, 'е'));
+    if (['счет', 'account'].indexOf(headers[1]) === -1 ||
+        ['на счете до', 'balance before'].indexOf(headers[5]) === -1 ||
+        ['на счете после', 'balance after'].indexOf(headers[6]) === -1) {
+      throw new Error('Transactions balance layout is unexpected. No balances were changed.');
+    }
+    const rowCount = Math.max(0, sheet.getLastRow() - 1);
+    const templates = getTransactionBalanceTemplates(sheet);
+    const values = rowCount ? sheet.getRange(2, 1, rowCount, 7).getValues() : [];
+    const formulas = rowCount ? sheet.getRange(2, 6, rowCount, 2).getFormulasR1C1() : [];
+    const seenAccounts = new Set();
+    const repairs = [];
+    const latest = [null, null];
+    for (let r = 0; r < values.length; r++) {
+      const account = String(values[r][1] || '').trim();
+      if (!account) continue;
+      const firstForAccount = !seenAccounts.has(account);
+      seenAccounts.add(account);
+      for (let col = 0; col < 2; col++) {
+        if (formulas[r][col]) latest[col] = formulas[r][col];
+        if (formulas[r][col] || values[r][5 + col] !== '') continue;
+        if (col === 0 && firstForAccount) {
+          repairs.push({ row: r + 2, col: 6, seed: true });
+        } else {
+          const formula = latest[col] || (templates[col] && templates[col].formula);
+          if (!formula) throw new Error('No existing Transactions balance formula in column ' + (col === 0 ? 'F' : 'G') + '. No balances were changed.');
+          repairs.push({ row: r + 2, col: col + 6, formula: formula });
+        }
+      }
+    }
+    // Validate the complete plan before changing any cell.
+    repairs.forEach(repair => {
+      const cell = sheet.getRange(repair.row, repair.col);
+      if (repair.seed) cell.setValue(0);
+      else cell.setFormulaR1C1(repair.formula);
+    });
+    if (repairs.length) SpreadsheetApp.flush();
+    const message = `Repaired ${repairs.length} missing Transactions balance cell(s) in F:G.`;
+    Logger.log(message);
+    if (typeof spreadsheet.toast === 'function') spreadsheet.toast(message, 'Budget', 6);
+    return { updatedCells: repairs.length };
+  });
+}
+
 /**
  * Replace derived values in existing Transactions rows with formulas.
  * The header and reference-tab checks run before either destination column changes.
@@ -108,7 +175,7 @@ function repairTransactionDerivedFormulas(ss) {
  * 1. Batch writes columns A-K in a single setValues operation (§6.6).
  * 2. Writes the raw SGD number to D and a row-local =D formula to E.
  * 3. Writes a row-local category lookup formula to K using the "-" tab B:C taxonomy.
- * 4. Does NOT compute running balances in code. Copies F:G per-cell formulas down from row above (§4.3, §6.6).
+ * 4. Does NOT compute running balances in code. Fills every new F:G row with existing R1C1 formulas (§4.3, §6.6).
  * 5. Checks if account in column B has ever appeared in the sheet before.
  *    For the VERY FIRST row of a new account, writes literal `0` into column F instead of copying formula (§6.6).
  * 6. Idempotent: Skips rows whose dedupe_key already exists in the sheet (§6.6, §6.7).
@@ -245,15 +312,23 @@ function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {
     };
   }
 
+  // Validate templates before writing inputs. R1C1 retains relative references for every row.
+  // A blank tail or a literal opening seed must never become the next formula template.
+  const balanceTemplates = getTransactionBalanceTemplates(sheet);
+  const needsBeforeFormula = toAppend.length > newAccountsInBatch.length;
+  if (!balanceTemplates[1] || (needsBeforeFormula && !balanceTemplates[0])) {
+    throw new Error('Transactions balance formulas are missing in F or G. Restore a valid formula template before importing. No transactions were written.');
+  }
+  const balanceFormulas = toAppend.map(() => [
+    balanceTemplates[0] ? balanceTemplates[0].formula : '',
+    balanceTemplates[1].formula
+  ]);
+
   // 4. Batch Write Input Columns A-K in a single operation (§6.6)
   sheet.getRange(startRow, 1, rows2D.length, 11).setValues(rows2D);
 
-  // 5. Formula Copying Logic: Copy F:G formulas down from the row directly above (§6.6)
-  if (startRow > 1) {
-    const sourceRange = sheet.getRange(startRow - 1, 6, 1, 2);
-    const targetRange = sheet.getRange(startRow, 6, rows2D.length, 2);
-    sourceRange.copyTo(targetRange);
-  }
+  // copyTo uses only the destination's top-left cell; it does not fill a taller batch.
+  sheet.getRange(startRow, 6, rows2D.length, 2).setFormulasR1C1(balanceFormulas);
 
   // 6. New Account Seed Logic: Set literal 0 in column F for first row of unseen accounts (§6.6)
   for (let k = 0; k < newAccountsInBatch.length; k++) {

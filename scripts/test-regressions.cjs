@@ -198,7 +198,27 @@ test('coach does not turn a daily shortfall into monthly overspend', c => {
   assert.match(c.generateCoachBrief(missing), /tab is missing/);
 });
 // In-memory sheet double: verifies values, destinations, statuses and locking.
-// It records formula copy requests; it deliberately does NOT simulate Sheets formula evaluation.
+// It translates relative cell references but deliberately does not evaluate formulas.
+function mapFormulaReferences(formula, pattern, translate) {
+  return formula.split(/("(?:[^"]|"")*")/g)
+    .map((part, index) => index % 2 ? part : part.replace(pattern, translate)).join('');
+}
+function a1ToR1C1(formula, row, col) {
+  const ref = (absolute, number, current) => absolute ? String(number) : number === current ? '' : `[${number - current}]`;
+  return mapFormulaReferences(formula, /(?<![A-Z0-9_])(\$?)([A-Z]{1,3})(\$?)(\d+)(?![A-Z0-9_])/g, (_, absCol, letters, absRow, digits) => {
+    const number = [...letters].reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0);
+    return `R${ref(absRow, Number(digits), row)}C${ref(absCol, number, col)}`;
+  });
+}
+function r1c1ToA1(formula, row, col) {
+  const ref = (part, current) => !part ? [current, ''] : part.startsWith('[') ? [current + Number(part.slice(1, -1)), ''] : [Number(part), '$'];
+  return mapFormulaReferences(formula, /(?<![A-Z0-9_])R(\[-?\d+\]|\d+)?C(\[-?\d+\]|\d+)?(?![A-Z0-9_\[\]])/g, (_, r, c) => {
+    const [rowNumber, absRow] = ref(r, row), [colNumber, absCol] = ref(c, col);
+    let letters = '', value = colNumber;
+    while (value > 0) { letters = String.fromCharCode(65 + (value - 1) % 26) + letters; value = Math.floor((value - 1) / 26); }
+    return `${absCol}${letters}${absRow}${rowNumber}`;
+  });
+}
 class Sheet {
   constructor(name, data = []) { this.name = name; this.data = data; this.copies = []; this.validations = new Map(); this.formats = new Map(); }
   getName() { return this.name; }
@@ -221,13 +241,18 @@ class Sheet {
         sheet.data[row - 1 + ri] ||= []; sheet.data[row - 1 + ri][col - 1 + ci] = v;
       })); return range; },
       setFormulas: values => range.setValues(values),
+      setFormulasR1C1: values => range.setValues(values.map((r, ri) => r.map((formula, ci) =>
+        formula ? r1c1ToA1(formula, row + ri, col + ci) : ''))),
+      setFormulaR1C1: formula => range.setFormulasR1C1([[formula]]),
       getFormulas: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => {
         const value = sheet.data[row - 1 + r]?.[col - 1 + c];
         return typeof value === 'string' && value.startsWith('=') ? value : '';
       })),
+      getFormulasR1C1: () => range.getFormulas().map((r, ri) => r.map((formula, ci) =>
+        formula ? a1ToR1C1(formula, row + ri, col + ci) : '')),
       setValue: value => range.setValues([[value]]),
-      getFormula: () => '=F2-D2',
-      copyTo: target => sheet.copies.push(target),
+      getFormula: () => range.getFormulas()[0][0],
+      copyTo: target => { sheet.copies.push(target); target.setFormulasR1C1(range.getFormulasR1C1()); },
       setNumberFormat: format => { sheet.formats.set(col, format); return range; }, setFontWeight: () => range, setBackground: () => range,
       setFontColor: () => range, setHorizontalAlignment: () => range, setBackgrounds: () => range,
       insertCheckboxes: () => range, setDataValidation: rule => { sheet.validations.set(col, rule); return range; }
@@ -238,7 +263,8 @@ class Sheet {
 const headers = ['✓', 'date', 'account', 'Cardholder', 'Тип', 'amount', 'merchant', 'proposed category', 'proposed bucket', 'confidence', 'source_row', 'status'];
 const transactionHeaders = ['Дата', 'Счёт', 'Тип', 'Сумма', 'Сумма в SGD', 'На счете до', 'На счете после', 'Категория', 'Где', 'Notes', '50/30/20 Category'];
 function storage(c) {
-  const ledger = new Sheet('Transactions', [transactionHeaders, ['15.08.2026', 'DBS CC SGD', 'Расходы', 20, 20, 100, 80, 'Другое', 'Old Merchant', '', 'Wants']]);
+  const ledger = new Sheet('Transactions', [transactionHeaders, ['15.08.2026', 'DBS CC SGD', 'Расходы', 20, 20,
+    '=IFERROR(LOOKUP(2;1/($B$1:B1=B2);$G$1:G1);0)', '=F2-D2', 'Другое', 'Old Merchant', '', 'Wants']]);
   const staging = new Sheet('_Reconcile', [headers]);
   const reference = new Sheet('-', [['', 'Категория', '50/30/20'], ['', 'Другое', 'Wants'], ['', 'Транспорт', 'Needs']]);
   const sheets = { Transactions: ledger, _Reconcile: staging, '-': reference };
@@ -314,7 +340,7 @@ test('commit dry-run, mixed duplicates, real write, and repeat preserve correct 
   assert.equal(ledger.data[2].length, 11); assert.equal(ledger.data[2][9], '');
   assert.equal(ledger.data[2][4], c.transactionAmountSgdFormula(3));
   assert.equal(ledger.data[2][10], c.transactionBucketFormula(3));
-  assert.equal(ledger.copies.length, 1);
+  assert.equal(ledger.copies.length, 0);
   const again = c.commitStaged(false, false, ss);
   assert.equal(again.committedCount, 0); assert.equal(ledger.data.length, 3);
   assert.equal(lock.acquired, lock.released);
@@ -325,6 +351,93 @@ test('ordinary explicit writes work while reconciliation defaults to dry-run', c
   assert.equal(c.appendTransactions([txn], ss).dryRun, true); assert.equal(ledger.data.length, 2);
   assert.equal(c.appendTransactions([txn], ss, false).writtenCount, 1); assert.equal(ledger.data.length, 3);
   assert.equal(lock.acquired, lock.released);
+});
+test('multi-row submissions fill every balance formula with references to that row', c => {
+  const { ledger, ss, lock } = storage(c);
+  const txns = [12, 24, 36, 48].map((amount, i) => ({ date: '25.10.2026', account: 'DBS CC SGD',
+    amount, where: `Rita purchase ${i}`, category: 'Другое' }));
+  assert.equal(c.appendTransactions(txns, ss, false).writtenCount, 4);
+  for (let row = 3; row <= 6; row++) {
+    assert.equal(ledger.data[row - 1][5], `=IFERROR(LOOKUP(2;1/($B$1:B${row - 1}=B${row});$G$1:G${row - 1});0)`);
+    assert.equal(ledger.data[row - 1][6], `=F${row}-D${row}`);
+  }
+  const before = structuredClone(ledger.data);
+  assert.equal(c.appendTransactions(txns, ss, false).writtenCount, 0);
+  assert.deepEqual(ledger.data, before);
+  assert.equal(lock.acquired, lock.released);
+});
+test('blank tail cells and literal opening balances cannot become formula templates', c => {
+  const { ledger, ss } = storage(c);
+  ledger.data.push(['24.10.2026', 'Cash', 'Расходы', 10, 10, 0, '=F3-D3', 'Другое', 'Opening']);
+  ledger.data.push(['24.10.2026', 'DBS CC SGD', 'Расходы', 10, 10, '', '', 'Другое', 'Missing']);
+  const txns = ['DBS CC SGD', 'New account', 'New account', 'Cash'].map((account, i) => ({
+    date: '25.10.2026', account, amount: 20 + i, where: `Mixed purchase ${i}`, category: 'Другое' }));
+  c.appendTransactions(txns, ss, false);
+  assert.equal(ledger.data[4][5], '=IFERROR(LOOKUP(2;1/($B$1:B4=B5);$G$1:G4);0)');
+  assert.equal(ledger.data[5][5], 0);
+  assert.equal(ledger.data[6][5], '=IFERROR(LOOKUP(2;1/($B$1:B6=B7);$G$1:G6);0)');
+  assert.ok(ledger.data[7][5].startsWith('='));
+  for (let row = 5; row <= 8; row++) assert.equal(ledger.data[row - 1][6], `=F${row}-D${row}`);
+});
+test('missing formula templates fail before appending and retain the write lock discipline', c => {
+  for (const col of [5, 6]) {
+    const { ledger, ss, lock } = storage(c);
+    ledger.data[1][col] = 0;
+    const before = structuredClone(ledger.data);
+    const txns = [{ date: '25.10.2026', account: 'DBS CC SGD', amount: 25, where: 'No template' }];
+    assert.throws(() => c.appendTransactions(txns, ss, false), /No transactions were written/);
+    assert.deepEqual(ledger.data, before);
+    assert.equal(c.appendTransactions(txns, ss, true).dryRun, true);
+    assert.deepEqual(ledger.data, before);
+    assert.equal(lock.acquired, lock.released);
+  }
+});
+test('missing-balance repair preserves inputs, populated formulas, manual balances and opening seeds', c => {
+  const { ledger, ss, lock } = storage(c);
+  ledger.data.push(['24.10.2026', 'Cash', 'Расходы', 11, 11, '', '', 'Другое', 'Cash opening']);
+  ledger.data.push(['25.10.2026', 'Cash', 'Расходы', 12, 12, '', '', 'Другое', 'Cash next']);
+  ledger.data.push(['25.10.2026', 'DBS CC SGD', 'Расходы', 13, 13, '', 125, 'Другое', 'Manual closing']);
+  ledger.data.push(['25.10.2026', 'Reserve', 'Расходы', 14, 14, 500, '=F6-D6', 'Другое', 'Manual opening']);
+  ledger.data.push(['', '', '', '', '', '', '']);
+  const before = structuredClone(ledger.data);
+  assert.equal(c.repairMissingTransactionBalances(ss).updatedCells, 5);
+  assert.equal(ledger.data[2][5], 0);
+  assert.equal(ledger.data[2][6], '=F3-D3');
+  assert.equal(ledger.data[3][5], '=IFERROR(LOOKUP(2;1/($B$1:B3=B4);$G$1:G3);0)');
+  assert.equal(ledger.data[3][6], '=F4-D4');
+  assert.equal(ledger.data[4][6], 125);
+  assert.deepEqual(ledger.data[5], before[5]);
+  assert.deepEqual(ledger.data[6], before[6]);
+  for (let r = 0; r < before.length; r++) {
+    assert.deepEqual(ledger.data[r].slice(0, 5), before[r].slice(0, 5));
+    assert.deepEqual(ledger.data[r].slice(7), before[r].slice(7));
+  }
+  assert.equal(c.repairMissingTransactionBalances(ss).updatedCells, 0);
+  assert.equal(lock.acquired, lock.released);
+});
+test('balance repair validates all formulas and headers before changing any cell', c => {
+  for (const problem of ['header', 'template']) {
+    const { ledger, ss, lock } = storage(c);
+    ledger.data.push(['25.10.2026', 'Cash', 'Расходы', 12, 12, '', '', 'Другое', 'Missing']);
+    if (problem === 'header') ledger.data[0][5] = 'Unexpected';
+    else ledger.data[1][6] = '';
+    const before = structuredClone(ledger.data);
+    assert.throws(() => c.repairMissingTransactionBalances(ss), /No balances were changed/);
+    assert.deepEqual(ledger.data, before);
+    assert.equal(lock.acquired, lock.released);
+  }
+});
+test('reconciliation credits use the latest real G formula even behind a blank tail', c => {
+  for (const typeAware of [false, true]) {
+    const { ledger, staging, ss } = storage(c);
+    if (typeAware) ledger.data[1][6] = '=IF(C2="Получение денег";F2+D2;F2-D2)';
+    ledger.data.push(['24.10.2026', 'DBS CC SGD', 'Расходы', 10, 10, '', '', 'Другое', 'Missing']);
+    const credit = staged('Reimbursement', -35); credit[4] = 'Получение денег';
+    staging.data.push(credit);
+    assert.equal(c.commitStaged(false, false, ss).committedCount, 1);
+    assert.equal(ledger.data[3][3], typeAware ? 35 : -35);
+    assert.equal(ledger.data[3][6], typeAware ? '=IF(C4="Получение денег";F4+D4;F4-D4)' : '=F4-D4');
+  }
 });
 test('existing Transactions rows can be migrated to row-local E and K formulas', c => {
   const { ledger, ss, lock } = storage(c);
