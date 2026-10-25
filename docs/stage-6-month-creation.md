@@ -1,6 +1,7 @@
 # Stage 6 — automatic month creation
 
-Plan and discovery checkpoint: 3 October 2026.
+Initial plan and discovery checkpoint: 3 October 2026.
+November readiness review: 25 October 2026 (SGT).
 
 ## Outcome
 
@@ -13,7 +14,7 @@ Use the shared 15-minute dispatcher; no new trigger. Stage 4 remains deferred.
 | Step | Deliverable | Completion checkpoint | Status |
 | --- | --- | --- | --- |
 | 6A — Discover and freeze template | Read-only live inspection, exact carry/reset/formula map, naming and input policies in `SHEET_FACTS.monthTemplate` | Resolve the three questions below; inspect remaining template extent, workbook dependencies and sandbox differences | In progress |
-| 6B — Build read-only creation plan | Explicit target month, validated template selection and precise proposed edits, including live payment-status and daily-description formulas; menu/editor preview | Offline planner/formula-construction checks pass; read-only live October snapshot produces November plan | Complete locally; native formula evaluation remains 6E |
+| 6B — Build read-only creation plan | Explicit target month, validated template selection and precise proposed edits, including live payment-status and daily-description formulas; menu/editor preview | Offline planner/formula-construction checks pass; read-only live October snapshot produces November plan | Complete locally; salary contract alignment and installed preview verification pending; native formula evaluation remains 6E |
 | 6C — Implement controlled creator | Clone latest valid earlier month, initialize dates/inputs, preserve formulas/formatting, verify before publishing final name | Sandbox-only creation; concurrency lock, recheck, failure handling and repeat-run tests pass | Pending |
 | 6D — Integrate entry points | Explicit current-month recovery, next-month scheduling, income-review notice and feature controls | Dispatcher and operational reader tests pass; historical reporting and read-only diagnostics never create tabs | Pending |
 | 6E — Native sandbox acceptance | Run actual Apps Script creator against verified TEST workbook | Compare formulas, dates, values, formatting and recalculation with a manually created reference; repeated calls make no changes | Pending |
@@ -21,6 +22,60 @@ Use the shared 15-minute dispatcher; no new trigger. Stage 4 remains deferred.
 
 Proceed in order. Source tests do not replace native spreadsheet recalculation.
 Keep live automatic creation disabled until sandbox acceptance passes.
+
+## November readiness — 25 October 2026
+
+Working branch: `codex/stage-6`, based on `main` at `f416cba`.
+The branch starts with the existing 6B implementation; there is no controlled
+creator yet. Completing the read-only preview alone will not create November.
+
+### 6B verified now
+
+- [x] Re-run `node scripts/test-regressions.cjs`: 232 tests passed, including all
+  10 Stage 6B checks; 555 existing assertions checked; all `.gs` files parsed.
+- [x] Refresh live workbook metadata: October is present, November is absent,
+  locale remains `ru_RU`, and timezone remains `Asia/Kuala_Lumpur` (UTC+8).
+- [x] Read live October A1:L70 and B1 for the other nine monthly tabs. Running
+  the local planner against this fresh connector snapshot selects
+  `Октябрь'26` → `Ноябрь`, 30 days, and proposes exactly B1, B3:B4, B5:B6,
+  I38, G3:G13 and I2:I32. Existing October returns `exists` with zero edits.
+  This validates the plan against current source cells, not native recalculation.
+
+### 6B still to close
+
+- [ ] Align the salary storage contract across the design and planner. October
+  B3:B4 contain arithmetic formulas; `buildMonthCreationPlan` currently proposes
+  their calculated amounts as fixed numeric values. The income policy describes
+  a fixed baseline, while the later design requirement says to carry salary
+  formulas. Resolve that inconsistency before a creator consumes the plan and
+  verify the chosen behavior in the preview.
+- [ ] Verify the installed Apps Script editor/menu preview. Confirm source sync
+  status, sync if needed, reload the workbook, and run the explicit November
+  preview and **Budget → Preview next month (read-only)**. Record that both show
+  the expected source, target, changes and review warnings without writing cells
+  or creating tabs. The current runtime source/deployment was not inspected in
+  this review; the local result does not establish that the menu is installed.
+
+### Work beyond 6B required before automatic November creation
+
+| Step | Remaining work |
+| --- | --- |
+| 6A | Finish discovery outside the sampled monthly region, audit remaining Summary/50/30/20 dependencies, freeze the carry/reset contract and establish the TEST baseline. Fresh TEST metadata still ends at August and includes `Август'26 (копия)`; it is not an October reference. |
+| 6C | Implement the sandbox-only creator with a shared lock, target recheck, temporary tab, six planned edits, checkbox removal, wrapped status/descriptions, verification, failure cleanup and repeat-call no-ops. Support subsequent months cloned from generated G/I formulas; the current validator rejects those formulas as an unsupported template version. |
+| 6D | Connect next-month creation on the last day and current-month recovery to the existing 15-minute heartbeat, with feature controls and an income-review note. Restrict writes to operational paths; historical readers and diagnostics must remain read-only. |
+| 6E | Evaluate formulas in native TEST Sheets: unpaid/partial/paid/refunded and invalid payment data; daily descriptions, repeated purchases, refunds, future dates and exclusions; short-month helpers, Russian number formatting, long text, layout and recalculation performance. Verify copied formatting/protections, existing-month no-ops, concurrency and failure/retry behavior. |
+| 6F | Record sandbox acceptance, synchronize source, enable the feature and update the existing web-app deployment if affected. Verify eligible creation and a repeat-call no-op; document disable/rollback. |
+
+Readiness targets: finish the 6A/6B handoff first, complete creator/integration
+and native sandbox acceptance by **29 October**, and complete release checks by
+**30 October**. Verify the first eligible scheduled November creation on
+**31 October SGT**, ahead of **1 November**. If acceptance is incomplete, keep
+automation disabled and use a manually prepared, verified November tab; the
+creator must later recognize it as an existing-month no-op.
+
+This review changed repository documentation only. No source sync, deployment,
+workbook writes, automatic creation or Telegram messages were performed. The
+live connector snapshot used for local verification remains outside the repository.
 
 ## Read-only discovery evidence
 
