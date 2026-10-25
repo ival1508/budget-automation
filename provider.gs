@@ -98,3 +98,33 @@ const GEMINI_RESPONSE_SCHEMA = Object.freeze({
   description: 'Array of extracted financial transaction objects.',
   items: PARSED_TRANSACTION_ITEMS_SCHEMA
 });
+
+/** Comment edits contain only patches. Unmentioned transactions never pass through the model. */
+const PROPOSAL_EDIT_RESPONSE_SCHEMA = Object.freeze({
+  type: 'OBJECT',
+  properties: {
+    clarification: { type: 'STRING', description: 'A concise question if the comment is ambiguous, otherwise empty.' },
+    operations: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          item: { type: 'INTEGER', description: 'Original one-based item number in the proposal.' },
+          action: { type: 'STRING', enum: ['update', 'remove'] },
+          changes: {
+            type: 'OBJECT',
+            description: 'Only explicitly changed fields. Empty for remove. No derived or internal fields.',
+            properties: {
+              where: { type: 'STRING' }, category: { type: 'STRING' },
+              account: { type: 'STRING' }, type: { type: 'STRING' },
+              amount: { type: 'NUMBER' }, currency: { type: 'STRING' },
+              date: { type: 'STRING' }, amount_sgd: { type: 'NUMBER' }, notes: { type: 'STRING' }
+            }
+          }
+        },
+        required: ['item', 'action', 'changes']
+      }
+    }
+  },
+  required: ['clarification', 'operations']
+});

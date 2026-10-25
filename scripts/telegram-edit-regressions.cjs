@@ -13,8 +13,9 @@ function fixture() {
     Utilities: { getUuid: () => crypto.randomUUID(), computeDigest: (_,s) => Array.from(crypto.createHash('sha256').update(s).digest()), DigestAlgorithm: { SHA_256: 'sha256' }, Charset: { UTF_8: 'utf8' } },
     HtmlService: { createHtmlOutput: s => s }
   };
+  c.LockService = { getUserLock: () => ({ waitLock() {}, releaseLock() {} }) };
   vm.createContext(c);
-  for (const file of ['constants.gs', 'enricher.gs', 'state.gs', 'callbacks.gs', 'webhook.gs']) {
+  for (const file of ['constants.gs', 'enricher.gs', 'state.gs', 'proposalEdits.gs', 'callbacks.gs', 'webhook.gs']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'), c, { filename: file });
   }
   c.getWebhookAccessPolicy = () => ({ secret: 'test', chatIds: new Set(['123']) });
@@ -76,4 +77,21 @@ for (const mode of ['shifted', 'expired', 'processed', 'failure']) {
   assert.equal(f.learned.length, 0);
   assert.match(f.messages.at(-1), /changed or expired|Could not complete/);
   console.log(`PASS rename ${mode} never edits another row or falls through to AI`);
+}
+
+{
+  const f = fixture();
+  f.callback('pick_merch:session:1');
+  f.rename();
+  const rows = f.pending();
+  f.c.updateMerchantLearningStore(rows, 123);
+  assert.match(f.messages.at(-1), /Rules recorded/);
+  assert.match(f.messages.at(-1), /FairPrice → Unity/);
+  const source = { ...f.rows[1] };
+  assert.equal(f.c.enrichTransaction(source).where, 'Unity');
+  assert.equal(f.c.enrichTransaction({ ...f.rows[0] }).where, 'FairPrice');
+  assert.equal(f.c.enrichTransaction({ ...source, account: 'Cash' }).where, 'FairPrice');
+  assert.equal(f.c.enrichTransaction({ ...source, currency: 'USD' }).where, 'FairPrice');
+  assert.ok([...f.props.keys()].some(k => k.startsWith('TELEGRAM_RULE_')));
+  console.log('PASS approved corrections persist, apply only to exact scope, and send recap');
 }

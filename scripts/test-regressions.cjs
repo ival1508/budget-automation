@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '..');
 const sourceFiles = ['constants.gs', 'config.gs', 'bootstrap.gs', 'calendar.gs', 'mandatory.gs', 'mandatoryCalendar.gs', 'monthlyInsights.gs', 'reader.gs', 'enricher.gs',
-  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'testStage3G.gs', 'coach.gs', 'nudge.gs', 'webhook.gs', 'callbacks.gs', 'monthCreation.gs'];
+  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'testStage3G.gs', 'coach.gs', 'nudge.gs', 'state.gs', 'proposalEdits.gs', 'webhook.gs', 'callbacks.gs', 'monthCreation.gs'];
 function parseCsv(text) {
   const rows = []; let row = [], value = '', quoted = false;
   for (let i = 0; i < text.length; i++) {
@@ -357,6 +357,7 @@ for (const action of ['approve:token', 'force_all:token', 'skip_dups:token', 're
     c.findNextUnresolvedDuplicate = () => -1;
     let cleared = false;
     c.clearPendingTransactions = () => { assert.equal(ledger.data.length, 3); cleared = true; };
+    c.finishTelegramProposalComment = () => {};
     c.answerCallbackQuery = c.editTelegramMessage = c.sendDiscardedMessage = () => { assert.equal(ledger.data.length, 3); };
     c.formatTransactionConfirmationHtml = () => 'Saved';
     const original = c.appendTransactions;
@@ -873,6 +874,7 @@ test('Telegram proposal rejection is surfaced while an unchanged overlap is harm
   description = 'Bad Request: message is not modified';
   assert.doesNotThrow(() => c.sendConfirmationMessage(42, 'token', [], true));
 });
+require('./proposal-comment-regressions.cjs')(test);
 require('./monthly-coach-regressions.cjs')(test);
 require('./stage5-regressions.cjs')(test);
 require('./monthly-review-regressions.cjs')(test);

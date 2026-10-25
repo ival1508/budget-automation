@@ -7,6 +7,17 @@
 
 const CACHE_EXPIRATION_SECONDS = 21600; // 6 hours (§5.3)
 
+/** Shared by proposal callbacks, renames, screenshot merges and comment commits. */
+function withTelegramProposalLock(operation) {
+  const lock = LockService.getUserLock();
+  lock.waitLock(30000);
+  try {
+    return operation();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /**
  * Saves pending proposed transactions into CacheService keyed by a short session token.
  * 

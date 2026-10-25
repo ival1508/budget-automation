@@ -98,7 +98,7 @@ function doPost(e) {
     // 3. Handle Callback Query (Button taps - Step 3)
     if (update.callback_query) {
       if (typeof handleCallbackQuery === 'function') {
-        handleCallbackQuery(update.callback_query);
+        withTelegramProposalLock(() => handleCallbackQuery(update.callback_query));
       }
       return HtmlService.createHtmlOutput('OK');
     }
@@ -112,6 +112,11 @@ function doPost(e) {
       // Handle Telegram Slash Commands (e.g. /mandatory)
       if (message.text) {
         const textTrimmed = message.text.trim();
+        // Explicit edit commands take precedence over a pending merchant rename.
+        if (/^\/(?:edit|cancel)(?:@\w+)?(?:\s|$)/i.test(textTrimmed) &&
+            handleTelegramProposalComment(message)) {
+          return HtmlService.createHtmlOutput('OK');
+        }
         if (textTrimmed === '/mandatory' || textTrimmed.indexOf('/mandatory@') === 0) {
           if (typeof sendWeeklyMandatoryAudit === 'function') {
             sendWeeklyMandatoryAudit(chatId);
@@ -124,7 +129,9 @@ function doPost(e) {
         const awaitingMerchantData = cache.get('awaiting_merchant:' + chatId);
         if (awaitingMerchantData) {
           cache.remove('awaiting_merchant:' + chatId);
+          const renameLock = LockService.getUserLock();
           try {
+            renameLock.waitLock(30000);
             const state = JSON.parse(awaitingMerchantData);
             const token = state.token;
             const index = state.index;
@@ -136,6 +143,7 @@ function doPost(e) {
               const txn = transactions[index];
               const newName = textTrimmed;
               
+              captureTelegramRuleBaseline(txn);
               txn.where = newName;
               txn.manual_merchant_category = true;
               
@@ -160,11 +168,17 @@ function doPost(e) {
           } catch (e) {
             Logger.log('Error processing merchant rename: ' + e.message);
             sendTelegramMessage('Could not complete the rename. Please reopen the proposal and try again.', chatId);
+          } finally {
+            try { renameLock.releaseLock(); } catch (e) {}
           }
           // Never reinterpret a rename reply as a new transaction or an AI batch edit.
           return HtmlService.createHtmlOutput('OK');
         }
         // --- END INTERCEPT ---
+
+        if (handleTelegramProposalComment(message)) {
+          return HtmlService.createHtmlOutput('OK');
+        }
 
         inputs.push({ text: message.text });
       } else if (message.caption) {
@@ -267,6 +281,23 @@ function doPost(e) {
           const finalTransactionsToConfirm = independentPhoto
             ? mergeScreenshotProposals(previousProposal || [], enrichedTransactions)
             : enrichedTransactions;
+
+          // Only carry corrections across an unambiguous source transaction match.
+          if (!independentPhoto && message.text && Array.isArray(previousProposal)) {
+            finalTransactionsToConfirm.forEach(txn => {
+              const matches = previousProposal.filter(old =>
+                (old.raw_where || old.where) === (txn.raw_where || txn.where) &&
+                old.date === txn.date && Number(old.amount) === Number(txn.amount) &&
+                (old.currency || 'SGD') === (txn.currency || 'SGD'));
+              if (matches.length !== 1) return;
+              const old = matches[0];
+              const changed = ['where', 'category', 'account', 'type'].some(field => old[field] !== txn[field]);
+              if (!changed && !old.telegram_rule_baseline) return;
+              captureTelegramRuleBaseline(old);
+              txn.telegram_rule_baseline = old.telegram_rule_baseline;
+              txn.manual_merchant_category = true;
+            });
+          }
 
           if (finalTransactionsToConfirm.length === 0) {
             sendTelegramMessage("ℹ️ No financial transactions detected in your input. Try sending a receipt photo, voice note, or text spend (e.g., 'lunch 12.50').", chatId);

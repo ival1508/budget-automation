@@ -106,6 +106,42 @@ refused. Formula construction is offline-tested; actual formula recalculation
 remains a sandbox acceptance step. No automatic creator is enabled.
 See [Stage 6 plan and checkpoint](docs/stage-6-month-creation.md).
 
+## Editing a Telegram proposal with a comment
+
+On a pending proposal, tap **💬 Comment**, then describe the changes in one message.
+For example: “Change Cold Storage to Дом” or “Rename item 2 to Unity, classify it
+as medicine, and change the amount to 46.86.” You can also send `/edit <your changes>` for the latest
+proposal, send `/edit` and then your comment, or reply directly to the latest
+proposal message. Merchant names can be shortened or loosely spelled when the
+intended purchase is clear. If several purchases match, give an amount or date;
+item numbers remain optional.
+
+The bot updates the proposal and sends a before/after recap. It asks for
+clarification if it cannot identify the target. It retains recent edits and
+questions for that proposal, so “just kidding, make it back Продукты” refers to
+the last edited purchase, and “Cold Storage” can answer a clarification without
+repeating the requested change. After an edit, comment mode remains active for
+five minutes of inactivity; `/cancel` leaves the proposal intact and exits it.
+Conversation history is bounded, scoped to the chat and proposal revision, and
+cleared on approval, discard or cancellation. A proposal
+changed or approved while the comment is being interpreted cannot be overwritten
+by the delayed response. Untouched rows and the original receipt evidence are
+preserved. Removing every item closes the proposal without logging anything.
+
+Comments can adjust merchant, category, account, type, amount, currency, date,
+SGD equivalent and notes, or remove items. Controlled vocabularies, fixed expense
+guardrails, bucket assignment and duplicate checks still apply. Comments cannot
+add transactions or approve them. Review the updated proposal and tap **Approve
+All** to write to the ledger. Only approved merchant/category/account/type
+corrections become exact-source/account/currency rules with a separate recorded
+rules recap; amounts, dates and notes remain specific to the proposal.
+
+The dedicated model editor returns numbered patches, never a replacement batch.
+Invalid patches are rejected together. Offline coverage in
+`scripts/proposal-comment-regressions.cjs` runs as part of the regression command
+below; model output, Telegram delivery and sheet writes are mocked. Live natural
+language interpretation still requires a deployed webhook and `GEMINI_API_KEY`.
+
 ## Offline regression checks
 
 Run `node scripts/test-regressions.cjs` (Node.js 18 or later). It needs no credentials

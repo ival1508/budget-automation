@@ -30,6 +30,7 @@ function handleCallbackQuery(callbackQuery) {
   // 1. ACTION: DISCARD
   if (action === 'discard') {
     clearPendingTransactions(token);
+    finishTelegramProposalComment(chatId, token);
     sendDiscardedMessage(chatId, messageId, '🗑️ Discarded by user.');
     answerCallbackQuery(queryId, 'Discarded');
     return;
@@ -64,6 +65,12 @@ function handleCallbackQuery(callbackQuery) {
     return;
   }
 
+  if (action === 'comment') {
+    startTelegramProposalComment(chatId, messageId, token, transactions);
+    answerCallbackQuery(queryId, 'Type your changes');
+    return;
+  }
+
   // 3. ACTION: APPROVE ALL
   if (action === 'approve') {
     // Re-evaluate duplicates against sheet on latest transaction state
@@ -86,9 +93,10 @@ function handleCallbackQuery(callbackQuery) {
     const result = appendTransactions(transactions, undefined, false);
 
     try {
-      updateMerchantLearningStore(transactions);
+      updateMerchantLearningStore(transactions, chatId, result);
     } catch (e) {
       Logger.log(`Warning: Failed to update merchant learning store: ${e.message}`);
+      sendTelegramMessage("⚠️ Transactions saved, but rule recording or recap failed. Please review before relying on the new rules.", chatId);
     }
 
     answerCallbackQuery(queryId, `Saved ${result.writtenCount} row(s) to Sheet! ✅`);
@@ -99,6 +107,7 @@ function handleCallbackQuery(callbackQuery) {
 
     editTelegramMessage(chatId, messageId, finalMessage, null);
     clearPendingTransactions(token);
+    finishTelegramProposalComment(chatId, token);
     return;
   }
 
@@ -141,6 +150,7 @@ function handleCallbackQuery(callbackQuery) {
       // If that was the last item, treat it as a full discard
       if (transactions.length === 0) {
         clearPendingTransactions(token);
+        finishTelegramProposalComment(chatId, token);
         sendDiscardedMessage(chatId, messageId, '🗑️ All items removed. Discarded.');
         answerCallbackQuery(queryId, 'All items removed');
         return;
@@ -159,8 +169,9 @@ function handleCallbackQuery(callbackQuery) {
     answerCallbackQuery(queryId);
     if (!isNaN(itemIndex) && transactions[itemIndex]) {
       const cache = CacheService.getScriptCache();
+      cache.remove('awaiting_proposal_comment:' + chatId);
       cache.put('awaiting_merchant:' + chatId, JSON.stringify({ token: token, index: itemIndex, messageId: messageId, transactionSnapshot: JSON.stringify(transactions[itemIndex]) }), 300); // 5 mins
-      sendTelegramMessage(`Please type the new Merchant display name for item ${itemIndex + 1} (${transactions[itemIndex].currency || 'SGD'} ${Number(transactions[itemIndex].amount).toFixed(2)}). This changes only this transaction:`, chatId);
+      sendTelegramMessage(`Please type the new Merchant display name for item ${itemIndex + 1} (${transactions[itemIndex].currency || 'SGD'} ${Number(transactions[itemIndex].amount).toFixed(2)}). This will be remembered for matching transactions after approval:`, chatId);
     }
     return;
   }
@@ -181,6 +192,7 @@ function handleCallbackQuery(callbackQuery) {
     const selectedCategory = categories[catIndex];
 
     if (!isNaN(itemIndex) && transactions[itemIndex] && selectedCategory) {
+      captureTelegramRuleBaseline(transactions[itemIndex]);
       transactions[itemIndex].category = selectedCategory;
       
       // A one-off correction must not create a rule for every matching merchant.
@@ -215,6 +227,7 @@ function handleCallbackQuery(callbackQuery) {
     const newAccount = decodeURIComponent(rawEncodedAcc || '');
 
     if (!isNaN(itemIndex) && transactions[itemIndex] && newAccount) {
+      captureTelegramRuleBaseline(transactions[itemIndex]);
       transactions[itemIndex].account = newAccount;
       // Re-enrich transaction to update dedupe key
       transactions[itemIndex] = enrichTransaction(transactions[itemIndex]);
@@ -246,6 +259,7 @@ function handleCallbackQuery(callbackQuery) {
     const selectedType = types[typeIndex];
 
     if (!isNaN(itemIndex) && transactions[itemIndex] && selectedType) {
+      captureTelegramRuleBaseline(transactions[itemIndex]);
       transactions[itemIndex].type = selectedType;
       // Re-enrich transaction to apply fixed expense guardrails and update dedupe key
       transactions[itemIndex] = enrichTransaction(transactions[itemIndex]);
@@ -320,17 +334,19 @@ function handleCallbackQuery(callbackQuery) {
           transactions[j].flags.push('force_add');
         }
       }
-      appendTransactions(transactions, undefined, false);
+      const writeResult = appendTransactions(transactions, undefined, false);
       
       // Update learning store for all items
       try {
-        updateMerchantLearningStore(transactions);
+        updateMerchantLearningStore(transactions, chatId, writeResult);
       } catch (e) {
         Logger.log(`Warning: Failed to update merchant learning store: ${e.message}`);
+      sendTelegramMessage("⚠️ Transactions saved, but rule recording or recap failed. Please review before relying on the new rules.", chatId);
       }
       
       sendDiscardedMessage(chatId, messageId, '✅ <b>Logged to Sheet!</b> (Includes forced duplicates)');
       clearPendingTransactions(token);
+      finishTelegramProposalComment(chatId, token);
     }
     answerCallbackQuery(queryId, 'Forced all items');
     return;
@@ -352,17 +368,19 @@ function handleCallbackQuery(callbackQuery) {
       }
       
       if (cleanToLog.length > 0) {
-        appendTransactions(cleanToLog, undefined, false);
+        const writeResult = appendTransactions(cleanToLog, undefined, false);
         try {
-          updateMerchantLearningStore(cleanToLog);
+          updateMerchantLearningStore(cleanToLog, chatId, writeResult);
         } catch (e) {
           Logger.log(`Warning: Failed to update merchant learning store: ${e.message}`);
+      sendTelegramMessage("⚠️ Transactions saved, but rule recording or recap failed. Please review before relying on the new rules.", chatId);
         }
         sendDiscardedMessage(chatId, messageId, `✅ <b>Logged clean items!</b> (${skippedCount} duplicate(s) skipped)`);
       } else {
         sendDiscardedMessage(chatId, messageId, '🗑️ All items were duplicates and skipped. Nothing logged.');
       }
       clearPendingTransactions(token);
+      finishTelegramProposalComment(chatId, token);
     }
     answerCallbackQuery(queryId, 'Skipped duplicates');
     return;
@@ -421,13 +439,14 @@ function handleCallbackQuery(callbackQuery) {
     }
     
     if (cleanToLog.length > 0) {
-      appendTransactions(cleanToLog, undefined, false);
+      const writeResult = appendTransactions(cleanToLog, undefined, false);
       
       // Update learning store for approved items
       try {
-        updateMerchantLearningStore(cleanToLog);
+        updateMerchantLearningStore(cleanToLog, chatId, writeResult);
       } catch (e) {
         Logger.log(`Warning: Failed to update merchant learning store: ${e.message}`);
+      sendTelegramMessage("⚠️ Transactions saved, but rule recording or recap failed. Please review before relying on the new rules.", chatId);
       }
       
       const msg = `✅ <b>Logged to Sheet!</b> (${cleanToLog.length} added${skippedCount > 0 ? `, ${skippedCount} duplicate skipped` : ''})`;
@@ -437,6 +456,7 @@ function handleCallbackQuery(callbackQuery) {
     }
     
     clearPendingTransactions(token);
+    finishTelegramProposalComment(chatId, token);
     answerCallbackQuery(queryId, 'All resolved and logged!');
     return;
   }
@@ -460,7 +480,11 @@ function updateCachedTransactions(token, transactions) {
  * 
  * @param {Array<Object>} transactions - Array of confirmed enriched transaction objects.
  */
-function updateMerchantLearningStore(transactions) {
+function updateMerchantLearningStore(transactions, chatId, writeResult) {
+  const approved = writeResult && Array.isArray(writeResult.rowOutcomes)
+    ? transactions.filter((txn, index) => writeResult.rowOutcomes.some(outcome => outcome.inputIndex === index && outcome.status === 'imported'))
+    : transactions;
+  recordApprovedTelegramRules(approved, chatId);
   if (!Array.isArray(transactions) || transactions.length === 0) return;
 
   for (let i = 0; i < transactions.length; i++) {
@@ -497,4 +521,40 @@ function findNextUnresolvedDuplicate(transactions) {
     }
   }
   return -1; // No unresolved duplicates remaining!
+}
+
+/** Preserve the source and pre-edit values in pending state; discarded edits teach nothing. */
+function captureTelegramRuleBaseline(txn) {
+  if (txn.telegram_rule_baseline) return;
+  txn.telegram_rule_baseline = {
+    source: txn.raw_where || txn.where || '', account: txn.account || DEFAULT_ACCOUNT,
+    currency: txn.currency || 'SGD', where: txn.where || '',
+    category: txn.category || '', type: txn.type || ''
+  };
+}
+
+/** Persist explicit corrections only. Each property contains both the scope and audit values. */
+function recordApprovedTelegramRules(transactions, chatId) {
+  const recaps = [];
+  for (const txn of (transactions || [])) {
+    const before = txn.telegram_rule_baseline;
+    if (!before || !before.source || (txn.flags || []).includes('skipped')) continue;
+    const changes = {};
+    for (const field of ['where', 'category', 'account', 'type']) {
+      if (String(txn[field] || '') !== String(before[field] || '')) changes[field] = txn[field];
+    }
+    if (!Object.keys(changes).length) continue;
+    const key = telegramCorrectionRuleKey(before.source, before.account, before.currency);
+    const props = PropertiesService.getScriptProperties();
+    const previous = JSON.parse(props.getProperty(key) || 'null');
+    const rule = { source: before.source, account: before.account, currency: before.currency,
+      changes: Object.assign({}, previous ? previous.changes : {}, changes),
+      before: before, recordedAt: new Date().toISOString(), origin: 'telegram' };
+    props.setProperty(key, JSON.stringify(rule));
+    recaps.push(before.source + ' [' + before.account + ', ' + before.currency + ']: ' +
+      Object.keys(changes).map(field => field + ': ' + before[field] + ' → ' + changes[field]).join('; '));
+  }
+  if (chatId && recaps.length) {
+    sendTelegramMessage('📝 Rules recorded for future exact merchant/account/currency matches:\n' + recaps.map(line => line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')).join('\n'), chatId);
+  }
 }

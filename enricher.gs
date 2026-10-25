@@ -358,6 +358,8 @@ function enrichTransaction(parsedRow, categoryBucketMap) {
     throw new Error('enrichTransaction requires a valid transaction object.');
   }
 
+  parsedRow = applyTelegramCorrectionRule(parsedRow);
+
   // 1. Merchant Aliases & Learned Naming / Category Recovery
   let where = parsedRow.where || '';
   parsedRow.raw_where = parsedRow.raw_where || where;
@@ -647,3 +649,20 @@ function test_enrichBucketFromSheet() {
   return enriched;
 }
 
+/** Exact source matching deliberately preserves receipt suffixes and reference numbers. */
+function telegramCorrectionRuleKey(source, account, currency) {
+  const scope = JSON.stringify([String(source).trim().toLowerCase(), account || DEFAULT_ACCOUNT, currency || 'SGD']);
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, scope, Utilities.Charset.UTF_8);
+  return 'TELEGRAM_RULE_' + digest.map(b => ('0' + ((b + 256) % 256).toString(16)).slice(-2)).join('');
+}
+
+function applyTelegramCorrectionRule(row) {
+  if (row.telegram_rule_baseline || row.manual_merchant_category) return row;
+  const source = row.raw_where || row.where || '';
+  if (!source) return row;
+  const stored = PropertiesService.getScriptProperties().getProperty(
+    telegramCorrectionRuleKey(source, row.account, row.currency));
+  if (!stored) return row;
+  const rule = JSON.parse(stored);
+  return Object.assign({}, row, rule.changes, { raw_where: source, manual_merchant_category: true });
+}

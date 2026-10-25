@@ -21,22 +21,27 @@ function formatTransactionConfirmationHtml(transactions) {
 
   for (let i = 0; i < transactions.length; i++) {
     const txn = transactions[i];
-    const dateStr = txn.date || 'Today';
-    const accountStr = txn.account || 'DBS CC SGD';
-    const merchant = txn.where || 'Unknown';
-    const amountStr = txn.currency === 'SGD'
+    const dateStr = escapeProposalCommentHtml(txn.date || 'Today');
+    const accountStr = escapeProposalCommentHtml(txn.account || 'DBS CC SGD');
+    const merchant = escapeProposalCommentHtml(txn.where || 'Unknown');
+    const currencyStr = escapeProposalCommentHtml(txn.currency || 'SGD');
+    const amountStr = (txn.currency || 'SGD') === 'SGD'
       ? `S$${Number(txn.amount).toFixed(2)}`
-      : `${Number(txn.amount).toFixed(2)} ${txn.currency}`;
-    const categoryStr = txn.category || 'Другое';
-    const bucketStr = txn.bucket || 'Wants';
+      : `${Number(txn.amount).toFixed(2)} ${currencyStr}`;
+    const categoryStr = escapeProposalCommentHtml(txn.category || 'Другое');
+    const bucketStr = escapeProposalCommentHtml(txn.bucket || 'Wants');
 
-    const typeStr = txn.type || TRANSACTION_TYPES.EXPENSE;
+    const typeStr = escapeProposalCommentHtml(txn.type || TRANSACTION_TYPES.EXPENSE);
 
     lines.push(`<b>Item ${i + 1}:</b>`);
     const itemText = `📅 <b>${dateStr}</b> | 💳 <i>${accountStr}</i> | ⚖️ <b>${typeStr}</b>\n` +
-      `💸 <b>${merchant}</b> — S$${Number(txn.amount).toFixed(2)}${txn.currency !== 'SGD' ? ` (${txn.currency})` : ''}\n` +
+      `💸 <b>${merchant}</b> — ${amountStr}\n` +
       `🏷️ Category: <b>${categoryStr}</b> (<i>${bucketStr}</i>)`;
     lines.push(itemText);
+    if (txn.currency && txn.currency !== 'SGD' && Number(txn.amount_sgd) > 0) {
+      lines.push('💱 SGD equivalent: S$' + Number(txn.amount_sgd).toFixed(2));
+    }
+    if (txn.notes) lines.push('🗒️ ' + escapeProposalCommentHtml(txn.notes));
 
     // Append diagnostic review reasons if flagged
     const reviewWarnings = formatReviewReasons(txn);
@@ -124,7 +129,8 @@ function getMainProposalKeyboard(token) {
         { text: '✅ Approve All', callback_data: `approve:${token}` },
         { text: '✏️ Edit', callback_data: `edit_menu:${token}` },
         { text: '🗑️ Discard', callback_data: `discard:${token}` }
-      ]
+      ],
+      [{ text: '💬 Comment', callback_data: `comment:${token}` }]
     ]
   };
 }
@@ -391,7 +397,7 @@ function refreshProposalCard(chatId, messageId, token, transactions) {
   }
   const newText = formatTransactionConfirmationHtml(transactions);
   const mainKeyboard = getMainProposalKeyboard(token);
-  editTelegramMessage(chatId, messageId, newText, mainKeyboard);
+  return editTelegramMessage(chatId, messageId, newText, mainKeyboard);
 }
 
 /**
@@ -429,7 +435,12 @@ function editTelegramMessage(chatId, messageId, text, replyMarkup) {
   };
 
   const response = UrlFetchApp.fetch(url, options);
-  return JSON.parse(response.getContentText());
+  const result = JSON.parse(response.getContentText());
+  const unchanged = result.error_code === 400 && /message is not modified/i.test(String(result.description || ''));
+  if (!result.ok && !unchanged) {
+    throw new Error('Telegram proposal update failed: ' + (result.description || response.getResponseCode()));
+  }
+  return result;
 }
 
 /**

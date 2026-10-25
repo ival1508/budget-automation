@@ -7,6 +7,7 @@
 
 const GEMINI_MODEL_ID = 'gemini-3.5-flash-lite'; // default primary - fastest tier
 const COACH_MODEL_ID  = 'gemini-3.8-flash';      // coach reasoning model
+const PROPOSAL_EDIT_FALLBACK_MODEL_ID = 'gemini-3.8-flash'; // free-text edit fallback
 const BACKUP_MODEL_1  = 'gemini-3.6-flash';      // primary fallback
 const BACKUP_MODEL_2  = 'gemini-3.7-flash';      // secondary fallback
 
@@ -190,6 +191,41 @@ function extractTransactions(inputs, context) {
   Logger.log(`[Proposal timing] enrichment_and_duplicate_check: ${Date.now() - enrichmentStarted}ms; extraction_total=${Date.now() - extractionStarted}ms; rows=${enrichedTransactions.length}`);
 
   return enrichedTransactions;
+}
+
+/** Interpret a comment as a structured edit plan; no ledger writes or enrichment here. */
+function generateProposalEditPlan(comment, transactions, context) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!apiKey) throw new Error('GEMINI_API_KEY is missing.');
+  const items = transactions.map((txn, index) => {
+    const item = { item: index + 1 };
+    ['where', 'category', 'account', 'type', 'amount', 'currency', 'date', 'amount_sgd', 'notes', 'raw_snippet']
+      .forEach(field => { if (txn[field] !== undefined) item[field] = txn[field]; });
+    item.merchant_references = Array.from(new Set([txn.where, txn.raw_where,
+      txn.telegram_rule_baseline && txn.telegram_rule_baseline.where].filter(Boolean)));
+    return item;
+  });
+  const payload = {
+    systemInstruction: { parts: [{ text: getProposalEditPrompt() }] },
+    contents: [{ parts: [{ text: JSON.stringify({
+      today: Utilities.formatDate(new Date(), 'Asia/Singapore', 'dd.MM.yyyy'),
+      proposal: items, comment: comment,
+      recent_conversation: (context && context.turns) || [],
+      last_edited_items: (context && context.lastEditedItems) || []
+    }) }] }],
+    generationConfig: { responseMimeType: 'application/json', responseSchema: PROPOSAL_EDIT_RESPONSE_SCHEMA, temperature: 0.1 }
+  };
+  const result = callGeminiApiWithRetry(payload, apiKey, GEMINI_MODEL_ID, [PROPOSAL_EDIT_FALLBACK_MODEL_ID]);
+  try {
+    const response = JSON.parse(typeof result === 'object' ? result.text : result);
+    const candidate = response.candidates && response.candidates[0];
+    if (!candidate || !candidate.content || !Array.isArray(candidate.content.parts)) throw new Error('Missing content');
+    const output = candidate.content.parts.filter(part => !part.thought && typeof part.text === 'string')
+      .map(part => part.text).join('');
+    return JSON.parse(output);
+  } catch (err) {
+    throw new Error('Could not interpret the comment. Please name the merchant and describe the change; an amount or date can distinguish similar purchases.');
+  }
 }
 
 /**
