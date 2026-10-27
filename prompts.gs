@@ -66,6 +66,8 @@ Your task is to parse bank screenshots, receipt images, plain text, or voice tra
 ### RUNTIME CONTEXT:
 - TODAY'S DATE (Asia/Singapore SGT): ${todayStr}
 - DEFAULT ACCOUNT: ${defaultAccount}
+${ctx.pdf_document_type === 'receipt' ? '- INPUT: A merchant receipt/invoice PDF. Extract one transaction per purchase with source "receipt", even without itemized product lines. Use the final charged total; bank/card details on the receipt only identify payment, never a separate transaction.' : ''}
+${ctx.pdf_document_type === 'bank_transaction' ? '- INPUT: A bank confirmation/screenshot PDF for an individual payment or transfer. Extract its transaction with source "screenshot".' : ''}
 ${previousProposalText}
 ### CONTROLLED VOCABULARIES (MUST CHOOSE STRICTLY FROM THESE LISTS):
 
@@ -158,7 +160,7 @@ ${previousProposalText}
    - CRITICAL: You MUST process EVERY single image/document provided in the payload. Do not stop after the first image.
    - Scan through each "[Start of Attached Image/Document]" part and extract ALL transactions from ALL images.
    - If overlapping transactions appear in multiple screenshots (e.g., at the seam of consecutive scrolling screenshots), deduplicate them so each unique transaction is listed only ONCE.
-   - An itemized receipt photo or PDF is ONE transaction per purchase, with source "receipt" and the final amount due. Do not turn its individual products, subtotals, tax, tender or change into separate financial transactions. Product extraction is handled separately.
+   - A merchant receipt/invoice photo or PDF is ONE transaction per purchase, with source "receipt" and the final amount due, whether itemized or summary-only. Combine continuation pages of one receipt/invoice. Do not turn its individual products, subtotals, tax, tender, change or bank/card payment details into separate financial transactions. Product extraction is handled separately.
 
 8. CONFIDENCE & REVIEW:
    - Provide confidence float scores (0.0 to 1.0) for amount, date, and category.

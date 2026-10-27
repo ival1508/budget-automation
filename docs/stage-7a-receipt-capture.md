@@ -25,6 +25,15 @@ All **34 application files** match the local source, Apps Script editor and
 immutable version 94. The existing URL and two-entry deployment inventory are
 unchanged. No trigger changes were required.
 
+**PDF routing follow-up, 28 October:** version **96** fixes receipt PDFs being
+sent to statement reconciliation. Routing now uses document evidence independently
+of item capture, as described below. All **324 offline regression tests** and the
+seven separate Telegram edit checks pass. New synthetic fixtures cover a Shell-style
+summary receipt, other merchants, optional item failures and mislabels, generic
+PDF MIME types, real-statement evidence, individual bank confirmations, and pending
+proposal preservation. These mocked cases verify routing and persistence rather
+than OCR accuracy on an actual Shell PDF. The existing web-app URL is preserved.
+
 ## Everyday use
 
 Send an itemized receipt as a Telegram photo, image document or PDF. Review and
@@ -39,10 +48,25 @@ generate recommendations. No new trigger or scheduled report is added.
 
 Typed text, voice, bank screenshots and bank statements produce no product
 history. A separate visual pass runs for transactions classified as receipts.
-PDFs are classified before routing: actual receipts go to transaction approval;
-bank documents and CSVs retain the statement-inbox path. An unreadable or unrelated
-PDF does not silently enter the bank importer; resend a clearer copy. This adds
-one model request before a PDF bank statement is queued.
+PDFs are classified by a separate document schema before routing. Merchant receipts,
+invoices and card slips go to transaction approval, including summary-only receipts
+without product lines. Individual bank payment/transfer confirmations also use
+approval. Only a bank-issued statement with printed bank, customer account,
+statement period/date and account transaction history can enter the statement
+inbox. Card numbers, GST, authorization codes and payment instructions on receipts
+do not make them statements. The classifier requires at least 0.9 confidence for
+the statement route; unsupported labels and unreadable or unrelated PDFs are
+reported without enqueueing or changing the pending proposal. CSVs retain their
+existing inbox path. A `.pdf` filename takes precedence over generic text/Excel
+MIME types supplied by Telegram.
+
+The classification request does not read the product catalog or require item
+extraction. For receipt PDFs, transaction extraction then runs with receipt context,
+followed by the optional product pass. An item extraction failure or bank label
+from that optional pass cannot redirect or block the financial proposal. The
+transaction still needs ordinary user approval before writing. New PDFs extract
+outside the proposal lock and merge with the latest pending rows, preserving
+prior reviews and overlapping occurrences. Captions apply to the new document.
 
 ## Extraction and parent linkage
 

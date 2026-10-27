@@ -25,6 +25,13 @@ function provider(c) {
 function modelReply(value) {
   return { text: JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(value) }] } }] }) };
 }
+const pdfClassification = overrides => ({ document_type: 'receipt', is_merchant_purchase: true,
+  bank_name: '', account_reference: '', statement_period: '', has_transaction_history: false,
+  confidence: 0.98, ...overrides });
+const bankClassification = overrides => pdfClassification({ document_type: 'bank_statement',
+  is_merchant_purchase: false, bank_name: 'DBS', account_reference: 'card ending 1234',
+  statement_period: '1–31 October 2026', has_transaction_history: true, ...overrides });
+const pdfMedia = () => ({ inlineData: { mimeType: 'application/pdf', data: 'synthetic-pdf' } });
 function cacheFixture(c) {
   const values = new Map();
   c.CacheService = { getScriptCache: () => ({ get: key => values.get(key) ?? null,
@@ -61,7 +68,159 @@ function telegramFixture(c) {
   return { post, callback, messages, cards, documents, userProps };
 }
 
+function pdfFixture(c, storage, options = {}) {
+  const sheet = storage(c);
+  provider(c);
+  const chat = telegramFixture(c);
+  const calls = [];
+  c.callGeminiApiWithRetry = payload => {
+    const schema = payload.generationConfig.responseSchema;
+    if (schema.type === 'ARRAY') {
+      calls.push('transaction');
+      return modelReply(options.transactions || [txn(c, { source: 'screenshot' })]);
+    }
+    if (schema.properties.receipts) {
+      calls.push('items');
+      if (options.itemError) throw new Error('Optional item capture unavailable');
+      return modelReply(options.items || { document_type: 'other', receipts: [] });
+    }
+    calls.push('classification');
+    assert.equal(payload.contents[0].parts[0].inlineData.mimeType, 'application/pdf');
+    return modelReply(options.classification || pdfClassification());
+  };
+  const upload = extra => chat.post({ document: { file_id: 'pdf', mime_type: 'application/pdf',
+    file_name: 'upload.pdf' }, ...extra });
+  return { ...sheet, ...chat, calls, upload };
+}
+
 module.exports = (test, storage) => {
+  test('PDF routing requires bank, customer account, period, history and confidence before classifying a statement', c => {
+    provider(c);
+    c.readReceiptProducts = () => { throw new Error('Routing must not depend on the product catalog'); };
+    c.callGeminiApiWithRetry = () => modelReply(bankClassification());
+    assert.equal(c.classifyPdfDocument(pdfMedia()), 'bank_statement');
+    c.callGeminiApiWithRetry = () => modelReply(bankClassification({ statement_period: 'Statement date: 31 October 2026' }));
+    assert.equal(c.classifyPdfDocument(pdfMedia()), 'bank_statement');
+    for (const response of [
+      { bank_name: '' }, { account_reference: '' }, { statement_period: '' },
+      { has_transaction_history: false }, { confidence: 0.89 }
+    ].map(bankClassification)) {
+      c.callGeminiApiWithRetry = () => modelReply(response);
+      assert.equal(c.classifyPdfDocument(pdfMedia()), 'other');
+    }
+  });
+  test('merchant purchase evidence overrides a mistaken bank-statement label even with printed bank/card details', c => {
+    provider(c);
+    c.callGeminiApiWithRetry = () => modelReply(bankClassification({ is_merchant_purchase: true }));
+    assert.equal(c.classifyPdfDocument(pdfMedia()), 'receipt');
+    c.callGeminiApiWithRetry = () => modelReply(pdfClassification({ is_merchant_purchase: false }));
+    assert.equal(c.classifyPdfDocument(pdfMedia()), 'receipt');
+  });
+  test('PDF classifier rejects malformed, truncated and non-PDF input before document routing', c => {
+    provider(c);
+    for (const response of [pdfClassification({ confidence: '0.99' }), pdfClassification({ confidence: 2 }),
+      pdfClassification({ account_reference: null }), pdfClassification({ is_merchant_purchase: 'yes' }),
+      pdfClassification({ document_type: 'itemized_receipt' })]) {
+      c.callGeminiApiWithRetry = () => modelReply(response);
+      assert.throws(() => c.classifyPdfDocument(pdfMedia()), /Could not identify this PDF/);
+    }
+    c.callGeminiApiWithRetry = () => ({ text: '{malformed' });
+    assert.throws(() => c.classifyPdfDocument(pdfMedia()), /Could not identify/);
+    c.callGeminiApiWithRetry = () => ({ text: JSON.stringify({ candidates: [{ finishReason: 'MAX_TOKENS' }] }) });
+    assert.throws(() => c.classifyPdfDocument(pdfMedia()), /Could not identify/);
+    assert.throws(() => c.classifyPdfDocument({ inlineData: { mimeType: 'image/png', data: 'mock' } }), /PDF is required/);
+  });
+  test('Shell-style summary PDF receipt proposes one transaction even when the product pass calls it a bank document', c => {
+    const f = pdfFixture(c, storage, {
+      classification: bankClassification({ is_merchant_purchase: true }),
+      transactions: [txn(c, { where: 'Shell', amount: 68.20, source: 'screenshot' })],
+      items: { document_type: 'bank_statement', receipts: [] }
+    });
+    f.upload({ document: { file_id: 'shell', mime_type: 'application/octet-stream', file_name: 'SHELL.PDF' } });
+    assert.deepEqual(f.calls, ['classification', 'transaction', 'items']);
+    assert.equal(f.documents.length, 0);
+    assert.equal(f.cards.length, 1);
+    assert.equal(f.cards[0].rows.length, 1);
+    assert.equal(f.cards[0].rows[0].where, 'Shell');
+    assert.equal(f.cards[0].rows[0].amount, 68.20);
+    assert.equal(f.cards[0].rows[0].source, 'receipt');
+    assert.equal(f.ledger.data.length, 2, 'Upload proposes without writing the ledger');
+    f.callback('approve:' + f.cards[0].token);
+    assert.equal(f.ledger.data.length, 3);
+    assert.equal(f.ledger.data[2][8], 'Shell');
+    assert.equal(f.ledger.data[2][3], 68.20);
+    assert.equal(f.ss.getSheetByName('LineItems'), null);
+  });
+  for (const merchant of ['Restaurant', 'Medical clinic', 'Online shop']) {
+    test(`summary-only ${merchant} PDF receipt stays approvable when optional item extraction fails`, c => {
+      const f = pdfFixture(c, storage, { itemError: true,
+        transactions: [txn(c, { where: merchant, source: 'screenshot' })] });
+      f.upload();
+      assert.equal(f.cards.length, 1); assert.equal(f.documents.length, 0);
+      assert.equal(f.cards[0].rows.length, 1);
+      assert.match(f.cards[0].rows[0].receipt_capture_warning, /not captured/);
+      f.callback('approve:' + f.cards[0].token);
+      assert.equal(f.ledger.data.length, 3);
+      assert.equal(f.ledger.data[2][8], merchant);
+    });
+  }
+  test('a genuine bank statement PDF queues directly without transaction or product extraction', c => {
+    const f = pdfFixture(c, storage, { classification: bankClassification() });
+    f.upload({ document: { file_id: 'bank', mime_type: 'application/pdf', file_name: 'Shell.pdf' } });
+    assert.deepEqual(f.calls, ['classification']);
+    assert.equal(f.cards.length, 0); assert.equal(f.documents.length, 1);
+    assert.equal(f.ledger.data.length, 2);
+    assert.match(f.messages.at(-1), /Statement queued/);
+  });
+  test('a PDF filename takes precedence over generic text/Excel MIME types and still proposes its receipt', c => {
+    const f = pdfFixture(c, storage);
+    for (const mime of ['', 'text/plain', 'application/vnd.ms-excel']) {
+      f.upload({ document: { file_id: 'pdf-' + mime, mime_type: mime, file_name: 'receipt.PDF' } });
+    }
+    assert.equal(f.cards.length, 3); assert.equal(f.documents.length, 0);
+    assert.equal(f.calls.filter(call => call === 'classification').length, 3);
+  });
+  test('an individual bank confirmation PDF uses transaction approval without product capture', c => {
+    const f = pdfFixture(c, storage, { classification: pdfClassification({
+      document_type: 'bank_transaction', is_merchant_purchase: false }) });
+    f.upload();
+    assert.deepEqual(f.calls, ['classification', 'transaction']);
+    assert.equal(f.documents.length, 0); assert.equal(f.cards.length, 1);
+    assert.equal(f.cards[0].rows[0].source, 'screenshot');
+  });
+  test('an unsubstantiated bank label does not queue a PDF or alter the pending proposal', c => {
+    const f = pdfFixture(c, storage, { classification: bankClassification({ statement_period: '' }) });
+    const previous = txn(c, { where: 'Reviewed purchase', manual_merchant_category: true });
+    c.savePendingTransactions([previous], 'reviewed');
+    f.userProps.set('latest_token_123', 'reviewed');
+    f.upload();
+    assert.deepEqual(f.calls, ['classification']);
+    assert.equal(f.cards.length, 0); assert.equal(f.documents.length, 0);
+    assert.deepEqual(plain(c.getPendingTransactions('reviewed')), plain([previous]));
+  });
+  test('new PDF proposals preserve prior reviewed items and overlapping PDF uploads add no duplicate', c => {
+    const f = pdfFixture(c, storage, { transactions: [txn(c, { where: 'Shell', amount: 68.20 })] });
+    const previous = txn(c, { where: 'Reviewed purchase', source: 'screenshot', manual_merchant_category: true });
+    c.savePendingTransactions([previous], 'reviewed');
+    f.userProps.set('latest_token_123', 'reviewed');
+    f.upload({ caption: 'Fuel purchase' });
+    let rows = c.getPendingTransactions('reviewed');
+    assert.equal(rows.length, 2);
+    assert.deepEqual(plain(rows[0]), plain(previous));
+    assert.equal(rows[1].where, 'Shell'); assert.equal(rows[1].source, 'receipt');
+    f.upload(); rows = c.getPendingTransactions('reviewed');
+    assert.equal(rows.length, 2); assert.equal(f.documents.length, 0);
+  });
+  test('a PDF receipt with products captures items only after its one financial transaction is approved', c => {
+    const f = pdfFixture(c, storage, { items: { document_type: 'itemized_receipt', receipts: [receipt()] } });
+    f.upload();
+    assert.equal(f.cards[0].rows.length, 1);
+    assert.equal(f.cards[0].rows[0].receipt_capture.line_items.length, 1);
+    assert.equal(f.ss.getSheetByName('LineItems'), null);
+    f.callback('approve:' + f.cards[0].token);
+    assert.equal(f.ledger.data.length, 3);
+    assert.equal(f.ss.getSheetByName('LineItems').data.length, 2);
+  });
   test('receipt capture normalizes units and product aliases without guessing brands or trusting AI prices', c => {
     const first = capture(c);
     assert.equal(first.line_items[0].unit, 'kg'); assert.equal(first.line_items[0].size, 0.5);
@@ -273,17 +432,18 @@ module.exports = (test, storage) => {
   });
   test('Telegram routes receipt PDFs and image documents to transaction approval and bank PDF/CSV documents to the existing reconciler', c => {
     storage(c); const chat = telegramFixture(c); let classifications = 0;
-    c.extractReceiptItems = () => { classifications++; return { document_type: 'itemized_receipt', receipts: [capture(c)] }; };
+    c.classifyPdfDocument = () => { classifications++; return 'receipt'; };
     c.extractTransactions = (_, context) => {
-      assert.equal(context.receipt_extraction.document_type, 'itemized_receipt');
-      return [txn(c, { receipt_capture: context.receipt_extraction.receipts[0] })];
+      assert.equal(context.pdf_document_type, 'receipt');
+      assert.equal(context.previous_proposal, undefined);
+      return [txn(c, { receipt_capture: capture(c) })];
     };
     chat.post({ document: { file_id: 'receipt-pdf', mime_type: 'application/pdf', file_name: 'receipt.pdf' } });
     assert.equal(chat.cards.length, 1); assert.equal(chat.documents.length, 0); assert.equal(classifications, 1);
-    c.extractReceiptItems = () => ({ document_type: 'bank_statement', receipts: [] });
+    c.classifyPdfDocument = () => 'bank_statement';
     chat.post({ document: { file_id: 'bank-pdf', mime_type: 'application/pdf', file_name: 'bank.pdf' } });
     assert.equal(chat.documents.length, 1);
-    c.extractReceiptItems = () => { throw new Error('CSV/image must not use the PDF classification path'); };
+    c.classifyPdfDocument = () => { throw new Error('CSV/image must not use the PDF classification path'); };
     chat.post({ document: { file_id: 'csv', mime_type: 'text/csv', file_name: 'bank.csv' } });
     assert.equal(chat.documents.length, 2);
     c.extractTransactions = () => [txn(c)];
@@ -292,10 +452,10 @@ module.exports = (test, storage) => {
   });
   test('unreadable and unrelated PDFs cannot silently enter the bank importer; /items only reads capture status', c => {
     const f = storage(c), chat = telegramFixture(c);
-    c.extractReceiptItems = () => ({ document_type: 'other', receipts: [] });
+    c.classifyPdfDocument = () => 'other';
     chat.post({ document: { file_id: 'other', mime_type: 'application/pdf', file_name: 'other.pdf' } });
-    assert.equal(chat.documents.length, 0); assert.match(chat.messages.at(-1), /neither a readable/);
-    c.extractReceiptItems = () => { throw new Error('Receipt extraction unavailable'); };
+    assert.equal(chat.documents.length, 0); assert.match(chat.messages.at(-1), /could not be identified/);
+    c.classifyPdfDocument = () => { throw new Error('PDF classification unavailable'); };
     c.fetchWithRetry = (_, options) => { chat.messages.push(JSON.parse(options.payload).text); return {}; };
     chat.post({ document: { file_id: 'broken', mime_type: 'application/pdf', file_name: 'broken.pdf' } });
     assert.equal(chat.documents.length, 0); assert.match(chat.messages.at(-1), /unavailable/);

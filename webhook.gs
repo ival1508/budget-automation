@@ -108,7 +108,7 @@ function doPost(e) {
       const message = update.message;
       const chatId = message.chat.id;
       const inputs = [];
-      let receiptExtraction = null;
+      let pdfDocumentType = null;
 
       // Handle Telegram Slash Commands (e.g. /mandatory)
       if (message.text) {
@@ -208,14 +208,15 @@ function doPost(e) {
         inputs.push(voiceMediaObj);
       }
 
-      // Case D: Document input (Bank Statement PDF / CSV)
+      // Case D: PDF receipts / statements, CSV statements and image documents.
       if (message.document) {
         const doc = message.document;
         const mimeType = String(doc.mime_type || '').toLowerCase();
         const fileName = String(doc.file_name || '').toLowerCase();
 
         const isPdf = mimeType.includes('pdf') || fileName.endsWith('.pdf');
-        const isCsv = mimeType.includes('csv') || mimeType.includes('excel') || mimeType.includes('plain') || fileName.endsWith('.csv');
+        const isCsv = !isPdf && (mimeType.includes('csv') || mimeType.includes('excel') ||
+          mimeType.includes('plain') || fileName.endsWith('.csv'));
 
         const isImage = mimeType.startsWith('image/');
         if (isImage) {
@@ -226,19 +227,19 @@ function doPost(e) {
           const filePath = getTelegramFilePath(doc.file_id, botToken);
           const docMediaObj = fetchTelegramFileAsBase64(filePath, botToken, targetMime);
           if (isPdf) {
-            // Fail closed on an unreadable classification: never route a receipt
-            // to the statement importer merely because a model request failed.
-            receiptExtraction = extractReceiptItems([docMediaObj]);
+            const classificationStarted = Date.now();
+            pdfDocumentType = classifyPdfDocument(docMediaObj);
+            logProposalTiming('pdf_classification', classificationStarted);
           }
-          if (receiptExtraction && receiptExtraction.document_type === 'itemized_receipt') {
-            inputs.push(docMediaObj);
-          } else if (isCsv || receiptExtraction && ['bank_statement', 'bank_screenshot'].includes(receiptExtraction.document_type)) {
+          if (isCsv || pdfDocumentType === 'bank_statement') {
             const blob = Utilities.newBlob(Utilities.base64Decode(docMediaObj.inlineData.data), targetMime, doc.file_name || (isPdf ? 'statement.pdf' : 'statement.csv'));
             enqueueStatementFile(blob, doc.file_unique_id || doc.file_id);
             sendTelegramMessage('📥 Statement queued in the Drive inbox. Use 💰 Budget → Reconcile statements from Drive, or wait for the automatic scan; review the results in _Reconcile.', chatId);
             return HtmlService.createHtmlOutput('OK');
+          } else if (pdfDocumentType === 'receipt' || pdfDocumentType === 'bank_transaction') {
+            inputs.push(docMediaObj);
           } else {
-            sendTelegramMessage('This PDF is neither a readable itemized receipt nor a bank statement. Please send a clearer copy.', chatId);
+            sendTelegramMessage('This PDF could not be identified as a receipt, payment confirmation or bank statement. Please send a clearer copy.', chatId);
             return HtmlService.createHtmlOutput('OK');
           }
         } else {
@@ -262,15 +263,18 @@ function doPost(e) {
 
       // Process inputs through AI Extraction & Confirmation Pipeline
       if (inputs.length > 0) {
-        // Plain photos are independent extraction jobs. Merge with the latest state
-        // after extraction, so model latency never holds up other photo requests.
+        // New PDFs and plain photos are independent documents. Merge them into
+        // the latest proposal after extraction, retaining prior reviewed fields.
         const independentPhoto = Boolean(message.photo && !message.caption && !message.text && !message.voice &&
           !inputs.some(input => typeof input === 'string' || (input && input.text)));
-        let photoTransactions = null;
-        if (independentPhoto) {
+        const independentDocument = independentPhoto || Boolean(pdfDocumentType);
+        let documentTransactions = null;
+        if (independentDocument) {
           const extractionStarted = Date.now();
-          photoTransactions = extractTransactions(inputs, { defaultAccount: DEFAULT_ACCOUNT });
-          logProposalTiming('photo_extraction', extractionStarted);
+          documentTransactions = extractTransactions(inputs, {
+            defaultAccount: DEFAULT_ACCOUNT, pdf_document_type: pdfDocumentType
+          });
+          logProposalTiming(pdfDocumentType ? 'pdf_extraction' : 'photo_extraction', extractionStarted);
         }
         // Proposal state uses the user lock; statement scans / ledger writes keep
         // the separate script lock. The web app executes as the owning user.
@@ -294,19 +298,18 @@ function doPost(e) {
 
           const context = {
             defaultAccount: DEFAULT_ACCOUNT,
-            previous_proposal: previousProposal,
-            receipt_extraction: receiptExtraction
+            previous_proposal: previousProposal
           };
 
           // Phase 2: AI Multimodal Extraction & Phase 1 Enrichment
-          const enrichedTransactions = independentPhoto ? photoTransactions : extractTransactions(inputs, context);
+          const enrichedTransactions = independentDocument ? documentTransactions : extractTransactions(inputs, context);
 
-          const finalTransactionsToConfirm = independentPhoto
+          const finalTransactionsToConfirm = independentDocument
             ? mergeScreenshotProposals(previousProposal || [], enrichedTransactions)
             : enrichedTransactions;
 
           // Only carry corrections across an unambiguous source transaction match.
-          if (!independentPhoto && message.text && Array.isArray(previousProposal)) {
+          if (!independentDocument && message.text && Array.isArray(previousProposal)) {
             finalTransactionsToConfirm.forEach(txn => {
               const matches = previousProposal.filter(old =>
                 (old.raw_where || old.where) === (txn.raw_where || txn.where) &&

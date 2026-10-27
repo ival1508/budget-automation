@@ -99,6 +99,22 @@ const GEMINI_RESPONSE_SCHEMA = Object.freeze({
   items: PARSED_TRANSACTION_ITEMS_SCHEMA
 });
 
+/** PDF routing uses document evidence, independently of optional receipt products. */
+const PDF_DOCUMENT_RESPONSE_SCHEMA = Object.freeze({
+  type: 'OBJECT',
+  properties: {
+    document_type: { type: 'STRING', enum: ['receipt', 'bank_statement', 'bank_transaction', 'other'] },
+    is_merchant_purchase: { type: 'BOOLEAN' },
+    bank_name: { type: 'STRING' },
+    account_reference: { type: 'STRING' },
+    statement_period: { type: 'STRING', description: 'Printed statement period or statement date; empty if absent.' },
+    has_transaction_history: { type: 'BOOLEAN' },
+    confidence: { type: 'NUMBER' }
+  },
+  required: ['document_type', 'is_merchant_purchase', 'bank_name', 'account_reference',
+    'statement_period', 'has_transaction_history', 'confidence']
+});
+
 /** Comment edits contain only patches. Unmentioned transactions never pass through the model. */
 const PROPOSAL_EDIT_RESPONSE_SCHEMA = Object.freeze({
   type: 'OBJECT',

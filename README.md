@@ -10,7 +10,7 @@ serves a specific deployed *version*. After pushing:
   Deploy → Manage deployments → ✏️ pencil → Version: New version → Deploy
 NEVER click "New deployment" — it mints a new URL and 404s the webhook.
 
-**Existing /exec URL** (version 95, DBS repayment fix deployed 28 Oct 2026; 34 application files):
+**Existing /exec URL** (version 96, PDF receipt routing fix deployed 28 Oct 2026; 34 application files):
 https://script.google.com/macros/s/AKfycbyhRAocN8rNBhWl3NBL7yIgStBCLIrgHfxNNOC-zt6Pa7HBvQPJ9b7tykdeu4QuMm3_/exec
 
 **Deployment settings MUST be:** Execute as = Me · Who has access = Anyone
@@ -104,6 +104,15 @@ balances and the eleven-column ledger keep their existing contract. Bank
 screenshots and typed/voice inputs produce no item history. `/items` or
 **Budget → Receipt capture status** shows progress. Basket Review is deferred
 until receipt history accumulates. See [capture rules and acceptance](docs/stage-7a-receipt-capture.md).
+
+Receipt PDFs, including summary-only fuel receipts, invoices and card slips,
+follow ordinary transaction approval. PDF routing reads the document's contents
+independently of product extraction. A bank statement requires a bank, customer
+account, statement period/date and account transaction history; printed card or
+bank details on a merchant receipt do not qualify. Individual bank confirmations
+also produce transaction proposals. Product-capture failures leave the receipt
+transaction approvable. New PDFs merge into the current proposal without replacing
+previously reviewed items. CSV statements retain the inbox workflow.
 
 ### Stage 6 — month creation and read-only preview
 
