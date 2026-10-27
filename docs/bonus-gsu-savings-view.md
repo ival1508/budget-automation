@@ -1,6 +1,17 @@
 # Monthly bonus, GSU and savings view
 
-Recorded: 3 October 2026. Updated: 4 October 2026 with household funding-discipline notes and explicit accounting corrections. Target: 31 October 2026. Status: proposed design, not implemented or verified against the live workbook. Parent: [PRD](PRD_Budget2026_Automation_v2.4_stages.md).
+Recorded: 3 October 2026. Accounting rules updated: 4 October 2026. Live status reviewed: 28 October 2026. Target: 31 October 2026. Status: partly implemented in the workbook; funding, formula and accounting acceptance remains open. Parent: [PRD](PRD_Budget2026_Automation_v2.4_stages.md).
+
+**28 October status correction:** the live workbook already contains a combined
+bonus/GSU section in rows 28–30 and combined totals in rows 32–35. This is partial
+implementation, not an empty destination. `AA28:AA30` sum January–September only
+although October's U column is populated (confirm any completed-month-only YTD
+policy and advance it at October close); `U34` reads `U23` whereas September's
+`S34` uses `S32-S33`; October's funding check `U35=U26+U29` is not balanced. The
+current withdrawal formulas in the sampled months select `GSU GOOG` only, so
+coverage of other funding sources and reinvestment treatment still needs review.
+Summary!E4 also explicitly references October. No formulas were changed during
+this read-only check. See the [current punch list](phase-2-progress-review-2026-10-28.md).
 
 ## Outcome
 
@@ -81,6 +92,21 @@ The user's notes make this primarily a discipline and reconciliation feature, us
 | Debit-account coverage gap | Available settlement-account balance minus unpaid card obligations and remaining cash commitments due within the same stated horizon; exclude already-paid items and avoid duplicating card purchases as future cash expenses |
 
 This is a budget allocation rule, not automatic banking. During an open month amounts are provisional. Do not add before/after Difference fields or require a separate original-surplus display: the resulting monthly `Отложения` shows the effect. Do not silently let savings become negative to hide a funding shortage. If accumulated assets fund a remaining deficit, record the confirmed source and drawdown. Never call this new income or borrowing unless there is an actual loan. Funding assignments alone do not close a debit-account coverage gap: show pending transfers and unsettled sales separately from cash already available.
+
+**28 October follow-up — implemented:** automate `Summary!E4` from verified live inputs
+and the current SGT month, then expose its recalculated cash-coverage amount,
+as-of time, month and availability in the daily coach. Keep settlement coverage
+and D19's spending allowance separately labeled; negative coverage should surface
+a funding/transfer shortfall. Audit the existing manual adjustments before
+replacing them, and keep October selected when November is created early. The
+[PRD requirement](PRD_Budget2026_Automation_v2.4_stages.md#summarye4-automation-and-daily-cash-coverage--added-28-october)
+records the reader, presentation and rollover acceptance checks.
+Val clarified that all pending current-month commitments and the remaining
+ordinary budget are compared with recorded account balances while protecting
+regular payroll received for next month's budget. The version 92 removal of that
+reserve was incorrect; version 93 derives it from actual banked payroll and
+releases it at rollover. See the
+[implementation and verification record](summary-cash-coverage.md).
 
 User-stated purposes are defaults for review, not a compulsory liquidation sequence:
 

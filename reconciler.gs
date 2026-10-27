@@ -5059,6 +5059,8 @@ function buildBudgetMenu(ui) {
     .addSeparator()
     .addItem('Seed / review mandatory calendar draft', 'seedCalendarFromMenu')
     .addItem('Check mandatory payments now', 'checkMandatoryPaymentsNow')
+    .addItem('Preview settlement coverage setup', 'showCashCoveragePreview')
+    .addItem('Set up settlement coverage', 'installCashCoverageFromMenu')
     .addItem('Run morning coach now', 'sendMorningCoach')
     .addItem('Preview monthly coach', 'showMonthlyCoachPreview')
     .addItem('Preview next month (read-only)', 'showMonthCreationPreview')

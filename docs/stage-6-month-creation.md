@@ -3,6 +3,35 @@
 Initial plan and discovery checkpoint: 3 October 2026.
 November readiness review: 25 October 2026 (SGT).
 
+## Current status — 28 October 2026
+
+The creator, reader integration and dispatcher are implemented and enabled. All
+33 application files match the editor and existing web-app deployment version 93
+after the cash-coverage follow-up.
+The 25 October work log records Val's successful live November trial and his
+instruction to leave G3:G13 blank. This is a recorded live trial, not independent
+evidence that the original native TEST acceptance matrix was completed.
+
+The current live workbook has no November tab. A read-only local plan against
+fresh October values/formulas accepts that template and proposes `Ноябрь` with
+the seven expected edit ranges. That check deliberately omits salary ledger
+evidence and uses template fallbacks; it does not evaluate generated formulas.
+Verify eligible scheduled creation on **31 October from 00:00 SGT**, the final
+native values/formulas, provisional salary notes and an existing-month no-op.
+Current trigger installation/execution was not inspected. Summary!E4's monthly
+reference dependency was resolved by the [28 October cash-coverage implementation](summary-cash-coverage.md):
+native formulas select the current SGT month even when the next month's tab is
+created early, and the daily coach reads its checked value. Verify actual
+scheduled month creation separately; cash-coverage formulas do not create tabs.
+Cross-year creation is intentionally refused; set up the 2027 workbook separately.
+
+The older implementation table/readiness checklist below mixes pre-creator work
+with later completion entries. This status and the [dated Phase 2 review](phase-2-progress-review-2026-10-28.md)
+govern the current closure list. Treat G-status formula requirements below as
+superseded by Val's accepted blank-G policy; ledger-based Calendar matching is
+separate. Stage 4 has 12 live active Calendar rows, but its report/delivery
+acceptance remains unrecorded as closed.
+
 ## Outcome
 
 Create the next monthly tab before rollover and recover a missing current-month
@@ -13,12 +42,12 @@ Use the shared 15-minute dispatcher; no new trigger. Stage 4 remains deferred.
 
 | Step | Deliverable | Completion checkpoint | Status |
 | --- | --- | --- | --- |
-| 6A — Discover and freeze template | Read-only live inspection, exact carry/reset/formula map, naming and input policies in `SHEET_FACTS.monthTemplate` | Resolve the three questions below; inspect remaining template extent, workbook dependencies and sandbox differences | In progress |
-| 6B — Build read-only creation plan | Explicit target month, validated template selection and precise proposed edits, including live salary, payment-status and daily-description formulas; menu/editor preview | Offline planner/formula-construction checks pass; read-only live October snapshot produces November plan | Complete locally; ledger salary lookup and provisional fallback implemented; installed preview verification pending; native formula evaluation remains 6E |
-| 6C — Implement controlled creator | Clone latest valid earlier month, initialize dates/inputs, preserve formulas/formatting, verify before publishing final name | Sandbox-only creation; concurrency lock, recheck, failure handling and repeat-run tests pass | Complete locally; native sandbox execution remains 6E |
+| 6A — Discover and freeze template | Read-only live inspection, exact carry/reset/formula map, naming and input policies in `SHEET_FACTS.monthTemplate` | Validated template contract and naming/input policies | Implemented; fresh October structural preview passes. Summary's month reference is now automated. Consolidation of the older discovery notes remains open. |
+| 6B — Build read-only creation plan | Explicit target month, validated template selection and precise proposed edits, including live salary and daily-description formulas; menu/editor preview | Offline planner/formula-construction checks pass; read-only live October snapshot produces November plan | Implemented and deployed; fresh structural preview passes. G is deliberately blank, superseding the earlier payment-status formula scope. |
+| 6C — Implement controlled creator | Clone latest valid earlier month, initialize dates/inputs, preserve formulas/formatting, verify before publishing final name | Concurrency lock, recheck, failure handling and repeat-run tests pass | Implemented and deployed; a successful live November trial is recorded. Native TEST matrix evidence remains separate under 6E. |
 | 6D — Integrate entry points | Explicit current-month recovery, next-month scheduling, income-review notice and feature controls | Dispatcher and operational reader tests pass; historical reporting and read-only diagnostics never create tabs | Complete (`resolveMonthSheet`, operational-only `ensureMonthTab`, `runScheduledMonthCreation` on last day from `00:00 SGT` onwards + current-month recovery in `dispatch()`) |
-| 6E — Native sandbox acceptance | Run actual Apps Script creator against verified TEST workbook | Compare formulas, dates, values, formatting and recalculation with a manually created reference; repeated calls make no changes | Complete via live trial creation of `Ноябрь` in `Budget 2026`; Column G write-up skipped (`G3:G13` cleared to blank) per Val's feedback |
-| 6F — Release | Record acceptance, enable live feature, sync and update existing web-app deployment if needed | Verify a real eligible creation and existing-month no-op; document rollback/disable procedure | Complete (`SHEET_FACTS.monthTemplate.creationEnabled = true` synced via `clasp push`) |
+| 6E — Native acceptance | Originally specified against verified TEST workbook; actual recorded checkpoint is Val's live trial | Compare formulas, dates, values, formatting and recalculation with a reference; repeated calls make no changes | Live trial acceptance recorded 25 Oct; G3:G13 blank per Val. Do not equate this with independently verified completion of the full TEST matrix. Verify final scheduled output and no-op. |
+| 6F — Release | Record acceptance, enable live feature, sync and update existing web-app deployment if needed | Verify a real eligible creation and existing-month no-op; document disable procedure | Enabled and deployed; editor/local/version 91 match verified 28 Oct. First scheduled creation/no-op check is due 31 Oct. Disable future automatic creation by setting creationEnabled=false and syncing; existing tabs remain intact. |
 
 Proceed in order. Source tests do not replace native spreadsheet recalculation.
 Keep live automatic creation disabled until sandbox acceptance passes.

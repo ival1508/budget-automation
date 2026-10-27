@@ -20,6 +20,7 @@ function buildCoachPayload(period, optSs, optReportDate) {
   const p = period || 'daily';
   if (p === 'monthly') return buildMonthlyCoachPayload(ss, optReportDate || getMonthlyReportDate());
   const reportDate = optReportDate || new Date();
+  const cashCoverage = readCashCoverage(ss, reportDate);
   
   // Single source for all daily budget & pacing metrics
   const pacingData = typeof getDailyPacing === 'function' ? getDailyPacing(reportDate, ss) : {
@@ -32,7 +33,7 @@ function buildCoachPayload(period, optSs, optReportDate) {
   };
 
   if (pacingData.error) {
-    return { period: p, error: pacingData.error, month_tab: pacingData.month_tab || '' };
+    return { period: p, error: pacingData.error, month_tab: pacingData.month_tab || '', cash_coverage: cashCoverage };
   }
 
   const pacing = typeof get503020Status === 'function' ? get503020Status(ss, false, reportDate) : {};
@@ -118,7 +119,8 @@ function buildCoachPayload(period, optSs, optReportDate) {
     buckets: buckets,
     target_header: String(pacing.target_header || ''),
     categories_over_target: categoriesOverTarget,
-    mandatory_warnings: []
+    mandatory_warnings: [],
+    cash_coverage: cashCoverage
   };
 }
 
@@ -288,8 +290,7 @@ function generateCoachBrief(payload) {
   if (ctx.period === 'monthly' && ctx.monthly_review) return renderMonthlyReview(ctx);
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   if (!apiKey) {
-    if (ctx.period === 'monthly') return fallback(ctx);
-    throw new Error('GEMINI_API_KEY property is missing in Script Properties.');
+    return fallback(ctx);
   }
 
   const systemInstruction = ctx.period === 'monthly' ? `You are a sharp, warm financial coach for a Singapore family. Write a month-in-review using only this monthly JSON, in at most four short conversational sentences.
@@ -318,16 +319,19 @@ Rules:
 - Never describe trend directions (rising, falling, clawed back) not in the JSON.
 - Structure strictly as bullet points starting with "• ". Do not output a single long paragraph.
 - Keep total length to at most 3 short sentences.
+- Settlement cash coverage is appended separately by the application; do not add settlement, cash-coverage or funding claims to these spending bullets.
 - Telegram HTML only: <b>bold</b>, <i>italic</i>. Never markdown (**bold**).
 - Direct, natural, actionable — never preachy, robotic, or moralising.`;
 
+  const modelContext = Object.assign({}, ctx);
+  if (ctx.period !== 'monthly') delete modelContext.cash_coverage;
   const apiPayload = {
     systemInstruction: {
       parts: [{ text: systemInstruction }]
     },
     contents: [
       {
-        parts: [{ text: JSON.stringify(ctx, null, 2) }]
+        parts: [{ text: JSON.stringify(modelContext, null, 2) }]
       }
     ],
     generationConfig: {
@@ -356,11 +360,12 @@ Rules:
       let cleaned = textOutput.trim();
       // Ensure any markdown **bold** is converted to <b>bold</b> for Telegram HTML
       cleaned = cleaned.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
-      if (!coachMoneyIsGrounded(cleaned, ctx) || (ctx.period === 'monthly' && !monthlyCoachBriefIsGrounded(cleaned, ctx))) {
+      if (!coachMoneyIsGrounded(cleaned, modelContext) || (ctx.period === 'monthly' && !monthlyCoachBriefIsGrounded(cleaned, ctx)) ||
+          (ctx.period !== 'monthly' && /settlement|cash.coverage|funding shortfall/i.test(cleaned))) {
         Logger.log('Coach returned ungrounded figures or an invalid monthly brief; using grounded fallback.');
         return fallback(ctx);
       }
-      return cleaned;
+      return appendDailyCashCoverage(cleaned, ctx);
     }
     Logger.log('Empty response from Gemini, using fallback brief.');
     return fallback(ctx);
@@ -485,9 +490,9 @@ function escapeCoachHtml(value) {
  */
 function buildFallbackCoachBrief(payload) {
   if (payload.error === 'missing_month') {
-    return "The current month's budget tab is missing; please create it before the next budget brief.";
+    return appendDailyCashCoverage("The current month's budget tab is missing; please create it before the next budget brief.", payload);
   }
-  if (payload.error) return 'Budget figures are unavailable; please check the sheet before planning today’s spending.';
+  if (payload.error) return appendDailyCashCoverage('Budget figures are unavailable; please check the sheet before planning today’s spending.', payload);
   const cumulativeToday = Number(Number(payload.cumulative_today || 0).toFixed(2));
   const realisticDaily = Number(Number(payload.realistic_daily || 0).toFixed(2));
   const daysLeft = payload.days_left_in_month || 1;
@@ -542,7 +547,7 @@ function buildFallbackCoachBrief(payload) {
     bullet3 = `• <b>Action:</b> Stick to your <b>${formatSgd(realisticDaily)}</b> daily limit to protect your buffer.`;
   }
 
-  return [bullet1, bullet2, bullet3].filter(Boolean).join('\n');
+  return appendDailyCashCoverage([bullet1, bullet2, bullet3].filter(Boolean).join('\n'), payload);
 }
 
 /**

@@ -10,7 +10,7 @@ serves a specific deployed *version*. After pushing:
   Deploy → Manage deployments → ✏️ pencil → Version: New version → Deploy
 NEVER click "New deployment" — it mints a new URL and 404s the webhook.
 
-**Existing /exec URL** (last recorded version: 63, 30 Aug 2026; new-version update confirmed by Val on 16 Sep 2026, new version number not recorded):
+**Existing /exec URL** (version 93, corrected 28 Oct 2026; 33 application files):
 https://script.google.com/macros/s/AKfycbyhRAocN8rNBhWl3NBL7yIgStBCLIrgHfxNNOC-zt6Pa7HBvQPJ9b7tykdeu4QuMm3_/exec
 
 **Deployment settings MUST be:** Execute as = Me · Who has access = Anyone
@@ -93,8 +93,9 @@ trusted to report test output it did not execute.
 
 ## Docs
 See /docs for the PRD and the staged build prompts.
+The [28 October Phase 2 review](docs/phase-2-progress-review-2026-10-28.md) records current stage status and the remaining closure work.
 
-### Stage 6 — read-only month creation preview
+### Stage 6 — month creation and read-only preview
 
 `previewMonthCreation(2026, 11, spreadsheet)` returns the proposed new-month
 name, source template and exact cell edits without changing the workbook.
@@ -107,9 +108,25 @@ Kaspersky for Рита, with transaction evidence and employer-only CPF addition
 compensation unchanged; proposed salary formulas update when payroll is logged.
 B6 follows the tab's own month-to-date light-income total, while B5 starts at zero.
 Existing months are no-ops; creation across the configured workbook year is
-refused. Formula construction is offline-tested; actual formula recalculation
-remains a sandbox acceptance step. No automatic creator is enabled.
+refused. Automatic creation is enabled in the deployed source. The shared
+heartbeat attempts next-month creation from 00:00 SGT on the preceding month's
+last day and recovers a missing current month. A successful live November trial
+is recorded on 25 October; November is absent in the 28 October workbook check.
+Verify the scheduled 31 October creation and existing-month no-op. G3:G13 is
+deliberately cleared to blank. Summary!E4 now selects its current month through
+the cash-coverage feature below, independently of month creation.
 See [Stage 6 plan and checkpoint](docs/stage-6-month-creation.md).
+
+### Daily settlement coverage — Summary!E4
+
+E4 now compares current recorded DBS cash and signed card balances with all
+pending monthly mandatory costs, the remaining Расходы budget and next month's
+received payroll funding. Regular salary credited this month stays reserved for
+the following budget month until rollover. The `CashCoverage` tab shows the plan/payment
+breakdown and selects the current SGT month automatically. The daily coach adds
+a checked Settlement line, with a funding/transfer action for a shortfall and
+an unavailable status for missing or invalid inputs. D19 remains the spending
+allowance. See the [implementation, tests and rollback](docs/summary-cash-coverage.md).
 
 ## Editing a Telegram proposal with a comment
 
@@ -183,9 +200,9 @@ The report reads the month's three sheet-defined bucket summaries and actual/
 target percentages, plus full-month discretionary category totals and mandatory
 paid/unpaid counts. Payment completion uses the existing paid flags or logged
 fixed expenses covering the planned amount; partial payments count as unpaid,
-and CPF and zero-value plans are excluded. Due-date/overdue classification still
-depends on Stage 4's calendar and confirmation of column G's semantics. Next-month
-tab creation remains Stage 6 work.
+and CPF and zero-value plans are excluded. Due-date/overdue classification uses
+Stage 4's separate Calendar and ledger matching, without relying on G.
+Next-month creation is implemented and enabled; see the Stage 6 notes above.
 
 Monthly generation now explains ordinary-spend variance, overall allocations,
 category drivers, specific purchases and observed history. The evidence renderer

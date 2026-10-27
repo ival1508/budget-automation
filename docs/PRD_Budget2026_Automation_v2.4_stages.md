@@ -1,6 +1,6 @@
 # PRD — Budget 2026 Automation · Phase 2 (v2.4, staged by cadence)
 
-**Owner:** Val · **Users:** Val & Rita (two‑user household) · **Version:** v2.4 (reconciler split + test harness; UC‑4 before UC‑6) · **Spec date:** 29 Aug 2026 · **Progress updated:** 16 Sep 2026
+**Owner:** Val · **Users:** Val & Rita (two‑user household) · **Version:** v2.4 (reconciler split + test harness; UC‑4 before UC‑6) · **Spec date:** 29 Aug 2026 · **Progress updated:** 28 Oct 2026
 **Build environment:** Antigravity (Gemini agent) → Google Apps Script + Telegram
 **Data source:** Google Sheet `Budget 2026` (Phase‑1 live: `Transactions`, `Merchants`; users configured in `SHEET_FACTS.USERS` in `config.gs`, not a sheet tab. Read targets: monthly `<Month>'26` tabs, `50/30/20`, `-` reference)
 **Model routing in source:** transaction ingestion uses `GEMINI_MODEL_ID = gemini-3.5-flash-lite`; daily/monthly coaching uses `COACH_MODEL_ID = gemini-3.8-flash`; statement model parsing prefers `gemini-3.7-flash`, with configured fallbacks. These are code settings, not a verification of external availability, release dates or pricing. Preserve per-feature routing rather than reverting every caller to one model.
@@ -9,7 +9,9 @@
 
 ---
 
-## Implementation progress — 16 September 2026
+## Implementation progress — 28 October 2026
+
+Current evidence and the prioritized closure list are in the [Phase 2 progress review](phase-2-progress-review-2026-10-28.md). The corrected cash-coverage follow-up uses version 93 with 33 application files. The current regression run passes 270 tests and 556 existing assertions; all `.gs` files parse. Eight native funding-period checks also pass. Version 92's payroll-availability assumption was incorrect and is superseded. These checks do not establish current trigger execution or Telegram receipt.
 
 **The five reproduced reliability findings are corrected in source and regression-tested.** The configured Apps Script editor project has received the source fixes. The PRD now records the implemented matching, credit and additional-occurrence policies below. Item 1 of the [implementation review](implementation-review-2026-09-16.md) is closed in source/documentation. **Item 2's real sandbox acceptance and the live webhook deployment update are also complete, confirmed by Val on 16 September 2026.** This completion record uses Val's explicit confirmation; no new cloud execution or independent evidence review was performed while recording it.
 
@@ -25,26 +27,67 @@
 
 | Stage | Current progress | Remaining acceptance/work |
 |---|---|---|
-| 0 — Discovery | Recorded live discovery exists. | Confirm mandatory G formula/checkbox semantics and the structural/reset month-template ranges; discovery is not fully closed. |
+| 0 — Discovery | Live discovery and a validated month-template contract exist. New tabs deliberately leave G blank. Summary!E4 now selects its current month automatically. | Consolidate the older discovery/template notes. G is not a blocker for ledger-based Calendar matching. |
 | 1 — Readers | Core readers and explicit monthly reporting period exist. Monthly required inputs fail visibly. | Daily 50/30/20 and category-map fallback behavior still needs an unavailable-data contract. |
-| 2 — Daily coach | Payload, model/fallback grounding, per-user scheduling and delivery retries exist. | Real delivery/catch-up and several days of sheet/tone comparison remain unverified; target-header visibility is not guaranteed in the daily brief. |
+| 2 — Daily coach | Implemented and deployed; historical notes record live delivery and heartbeat setup. Payload grounding and per-user retries are covered offline. | Daily unavailable-data handling and target-header visibility remain open. Current delivery/catch-up and sheet/tone acceptance are not independently verified by this review. |
 | 3 — Reconciler | 3A–3G source paths exist: parsing, matching/filtering, retained sheet review, preview, explicit import, history/dismissal/refresh and journaled Drive pickup. **Real sandbox acceptance complete — Val confirmed 16 Sep 2026.** | [Acceptance record](sandbox-acceptance-checklist.md). Additional same-key purchases use the explicit manual policy below; a dedicated approval action remains future work. |
-| 4 — Payment calendar | Legacy AI weekly audit exists. | Editable seeded calendar, confirmed due dates/EOM, deterministic overdue/upcoming sets, menu and daily warnings are not built. |
-| 5 — Monthly coach | Reporting period, full-month payload, paid/unpaid counts, grounding and reminder → coach schedule are implemented. | Real month-end delivery and sheet comparison remain pending. Date-based missed/late reporting awaits Stage 4. |
-| 6 — Month creation | Date-based tab naming handles year rollover. | Template discovery and safe clone/reset/ensure functions are not built. |
+| 4 — Payment calendar | Parts A–C implemented and deployed; live Calendar has 12 active obligations. Deterministic matching, overdue/upcoming sets and weekly delivery are wired. | Stage 6 notes retain the Stage 4 acceptance deferral. Verify native preview, date/amount choices and real weekly delivery before closing it. Optional same-day alerts are disabled; no G write-back. |
+| 5 — Monthly coach | Evidence-based category/purchase review, historical target proposals and complete multipart delivery are implemented and deployed. | Record native preview/sheet comparison and real reminder → multipart review delivery to both users, including retry acceptance. Offline/snapshot evidence already passes. |
+| 6 — Month creation | Controlled creator, yearless/dated readers, current-month recovery and last-day scheduling are deployed with creationEnabled=true. A successful live November trial was recorded on 25 Oct. Summary's month dependency is resolved by native cash-coverage formulas. | November is absent in the current workbook. The current October template passes a read-only November plan. Verify the first eligible heartbeat on 31 Oct from 00:00 SGT, final formulas and repeat-call no-op. Cross-year creation is deliberately refused. |
 | 7 — Receipt items | Transaction capture exists. | LineItems/Products storage, item capture and Basket Review are not built. |
 
 **Editor sync:** `clasp push` succeeded, uploading 24 files including the Sheets preview. **Live webhook deployment update: complete — Val confirmed the existing deployment was updated to a new version on 16 September 2026.** Required secret/allowlist settings and both enabled users' membership remain operational requirements. The deployed version number and cloud artifacts were not inspected during this documentation update. Actual daily/monthly coaching delivery acceptance remains separate Stage 2/5 work.
+
+The 136-test and 24-file figures above describe the September checkpoint. The October comparison at the start of this section supersedes its deployment/sync uncertainty.
 
 ---
 
 ## End-of-October requirement — bonus, GSU and savings drawdowns
 
-**Recorded 3 October 2026 · Target: 31 October 2026 · Status: requirements/design only; not implemented.** Add a monthly section below row 26 of `50/30/20` to show cash bonuses, GSU vesting, retained savings and major spending funded from accumulated assets. Keep the regular three-bucket calculation independent. Transfers to ETFs/SRS/CPF and GSU reinvestment preserve savings; donations and purchases consume savings. Show GSU sales and the subsequent use of proceeds separately so a sale is not mistaken for either new income or spending.
+**Recorded 3 October 2026 · Target: 31 October 2026 · Status reviewed 28 October: partly implemented in the workbook; full accounting acceptance remains open.** A combined bonus/GSU section and totals already exist below row 26 of `50/30/20`. The live check found YTD formulas stopping at September, inconsistent September/October net-savings formulas, and an unmatched October funding check. Complete the existing section rather than adding a duplicate. Keep the regular three-bucket calculation independent. Transfers to ETFs/SRS/CPF and GSU reinvestment preserve savings; donations and purchases consume savings. Show GSU sales and the subsequent use of proceeds separately so a sale is not mistaken for either new income or spending. See the [dated review](phase-2-progress-review-2026-10-28.md) for exact cells and remaining acceptance.
 
 The [monthly bonus and savings view specification](bonus-gsu-savings-view.md) defines the proposed rows, funding attribution, forecast/actual separation, reconciliation rules and October acceptance criteria. The requested placement is below row 26; exact ranges and existing content must be inspected before workbook changes. This extends the earlier Phase 3 deferral for tracking CPF/SRS transfers and recorded compulsory CPF asset additions in this view, not contribution planning or automated transfers.
 
 **4 October refinement — monthly funding discipline (corrected to the user's accounting):** reuse the existing `Assets` / `Asset_details` tabs. Positive Difference increases monthly `Отложения`; additional spending reduces them. Keep one Difference field, with no before/after display; any shortage beyond available monthly savings requires explicit funding (Wise, Revolut, SAYE, GSU/ETF or another confirmed source). `Отдых` already recorded as `Обязательные расходы` must not become `Расходы` again: a S$3,000 holiday payment covered by S$2,000 already accounted for on Wise adds only S$1,000 current-month `Расходы`. Transfer the covered amount to the debit account for settlement without duplicate spending. Record RUB holiday funding once at transfer, using already-accounted holiday funds and charging only the uncovered portion as additional holiday spending; no subsequent RUB-card purchase tracking is required. Monthly `Отложения` shows the balancing effect. Reconcile the summary to the monthly tab and debit cash coverage of outstanding obligations. The specification includes these rules and acceptance cases; live balances and the historical renovation-reserve note remain unverified.
+
+### Summary!E4 automation and daily cash coverage — added 28 October
+
+**Requested by Val · Status: implemented 28 October · Links Stages 1, 2 and 6.** Automate the
+cash-coverage calculation in `Summary!E4` and expose its current value as a daily
+coach variable. This is part of the existing funding/settlement requirement and
+the [prioritized closure list](phase-2-progress-review-2026-10-28.md).
+
+**Implemented policy after Val's clarification:** current recorded DBS cash plus
+signed card balances, less all unpaid monthly mandatory plans, the positive
+remainder of the ordinary budget, and regular payroll already received for the
+next budget month. The preceding-month salary policy assigns current receipts
+to next month's plan; that reserve releases at rollover. Version 92 incorrectly
+removed this protection and version 93 restores it from actual bank receipts.
+Forecasts are excluded. Native formulas
+replace the manually maintained month/payment terms. The daily Settlement line
+uses the checked E4 value. The [implementation record](summary-cash-coverage.md)
+documents matching, native/offline checks, source/release status and rollback;
+it supersedes the exploratory manual-adjustment options below.
+
+- Audit the existing formula's account balances, card obligations, remaining
+  commitments, monthly L33 and manual adjustments. Confirm the sign convention
+  and settlement horizon; replace month-specific references and hardcoded
+  adjustments with verified live inputs or explicitly maintained settings.
+- Resolve the **current SGT calendar month**, supporting existing yearless and
+  dated tab names with B1 validation. Creating next month's tab early must not
+  switch Summary's active month before the calendar rollover.
+- Keep E4 recalculating from its inputs and read the latest checked sheet value
+  for each daily brief. Add a structured `cash_coverage` payload containing
+  `amount_sgd`, `as_of`, `month_tab` and `status`; propagate missing/error inputs
+  as unavailable rather than zero.
+- Present the amount as settlement coverage alongside D19's daily spending
+  allowance. Negative coverage calls for funding or a transfer decision; preserve
+  the existing household rules for already-accounted holidays, withdrawals and
+  card settlement so no expense is counted twice.
+- Verify agreement with the current E4 calculation, updates after ledger/balance
+  and commitment changes, positive/zero/negative values, unavailable inputs, and
+  31 October/1 November selection when November has been created early. A new
+  annual workbook remains a separately configured dependency.
 
 ## How to run this doc in Antigravity
 
@@ -394,7 +437,7 @@ function onOpen() {
 
 ## STAGE 4 — UC‑6 Mandatory‑payment calendar + weekly reminder + missed‑date alerts
 
-**Progress:** Parts A–C are implemented locally and offline regressions pass. Live Calendar review and overdue/upcoming acceptance remain pending. Completion uses ledger payments; mandatory G semantics remain unconfirmed and no G write-back is implemented.
+**Progress reviewed 28 October:** Parts A–C are deployed in version 91, offline regressions pass, and the live Calendar contains 12 active obligations. Native report/delivery acceptance is still not recorded as closed; Stage 6 notes defer Stage 4. Completion uses ledger payments without G write-back. Same-day alerts remain optional and disabled.
 
 **Objective.** Never forget a fixed payment. Build a **calendar of expected payment dates**, then a **weekly** reminder of what's still unpaid this month, with **prominent alerts for expected dates that have already passed** without a matching payment.
 
@@ -476,6 +519,10 @@ The 11 actual `Обязательные расходы` labels (from `D3:D13`, v
 ---
 
 ## STAGE 6 — UC‑7 Auto‑create next month's tab (rollover + on‑demand)
+
+**Current implementation — 28 October:** deployed and enabled; the [Stage 6 runbook](stage-6-month-creation.md) and [current review](phase-2-progress-review-2026-10-28.md) supersede the original build instructions below. The shared heartbeat creates next month from 00:00 SGT on the preceding month's last day and can recover the current month. New names are full Russian month names without a year suffix; readers also accept legacy `'26` tabs and verify B1. Preserve daily calculation formulas, generate daily descriptions, clear G3:G13 to blank, derive salaries from preceding-month employer income plus employer CPF with a provisional fallback, and keep B6 scoped to the tab's own month. Existing tabs are no-ops; the annual workbook refuses cross-year creation. Summary and annual-view dependencies are not rewritten automatically.
+
+### Original build specification (historical where superseded above)
 
 **Objective.** Automatically create a month's tab so it's ready to use — never set one up by hand. Because Val keeps tabs only up to the current month, this stage has **two jobs**: proactively create *next* month's tab at rollover, and **self‑heal** a missing *current* month tab whenever the bot needs it. This is the most **sheet‑structure‑sensitive** stage; build it last and test on a throwaway copy of the sheet first.
 
