@@ -1008,6 +1008,7 @@ test('Telegram proposal rejection is surfaced while an unchanged overlap is harm
   assert.doesNotThrow(() => c.sendConfirmationMessage(42, 'token', [], true));
 });
 require('./dbs-sgd-regressions.cjs')(test);
+require('./cc-payment-regressions.cjs')(test, storage);
 require('./proposal-comment-regressions.cjs')(test);
 require('./monthly-coach-regressions.cjs')(test);
 require('./stage5-regressions.cjs')(test);

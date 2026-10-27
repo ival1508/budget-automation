@@ -10,7 +10,7 @@ serves a specific deployed *version*. After pushing:
   Deploy → Manage deployments → ✏️ pencil → Version: New version → Deploy
 NEVER click "New deployment" — it mints a new URL and 404s the webhook.
 
-**Existing /exec URL** (version 94, Stage 7A deployed 28 Oct 2026; 34 application files):
+**Existing /exec URL** (version 95, DBS repayment fix deployed 28 Oct 2026; 34 application files):
 https://script.google.com/macros/s/AKfycbyhRAocN8rNBhWl3NBL7yIgStBCLIrgHfxNNOC-zt6Pa7HBvQPJ9b7tykdeu4QuMm3_/exec
 
 **Deployment settings MUST be:** Execute as = Me · Who has access = Anyone
@@ -173,6 +173,24 @@ Invalid patches are rejected together. Offline coverage in
 `scripts/proposal-comment-regressions.cjs` runs as part of the regression command
 below; model output, Telegram delivery and sheet writes are mocked. Live natural
 language interpretation still requires a deployed webhook and `GEMINI_API_KEY`.
+
+### DBS credit card repayments
+
+Approving a DBS card bill payment records both sides: `DBS SGD` with type
+`Снятие денег` and `DBS CC SGD` with type `Получение денег`. Both use category
+`Кредитка` and bucket `-`, so the transfer does not count as spending or income.
+The proposal shows both account movements on its single editable payment item.
+Changing its amount changes both records; removing it creates neither.
+
+The writer completes the pair under its existing lock, preserves balance formulas
+and skips previously recorded legs by date/account/amount even when bank
+descriptions differ. A one-sided payment remains approvable to add its missing leg.
+Ordinary card purchases, explicit Citi payments and non-SGD records do not expand.
+The dedicated offline fixtures cover all four Telegram save paths, staging,
+one-sided repair, retries, edits, dry runs and both supported balance-formula styles.
+On 28 October, all 311 offline regression tests passed (556 existing assertions).
+The existing webhook deployment was updated to version 95; live ledger writes
+were not used for verification.
 
 ## Offline regression checks
 

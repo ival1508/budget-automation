@@ -38,6 +38,10 @@ function formatTransactionConfirmationHtml(transactions) {
       `💸 <b>${merchant}</b> — ${amountStr}\n` +
       `🏷️ Category: <b>${categoryStr}</b> (<i>${bucketStr}</i>)`;
     lines.push(itemText);
+    if (isDbsCreditCardPayment(txn)) {
+      lines.push('💳 Transfer: DBS SGD −S$' + Math.abs(Number(txn.amount)).toFixed(2) +
+        ' → DBS CC SGD +S$' + Math.abs(Number(txn.amount)).toFixed(2) + ' (two records)');
+    }
     if (txn.currency && txn.currency !== 'SGD' && Number(txn.amount_sgd) > 0) {
       lines.push('💱 SGD equivalent: S$' + Number(txn.amount_sgd).toFixed(2));
     }

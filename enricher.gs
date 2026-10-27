@@ -406,13 +406,78 @@ function applyDbsSgdCorrection(row) {
   };
 }
 
+/** A DBS card bill settlement, never an ordinary purchase paid by card. */
+function isDbsCreditCardPayment(row) {
+  if (!row || !['DBS SGD', 'DBS CC SGD'].includes(row.account) ||
+      String(row.currency || 'SGD').toUpperCase() !== 'SGD') return false;
+  // The cash account can also fund Citi bills; those do not credit the DBS card.
+  if (/\bciti(?:bank)?\b/i.test(
+    [row.where, row.raw_snippet, row.notes].filter(Boolean).join(' '))) return false;
+  return row.category === 'Кредитка' || (!row.manual_merchant_category &&
+    Array.isArray(row.flags) && row.flags.includes('cc_payoff'));
+}
+
+/** Payment identity ignores the bank's differing descriptions of the two legs. */
+function dbsCreditCardPaymentKey(row) {
+  if (!isDbsCreditCardPayment(row) || !row.date || !Number.isFinite(Number(row.amount)) ||
+      !Number(row.amount)) return null;
+  return JSON.stringify(['dbs_cc_payoff', normalizeDateString(row.date), row.account,
+    Math.abs(Number(row.amount)).toFixed(2)]);
+}
+
+/**
+ * Complete approved settlements at the writer boundary. Retain source indices for
+ * staging statuses and receipt capture; two supplied legs are paired only once.
+ */
+function prepareDbsCreditCardPaymentEntries(transactions, categoryBucketMap) {
+  const entries = transactions.map((transaction, inputIndex) => ({
+    transaction: isDbsCreditCardPayment(transaction)
+      ? enrichTransaction(transaction, categoryBucketMap) : transaction,
+    inputIndex: inputIndex
+  }));
+  entries.forEach(entry => {
+    if (isDbsCreditCardPayment(entry.transaction) && !dbsCreditCardPaymentKey(entry.transaction)) {
+      throw new Error('A DBS card payment needs a date and a nonzero SGD amount. No transactions were written.');
+    }
+  });
+  const paired = new Set();
+  for (let i = 0; i < transactions.length; i++) {
+    const txn = entries[i].transaction;
+    if (paired.has(i) || !dbsCreditCardPaymentKey(txn)) continue;
+    const otherAccount = txn.account === 'DBS SGD' ? 'DBS CC SGD' : 'DBS SGD';
+    const counterpartKey = dbsCreditCardPaymentKey({ ...txn, account: otherAccount });
+    const partner = entries.findIndex((entry, index) => index !== i && !paired.has(index) &&
+      dbsCreditCardPaymentKey(entry.transaction) === counterpartKey);
+    paired.add(i);
+    if (partner !== -1) { paired.add(partner); continue; }
+    const counterpart = { ...txn, account: otherAccount, manual_merchant_category: true,
+      flags: (txn.flags || []).filter(flag => !['possible_duplicate', 'skipped'].includes(flag)) };
+    // A bank transfer has no second receipt or independently learned correction.
+    delete counterpart.receipt_capture;
+    delete counterpart.receipt_capture_warning;
+    delete counterpart.telegram_rule_baseline;
+    const index = entries.length;
+    entries.push({ transaction: enrichTransaction(counterpart, categoryBucketMap), inputIndex: i });
+    paired.add(index);
+  }
+  return entries;
+}
+
 /** Enrich a parsed transaction with merchant preferences, bucket, currency and dedupe key. */
 function enrichTransaction(parsedRow, categoryBucketMap) {
   if (!parsedRow || typeof parsedRow !== 'object') {
     throw new Error('enrichTransaction requires a valid transaction object.');
   }
 
-  parsedRow = applyTelegramCorrectionRule(applyDbsSgdCorrection(parsedRow));
+  parsedRow = applyDbsSgdCorrection(parsedRow);
+  if (!isDbsCreditCardPayment(parsedRow)) parsedRow = applyTelegramCorrectionRule(parsedRow);
+  const isCardPayment = isDbsCreditCardPayment(parsedRow);
+  if (isCardPayment) {
+    parsedRow = { ...parsedRow, category: 'Кредитка', currency: 'SGD',
+      amount: Math.abs(Number(parsedRow.amount)),
+      type: parsedRow.account === 'DBS SGD' ? TRANSACTION_TYPES.WITHDRAWAL : TRANSACTION_TYPES.RECEIVED,
+      flags: Array.from(new Set([...(parsedRow.flags || []), 'cc_payoff'])) };
+  }
 
   // 1. Merchant Aliases & Learned Naming / Category Recovery
   let where = parsedRow.where || '';
@@ -422,7 +487,7 @@ function enrichTransaction(parsedRow, categoryBucketMap) {
   const rawNorm = normaliseWhere(where);
   const rawSnippetNorm = normaliseWhere(parsedRow.raw_snippet || '');
   // Explicit transaction edits take precedence over learned merchant defaults.
-  const aliasMatch = (parsedRow.manual_merchant_category || parsedRow.dbs_correction) ? null :
+  const aliasMatch = (isCardPayment || parsedRow.manual_merchant_category || parsedRow.dbs_correction) ? null :
     (aliases[rawNorm] || (rawSnippetNorm ? aliases[rawSnippetNorm] : null));
 
   if (aliasMatch) {
@@ -479,7 +544,7 @@ function enrichTransaction(parsedRow, categoryBucketMap) {
   }
 
   // Programmatic guarantee: All independent papa charges must be marked reimbursable AND set to "Снятие денег"
-  if (flags.indexOf('papa_charge') !== -1) {
+  if (!isCardPayment && flags.indexOf('papa_charge') !== -1) {
     if (flags.indexOf('reimbursable') === -1) {
       flags.push('reimbursable');
     }

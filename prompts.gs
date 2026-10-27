@@ -140,7 +140,8 @@ ${previousProposalText}
 
 6. SPECIAL PATTERNS & RECONCILIATION FLAGS:
    - Mention of reimbursement ("вернуть с Wise", "вернуть с Revolut", "R from Wise") -> Add "reimbursable" to "flags" and set "type" to "Снятие денег".
-   - Credit card payoff pair -> Add "cc_payoff" to "flags".
+   - A credit card BILL PAYMENT / repayment / payoff is a transfer, category "Кредитка", with "cc_payoff" in "flags". A purchase paid USING a credit card is an ordinary expense, never a payoff.
+   - DBS card bill payments are funded from "DBS SGD" and credited to "DBS CC SGD". Extract the observed payment ONCE, using the account shown in the source (default "DBS SGD" for a typed DBS bill payment). Use "Снятие денег" on "DBS SGD" or "Получение денег" on "DBS CC SGD", with a positive SGD amount. The writer creates the matching transfer leg; do not invent a second extracted transaction. Preserve explicit other-bank accounts/payment destinations.
    - PAPA / PARENT SPEND RULES (papa_charge flag):
      When the user mentions 'papa', 'dad', 'parents', or 'папа' in an expense:
      1. SHARED / FAMILY SPEND (No Flag Needed):

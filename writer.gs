@@ -205,11 +205,12 @@ function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {
 
   // 1. Read existing sheet data to build Dedupe Key set & Seen Accounts set (§6.6, §6.7)
   const existingDedupeKeys = new Set();
+  const existingPaymentKeys = new Set();
   const seenAccounts = new Set();
 
   if (lastRow >= 2) {
-    // Read columns A to I for existing transactions (Header is row 1)
-    const existingValues = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+    // Read through Notes so explicit other-bank payment destinations stay scoped.
+    const existingValues = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
     
     for (let r = 0; r < existingValues.length; r++) {
       const row = existingValues[r];
@@ -217,6 +218,9 @@ function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {
       const accountStr = String(row[1] || '').trim();
       const amountNum = Number(row[3]) || 0;
       const whereStr = String(row[8] || '').trim();
+      const paymentKey = dbsCreditCardPaymentKey({ date: dateStr, account: accountStr,
+        amount: amountNum, category: row[7], where: whereStr, notes: row[9] });
+      if (paymentKey) existingPaymentKeys.add(paymentKey);
 
       if (accountStr) {
         seenAccounts.add(accountStr);
@@ -231,31 +235,37 @@ function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {
 
   // 2. Idempotency Filtering: Filter out duplicate transactions unless force_add is set (§6.7)
   const toAppend = [];
-  const rowOutcomes = [];
+  const outcomeByInput = new Map();
   let skippedCount = 0;
   const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap(ss) : null;
 
-  for (let i = 0; i < transactionsArray.length; i++) {
-    const txn = transactionsArray[i];
+  const entries = prepareDbsCreditCardPaymentEntries(transactionsArray, categoryBucketMap);
+  for (const entry of entries) {
+    const txn = entry.transaction;
+    const i = entry.inputIndex;
     // Ensure transaction is enriched before checking key
     const enriched = txn.dedupe_key ? txn : enrichTransaction(txn, categoryBucketMap);
     // The staging reviewer explicitly selected this type; do not reclassify it.
-    if (txn.reviewed_type === true) enriched.type = txn.type;
+    if (txn.reviewed_type === true && !isDbsCreditCardPayment(txn)) enriched.type = txn.type;
 
     const isForced = Array.isArray(enriched.flags) && enriched.flags.indexOf('force_add') !== -1;
 
     // Only skip if duplicate AND not explicitly forced by the user
-    if (!isForced && existingDedupeKeys.has(enriched.dedupe_key)) {
+    const paymentKey = dbsCreditCardPaymentKey(enriched);
+    if (!isForced && (existingDedupeKeys.has(enriched.dedupe_key) ||
+        (paymentKey && existingPaymentKeys.has(paymentKey)))) {
       Logger.log(`Skipping duplicate row: ${enriched.where} (${enriched.amount})`);
       skippedCount++;
-      rowOutcomes.push({ inputIndex: i, status: 'duplicate_review' });
+      if (!outcomeByInput.has(i)) outcomeByInput.set(i, 'duplicate_review');
     } else {
-      rowOutcomes.push({ inputIndex: i, status: 'pending' });
+      outcomeByInput.set(i, 'pending');
       toAppend.push(enriched);
       // Track dedupe key within current batch to prevent intra-batch duplicates
       existingDedupeKeys.add(enriched.dedupe_key);
+      if (paymentKey) existingPaymentKeys.add(paymentKey);
     }
   }
+  const rowOutcomes = Array.from(outcomeByInput, ([inputIndex, status]) => ({ inputIndex, status }));
 
   if (toAppend.length === 0) {
     return { writtenCount: 0, skippedCount: skippedCount, writtenRows: [], rowOutcomes: rowOutcomes };
@@ -266,12 +276,19 @@ function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {
   const rows2D = [];
   const startRow = lastRow + 1;
   const newAccountsInBatch = [];
+  const balanceTemplates = getTransactionBalanceTemplates(sheet);
+  const balanceFormula = balanceTemplates[1]
+    ? String(sheet.getRange(balanceTemplates[1].row, 7).getFormula() || '').toUpperCase() : '';
+  const signedCredits = !/ПОЛУЧЕНИЕ ДЕНЕГ|ДОХОД/.test(balanceFormula) && /-\s*[DE]\d/.test(balanceFormula);
 
   for (let i = 0; i < toAppend.length; i++) {
     const txn = toAppend[i];
     
     // Column D is the single amount value; E and K derive from D and H.
-    const sgdAmount = Number(txn.amount_sgd !== undefined && txn.amount_sgd !== null ? txn.amount_sgd : txn.amount) || 0;
+    let sgdAmount = Number(txn.amount_sgd !== undefined && txn.amount_sgd !== null ? txn.amount_sgd : txn.amount) || 0;
+    if (isDbsCreditCardPayment(txn)) {
+      sgdAmount = Math.abs(sgdAmount) * (signedCredits && txn.account === 'DBS CC SGD' ? -1 : 1);
+    }
     const rowNumber = startRow + i;
 
     // Track newly seen accounts to apply initial opening balance seed (§6.6)
@@ -320,7 +337,6 @@ function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {
 
   // Validate templates before writing inputs. R1C1 retains relative references for every row.
   // A blank tail or a literal opening seed must never become the next formula template.
-  const balanceTemplates = getTransactionBalanceTemplates(sheet);
   const needsBeforeFormula = toAppend.length > newAccountsInBatch.length;
   if (!balanceTemplates[1] || (needsBeforeFormula && !balanceTemplates[0])) {
     throw new Error('Transactions balance formulas are missing in F or G. Restore a valid formula template before importing. No transactions were written.');
@@ -377,10 +393,11 @@ function flagExistingDuplicates(transactions) {
     const startRow = Math.max(2, lastRow - 1000);
     const numRows = lastRow - startRow + 1;
 
-    // Read Date (Col A), Account (Col B), Amount (Col D), Where (Col I)
-    const existingValues = sheet.getRange(startRow, 1, numRows, 9).getValues();
+    // Include category and Notes to identify repayment legs and other-bank bills.
+    const existingValues = sheet.getRange(startRow, 1, numRows, 10).getValues();
     const existingExactKeys = new Set();
     const existingFuzzyKeys = new Map();
+    const existingPaymentKeys = new Set();
 
     for (let i = 0; i < existingValues.length; i++) {
       const row = existingValues[i];
@@ -388,6 +405,9 @@ function flagExistingDuplicates(transactions) {
       const accountStr = String(row[1] || '').trim();
       const amountNum = Number(row[3]) || 0;
       const whereStr = String(row[8] || '').trim();
+      const paymentKey = dbsCreditCardPaymentKey({ date: dateStr, account: accountStr,
+        amount: amountNum, category: row[7], where: whereStr, notes: row[9] });
+      if (paymentKey) existingPaymentKeys.add(paymentKey);
 
       if (dateStr && (amountNum !== 0 || whereStr)) {
         const exactKey = generateDedupeKey(dateStr, accountStr, amountNum, whereStr);
@@ -413,12 +433,19 @@ function flagExistingDuplicates(transactions) {
       const itemExactKey = generateDedupeKey(item.date, item.account, item.amount, item.where);
       item.dedupe_key = itemExactKey;
       const itemFuzzyKeys = generateFuzzyDedupeKeys(item.date, item.account, item.amount, item.where);
+      const paymentKey = dbsCreditCardPaymentKey(item);
 
       let isDuplicate = false;
       let matchedInfo = null;
 
       // 1. Check against sheet database
-      if (existingExactKeys.has(itemExactKey)) {
+      if (paymentKey) {
+        // A one-sided legacy payment still needs its missing leg. Let approval
+        // repair it rather than offering to skip the whole transfer as a duplicate.
+        const otherAccount = item.account === 'DBS SGD' ? 'DBS CC SGD' : 'DBS SGD';
+        isDuplicate = existingPaymentKeys.has(paymentKey) && existingPaymentKeys.has(
+          dbsCreditCardPaymentKey({ ...item, account: otherAccount }));
+      } else if (existingExactKeys.has(itemExactKey)) {
         isDuplicate = true;
       } else {
         for (let k = 0; k < itemFuzzyKeys.length; k++) {
