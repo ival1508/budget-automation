@@ -10,7 +10,7 @@ serves a specific deployed *version*. After pushing:
   Deploy → Manage deployments → ✏️ pencil → Version: New version → Deploy
 NEVER click "New deployment" — it mints a new URL and 404s the webhook.
 
-**Existing /exec URL** (version 93, corrected 28 Oct 2026; 33 application files):
+**Existing /exec URL** (version 94, Stage 7A deployed 28 Oct 2026; 34 application files):
 https://script.google.com/macros/s/AKfycbyhRAocN8rNBhWl3NBL7yIgStBCLIrgHfxNNOC-zt6Pa7HBvQPJ9b7tykdeu4QuMm3_/exec
 
 **Deployment settings MUST be:** Execute as = Me · Who has access = Anyone
@@ -94,6 +94,16 @@ trusted to report test output it did not execute.
 ## Docs
 See /docs for the PRD and the staged build prompts.
 The [28 October Phase 2 review](docs/phase-2-progress-review-2026-10-28.md) records current stage status and the remaining closure work.
+
+### Stage 7A — receipt item capture
+
+Send an itemized receipt photo, image document or PDF and approve its transaction.
+The bot stores the products in `LineItems`, maintains a `Products` catalog and
+flags totals that do not reconcile. There is no per-product approval; transaction
+balances and the eleven-column ledger keep their existing contract. Bank
+screenshots and typed/voice inputs produce no item history. `/items` or
+**Budget → Receipt capture status** shows progress. Basket Review is deferred
+until receipt history accumulates. See [capture rules and acceptance](docs/stage-7a-receipt-capture.md).
 
 ### Stage 6 — month creation and read-only preview
 

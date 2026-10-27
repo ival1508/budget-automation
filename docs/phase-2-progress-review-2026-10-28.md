@@ -12,6 +12,12 @@ application files, 270 passing tests and eight native funding-period checks; see
 [implementation record](summary-cash-coverage.md). Its workbook/source changes
 supersede the initial review's no-mutation statement for that follow-up only.
 
+The subsequent Stage 7A capture follow-up is released as **version 94** with
+34 matching application files and 292 passing offline tests. This adds receipt
+capture source/deployment changes; item tabs initialize on the first approved
+receipt. No synthetic financial rows or test Telegram messages were sent. See
+the [capture implementation record](stage-7a-receipt-capture.md).
+
 - Repository: `e2d291c`, with a clean worktree before this documentation review.
 - Read-only Apps Script API comparison: all 32 application files match the editor
   and the existing web-app deployment, **version 91**. No sync or deploy is needed
@@ -88,14 +94,16 @@ supersede the initial review's no-mutation statement for that follow-up only.
 
 ## Remaining Phase 2 scope
 
-**Stage 7 — receipt line-item intelligence is unbuilt.** Existing photo/receipt
-transaction extraction is not item capture. No item-level extraction schema,
-LineItems/Products storage, parent linkage/reconciliation, `/items`, or Basket
-Review implementation was found in the application source.
+**Stage 7A — receipt capture is implemented and deployed as version 94.** The initial
+review found only transaction extraction. The subsequent build adds a separate
+visual item schema, `LineItems`/`Products`, approved-parent linkage,
+reconciliation and `/items` capture status, preserving the 11-column ledger.
+See [implementation and acceptance](stage-7a-receipt-capture.md).
 
-- **7A, capture:** extract actual receipt items (not bank screenshots), normalize
-  products/brands/units, link via the transaction dedupe key, flag receipts whose
-  items do not reconcile, and keep the 11-column ledger contract unchanged.
+- **7A, capture:** 22 new offline checks pass (292 total). Actual receipt OCR,
+  brand/unit accuracy and the first real capture remain operational acceptance
+  items; no live synthetic transactions were added. Tabs create automatically
+  on the first approved receipt.
 - **7B, analysis:** deterministic unit prices, merchant/brand comparisons,
   frequency and spending-change drivers, and a personal inflation measure with
   adequate comparable observations. Build after sufficient capture history;

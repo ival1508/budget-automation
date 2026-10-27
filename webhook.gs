@@ -108,6 +108,7 @@ function doPost(e) {
       const message = update.message;
       const chatId = message.chat.id;
       const inputs = [];
+      let receiptExtraction = null;
 
       // Handle Telegram Slash Commands (e.g. /mandatory)
       if (message.text) {
@@ -121,6 +122,11 @@ function doPost(e) {
           if (typeof sendWeeklyMandatoryAudit === 'function') {
             sendWeeklyMandatoryAudit(chatId);
           }
+          return HtmlService.createHtmlOutput('OK');
+        }
+        if (/^\/items(?:@\w+)?\s*$/i.test(textTrimmed)) {
+          const capture = previewReceiptCapture();
+          sendTelegramMessage(capture.message, chatId);
           return HtmlService.createHtmlOutput('OK');
         }
 
@@ -211,14 +217,30 @@ function doPost(e) {
         const isPdf = mimeType.includes('pdf') || fileName.endsWith('.pdf');
         const isCsv = mimeType.includes('csv') || mimeType.includes('excel') || mimeType.includes('plain') || fileName.endsWith('.csv');
 
-        if (isPdf || isCsv) {
+        const isImage = mimeType.startsWith('image/');
+        if (isImage) {
+          const filePath = getTelegramFilePath(doc.file_id, botToken);
+          inputs.push(fetchTelegramFileAsBase64(filePath, botToken, mimeType));
+        } else if (isPdf || isCsv) {
           const targetMime = isPdf ? 'application/pdf' : 'text/csv';
           const filePath = getTelegramFilePath(doc.file_id, botToken);
           const docMediaObj = fetchTelegramFileAsBase64(filePath, botToken, targetMime);
-          const blob = Utilities.newBlob(Utilities.base64Decode(docMediaObj.inlineData.data), targetMime, doc.file_name || (isPdf ? 'statement.pdf' : 'statement.csv'));
-          enqueueStatementFile(blob, doc.file_unique_id || doc.file_id);
-          sendTelegramMessage('📥 Statement queued in the Drive inbox. Use 💰 Budget → Reconcile statements from Drive, or wait for the automatic scan; review the results in _Reconcile.', chatId);
-          return HtmlService.createHtmlOutput('OK');
+          if (isPdf) {
+            // Fail closed on an unreadable classification: never route a receipt
+            // to the statement importer merely because a model request failed.
+            receiptExtraction = extractReceiptItems([docMediaObj]);
+          }
+          if (receiptExtraction && receiptExtraction.document_type === 'itemized_receipt') {
+            inputs.push(docMediaObj);
+          } else if (isCsv || receiptExtraction && ['bank_statement', 'bank_screenshot'].includes(receiptExtraction.document_type)) {
+            const blob = Utilities.newBlob(Utilities.base64Decode(docMediaObj.inlineData.data), targetMime, doc.file_name || (isPdf ? 'statement.pdf' : 'statement.csv'));
+            enqueueStatementFile(blob, doc.file_unique_id || doc.file_id);
+            sendTelegramMessage('📥 Statement queued in the Drive inbox. Use 💰 Budget → Reconcile statements from Drive, or wait for the automatic scan; review the results in _Reconcile.', chatId);
+            return HtmlService.createHtmlOutput('OK');
+          } else {
+            sendTelegramMessage('This PDF is neither a readable itemized receipt nor a bank statement. Please send a clearer copy.', chatId);
+            return HtmlService.createHtmlOutput('OK');
+          }
         } else {
           const warningUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
           fetchWithRetry(warningUrl, {
@@ -226,7 +248,7 @@ function doPost(e) {
             contentType: 'application/json',
             payload: JSON.stringify({
               chat_id: chatId,
-              text: "⚠️ Unsupported file format. Please send a PDF or CSV bank statement."
+              text: "⚠️ Unsupported file format. Please send a receipt image/PDF or a PDF/CSV bank statement."
             }),
             muteHttpExceptions: true
           });
@@ -272,7 +294,8 @@ function doPost(e) {
 
           const context = {
             defaultAccount: DEFAULT_ACCOUNT,
-            previous_proposal: previousProposal
+            previous_proposal: previousProposal,
+            receipt_extraction: receiptExtraction
           };
 
           // Phase 2: AI Multimodal Extraction & Phase 1 Enrichment
@@ -370,11 +393,15 @@ function mergeScreenshotProposals(previous, incoming) {
     normaliseWhere(txn.where || ''), String(txn.type || ''), String(txn.card_last4 || txn.cardholder || ''),
     (txn.flags || []).includes('papa_charge') || /grandparents/i.test(String(txn.notes || ''))]);
   const remaining = new Map();
-  previous.forEach(txn => { const id = key(txn); remaining.set(id, (remaining.get(id) || 0) + 1); });
+  previous.forEach(txn => { const id = key(txn); if (!remaining.has(id)) remaining.set(id, []); remaining.get(id).push(txn); });
   const merged = previous.slice();
   incoming.forEach(txn => {
-    const id = key(txn), count = remaining.get(id) || 0;
-    if (count) remaining.set(id, count - 1);
+    const id = key(txn), matches = remaining.get(id) || [];
+    if (matches.length) {
+      const old = matches.shift();
+      if (txn.receipt_capture && !old.receipt_capture) old.receipt_capture = txn.receipt_capture;
+      if (txn.receipt_capture_warning && !old.receipt_capture) old.receipt_capture_warning = txn.receipt_capture_warning;
+    }
     else merged.push(txn);
   });
   return merged;

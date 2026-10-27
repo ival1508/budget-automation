@@ -184,6 +184,26 @@ function extractTransactions(inputs, context) {
   const enrichmentStarted = Date.now();
   const categoryBucketMap = typeof getCategoryBucketMap === 'function' ? getCategoryBucketMap() : null;
   let enrichedTransactions = rawParsedTransactions.map(rawTxn => enrichTransaction(rawTxn, categoryBucketMap));
+  // The transaction model cannot supply item history. Only the separate visual
+  // receipt pass may attach it, and only after an unambiguous parent match.
+  enrichedTransactions.forEach(txn => { delete txn.receipt_capture; delete txn.receipt_capture_warning; });
+  if (Array.isArray(ctx.previous_proposal)) {
+    enrichedTransactions.forEach(txn => {
+      const previous = ctx.previous_proposal.filter(old => old.receipt_capture &&
+        old.dedupe_key === txn.dedupe_key);
+      if (previous.length === 1) txn.receipt_capture = previous[0].receipt_capture;
+    });
+  }
+  if (enrichedTransactions.some(txn => txn.source === 'receipt')) {
+    try {
+      attachReceiptCaptures(enrichedTransactions, ctx.receipt_extraction || extractReceiptItems(rawInputs, undefined, enrichedTransactions));
+    } catch (error) {
+      Logger.log('Receipt item extraction unavailable: ' + error.message);
+      enrichedTransactions.filter(txn => txn.source === 'receipt' && !txn.receipt_capture).forEach(txn => {
+        txn.receipt_capture_warning = 'Receipt items were not captured; the transaction can still be saved.';
+      });
+    }
+  }
   if (typeof flagExistingDuplicates === 'function') {
     enrichedTransactions = flagExistingDuplicates(enrichedTransactions);
   }

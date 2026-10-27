@@ -186,7 +186,13 @@ function repairTransactionDerivedFormulas(ss) {
  * @return {Object} Result summary { writtenCount, skippedCount, writtenRows, dryRun }.
  */
 function appendTransactions(transactionsArray, ss, optDryRun) {
-  return withBudgetWriteLock(() => appendTransactionsUnlocked(transactionsArray, ss, optDryRun));
+  return withBudgetWriteLock(() => {
+    const result = appendTransactionsUnlocked(transactionsArray, ss, optDryRun);
+    if (!Array.isArray(transactionsArray) || !transactionsArray.length) return result;
+    const dryRun = typeof optDryRun === 'boolean' ? optDryRun : Boolean(SHEET_FACTS.DRY_RUN);
+    return dryRun || typeof captureReceiptItemsAfterWrite !== 'function' ? result :
+      captureReceiptItemsAfterWrite(transactionsArray || [], result, ss);
+  });
 }
 
 function appendTransactionsUnlocked(transactionsArray, ss, optDryRun) {

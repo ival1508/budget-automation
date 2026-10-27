@@ -13,6 +13,12 @@
 
 Current evidence and the prioritized closure list are in the [Phase 2 progress review](phase-2-progress-review-2026-10-28.md). The corrected cash-coverage follow-up uses version 93 with 33 application files. The current regression run passes 270 tests and 556 existing assertions; all `.gs` files parse. Eight native funding-period checks also pass. Version 92's payroll-availability assumption was incorrect and is superseded. These checks do not establish current trigger execution or Telegram receipt.
 
+**Later 28 October follow-up:** Stage 7A capture is deployed as version **94**,
+with **34 matching application files**, **292 passing offline tests** and 556
+existing assertions. Cash-coverage behavior remains corrected. Actual receipt
+accuracy/first-capture acceptance is pending; Part B is deferred by Val's choice.
+See [Stage 7A](stage-7a-receipt-capture.md).
+
 **The five reproduced reliability findings are corrected in source and regression-tested.** The configured Apps Script editor project has received the source fixes. The PRD now records the implemented matching, credit and additional-occurrence policies below. Item 1 of the [implementation review](implementation-review-2026-09-16.md) is closed in source/documentation. **Item 2's real sandbox acceptance and the live webhook deployment update are also complete, confirmed by Val on 16 September 2026.** This completion record uses Val's explicit confirmation; no new cloud execution or independent evidence review was performed while recording it.
 
 | Reliability gap | Implemented outcome |
@@ -34,11 +40,11 @@ Current evidence and the prioritized closure list are in the [Phase 2 progress r
 | 4 — Payment calendar | Parts A–C implemented and deployed; live Calendar has 12 active obligations. Deterministic matching, overdue/upcoming sets and weekly delivery are wired. | Stage 6 notes retain the Stage 4 acceptance deferral. Verify native preview, date/amount choices and real weekly delivery before closing it. Optional same-day alerts are disabled; no G write-back. |
 | 5 — Monthly coach | Evidence-based category/purchase review, historical target proposals and complete multipart delivery are implemented and deployed. | Record native preview/sheet comparison and real reminder → multipart review delivery to both users, including retry acceptance. Offline/snapshot evidence already passes. |
 | 6 — Month creation | Controlled creator, yearless/dated readers, current-month recovery and last-day scheduling are deployed with creationEnabled=true. A successful live November trial was recorded on 25 Oct. Summary's month dependency is resolved by native cash-coverage formulas. | November is absent in the current workbook. The current October template passes a read-only November plan. Verify the first eligible heartbeat on 31 Oct from 00:00 SGT, final formulas and repeat-call no-op. Cross-year creation is deliberately refused. |
-| 7 — Receipt items | Transaction capture exists. | LineItems/Products storage, item capture and Basket Review are not built. |
+| 7 — Receipt items | Part A implemented: separate receipt extraction, LineItems/Products, confirmed-parent linkage, reconciliation and read-only `/items` status. | Real receipt OCR/brand/unit acceptance remains open. Part B Basket Review is deferred until capture history accumulates, as Val confirmed on 28 Oct. |
 
 **Editor sync:** `clasp push` succeeded, uploading 24 files including the Sheets preview. **Live webhook deployment update: complete — Val confirmed the existing deployment was updated to a new version on 16 September 2026.** Required secret/allowlist settings and both enabled users' membership remain operational requirements. The deployed version number and cloud artifacts were not inspected during this documentation update. Actual daily/monthly coaching delivery acceptance remains separate Stage 2/5 work.
 
-The 136-test and 24-file figures above describe the September checkpoint. The October comparison at the start of this section supersedes its deployment/sync uncertainty.
+The 136-test and 24-file figures above describe the September checkpoint. The October comparisons at the start of this section supersede its deployment/sync uncertainty; the Stage 7A follow-up is the latest source/deployment checkpoint.
 
 ---
 
@@ -552,6 +558,14 @@ The 11 actual `Обязательные расходы` labels (from `D3:D13`, v
 > **Build the capture half early.** Analysis only becomes useful after ~4–8 weeks of item history, so **Part A (capture) is worth shipping alongside Stage 2** even though Part B (analysis) lands here. Start banking data as early as possible; the insight arrives later either way.
 
 ### Part A — Capture (extend the Phase‑1 ingestion path)
+
+**Implemented 28 October:** receipt-only visual pass, product catalog matching,
+append-only item history linked to the approved ledger key, deterministic totals
+and unit prices, duplicate/retry handling and read-only capture status. The
+292-test regression run includes 22 capture checks; actual receipt accuracy
+acceptance remains open. `/items` currently shows capture status. Val chose to
+defer Part B's Basket Review until history accumulates. See
+[Stage 7A implementation](stage-7a-receipt-capture.md).
 
 1. **Only for real receipts.** Line items exist on **receipt photos/PDFs**, not on bank screenshots or typed text. Detect input type: if it's an itemized receipt, run the line‑item extraction pass; otherwise skip silently — never fabricate items.
 2. **Extraction schema** (a second Gemini schema alongside `extract_transactions`):

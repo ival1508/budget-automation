@@ -54,7 +54,10 @@ function getSystemPrompt(context) {
 
   let previousProposalText = '';
   if (Array.isArray(ctx.previous_proposal) && ctx.previous_proposal.length > 0) {
-    previousProposalText = `\n### PREVIOUS PROPOSAL CONTEXT (ROLLING EXTRACTION):\nThe user currently has an active pending proposal with the following transaction(s):\n${JSON.stringify(ctx.previous_proposal, null, 2)}\n\nINSTRUCTION FOR MERGING & CORRECTIONS:\n1. If the user's input is a conversational text edit (e.g., "change Grab to 15.20", "delete row 2"), apply those corrections to the previous proposal.\n2. If the user's input is a NEW IMAGE (e.g., part of an album sequence): EXTRACT ALL transactions from the new image, and MERGE them with the previous proposal.\n3. KEEP all unedited/existing items intact from the previous proposal.\n4. DEDUPLICATE: If overlapping transactions appear in both the new image and the previous proposal, deduplicate them so each unique transaction is listed only ONCE.\n5. Return the updated complete ParsedTransaction[] array.\n`;
+    const previous = ctx.previous_proposal.map(txn => {
+      const copy = Object.assign({}, txn); delete copy.receipt_capture; delete copy.receipt_capture_warning; return copy;
+    });
+    previousProposalText = `\n### PREVIOUS PROPOSAL CONTEXT (ROLLING EXTRACTION):\nThe user currently has an active pending proposal with the following transaction(s):\n${JSON.stringify(previous, null, 2)}\n\nINSTRUCTION FOR MERGING & CORRECTIONS:\n1. If the user's input is a conversational text edit (e.g., "change Grab to 15.20", "delete row 2"), apply those corrections to the previous proposal.\n2. If the user's input is a NEW IMAGE (e.g., part of an album sequence): EXTRACT ALL transactions from the new image, and MERGE them with the previous proposal.\n3. KEEP all unedited/existing items intact from the previous proposal.\n4. DEDUPLICATE: If overlapping transactions appear in both the new image and the previous proposal, deduplicate them so each unique transaction is listed only ONCE.\n5. Return the updated complete ParsedTransaction[] array.\n`;
   }
 
   return `You are an expert financial transaction extraction system for a personal budget ledger.
@@ -154,6 +157,7 @@ ${previousProposalText}
    - CRITICAL: You MUST process EVERY single image/document provided in the payload. Do not stop after the first image.
    - Scan through each "[Start of Attached Image/Document]" part and extract ALL transactions from ALL images.
    - If overlapping transactions appear in multiple screenshots (e.g., at the seam of consecutive scrolling screenshots), deduplicate them so each unique transaction is listed only ONCE.
+   - An itemized receipt photo or PDF is ONE transaction per purchase, with source "receipt" and the final amount due. Do not turn its individual products, subtotals, tax, tender or change into separate financial transactions. Product extraction is handled separately.
 
 8. CONFIDENCE & REVIEW:
    - Provide confidence float scores (0.0 to 1.0) for amount, date, and category.

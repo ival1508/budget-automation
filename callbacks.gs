@@ -103,7 +103,8 @@ function handleCallbackQuery(callbackQuery) {
 
     const summaryHeader = `<b>✅ Logged to Sheet!</b> (${result.writtenCount} added${result.skippedCount > 0 ? `, ${result.skippedCount} duplicate skipped` : ''})\n\n`;
     const updatedBody = formatTransactionConfirmationHtml(transactions);
-    const finalMessage = summaryHeader + updatedBody.replace('Tap <b>Approve All</b> to log into Budget 2026, <b>Edit</b> to modify, or <b>Discard</b> to cancel.', '');
+    const finalMessage = summaryHeader + updatedBody.replace('Tap <b>Approve All</b> to log into Budget 2026, <b>Edit</b> to modify, or <b>Discard</b> to cancel.', '') +
+      (typeof receiptCaptureSummary === 'function' ? receiptCaptureSummary(result) : '');
 
     editTelegramMessage(chatId, messageId, finalMessage, null);
     clearPendingTransactions(token);
@@ -344,7 +345,8 @@ function handleCallbackQuery(callbackQuery) {
       sendTelegramMessage("⚠️ Transactions saved, but rule recording or recap failed. Please review before relying on the new rules.", chatId);
       }
       
-      sendDiscardedMessage(chatId, messageId, '✅ <b>Logged to Sheet!</b> (Includes forced duplicates)');
+      sendDiscardedMessage(chatId, messageId, '✅ <b>Logged to Sheet!</b> (Includes forced duplicates)' +
+        (typeof receiptCaptureSummary === 'function' ? receiptCaptureSummary(writeResult) : ''));
       clearPendingTransactions(token);
       finishTelegramProposalComment(chatId, token);
     }
@@ -367,18 +369,22 @@ function handleCallbackQuery(callbackQuery) {
         }
       }
       
+      let itemResult = { writtenCount: 0, skippedCount: skippedCount };
       if (cleanToLog.length > 0) {
         const writeResult = appendTransactions(cleanToLog, undefined, false);
+        itemResult = writeResult;
         try {
           updateMerchantLearningStore(cleanToLog, chatId, writeResult);
         } catch (e) {
           Logger.log(`Warning: Failed to update merchant learning store: ${e.message}`);
       sendTelegramMessage("⚠️ Transactions saved, but rule recording or recap failed. Please review before relying on the new rules.", chatId);
         }
-        sendDiscardedMessage(chatId, messageId, `✅ <b>Logged clean items!</b> (${skippedCount} duplicate(s) skipped)`);
-      } else {
-        sendDiscardedMessage(chatId, messageId, '🗑️ All items were duplicates and skipped. Nothing logged.');
       }
+      if (typeof captureSkippedReceiptItems === 'function') captureSkippedReceiptItems(transactions, itemResult);
+      sendDiscardedMessage(chatId, messageId, (cleanToLog.length
+        ? `✅ <b>Logged clean items!</b> (${skippedCount} duplicate(s) skipped)`
+        : 'All duplicate transactions skipped; no new ledger rows.') +
+        (typeof receiptCaptureSummary === 'function' ? receiptCaptureSummary(itemResult) : ''));
       clearPendingTransactions(token);
       finishTelegramProposalComment(chatId, token);
     }
@@ -438,8 +444,10 @@ function handleCallbackQuery(callbackQuery) {
       }
     }
     
+    let itemResult = { writtenCount: 0, skippedCount: skippedCount };
     if (cleanToLog.length > 0) {
       const writeResult = appendTransactions(cleanToLog, undefined, false);
+      itemResult = writeResult;
       
       // Update learning store for approved items
       try {
@@ -449,11 +457,12 @@ function handleCallbackQuery(callbackQuery) {
       sendTelegramMessage("⚠️ Transactions saved, but rule recording or recap failed. Please review before relying on the new rules.", chatId);
       }
       
-      const msg = `✅ <b>Logged to Sheet!</b> (${cleanToLog.length} added${skippedCount > 0 ? `, ${skippedCount} duplicate skipped` : ''})`;
-      sendDiscardedMessage(chatId, messageId, msg);
-    } else {
-      sendDiscardedMessage(chatId, messageId, '🗑️ All items were skipped as duplicates. Nothing logged.');
     }
+    if (typeof captureSkippedReceiptItems === 'function') captureSkippedReceiptItems(transactions, itemResult);
+    const msg = cleanToLog.length
+      ? `✅ <b>Logged to Sheet!</b> (${cleanToLog.length} added${skippedCount > 0 ? `, ${skippedCount} duplicate skipped` : ''})`
+      : 'All duplicate transactions skipped; no new ledger rows.';
+    sendDiscardedMessage(chatId, messageId, msg + (typeof receiptCaptureSummary === 'function' ? receiptCaptureSummary(itemResult) : ''));
     
     clearPendingTransactions(token);
     finishTelegramProposalComment(chatId, token);
@@ -471,8 +480,7 @@ function handleCallbackQuery(callbackQuery) {
  * @param {Array<Object>} transactions - Updated transactions array.
  */
 function updateCachedTransactions(token, transactions) {
-  const cache = CacheService.getScriptCache();
-  cache.put(token, JSON.stringify(transactions), 21600); // 6 hours
+  savePendingTransactions(transactions, token);
 }
 
 /**

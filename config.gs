@@ -58,6 +58,8 @@ const SHEET_FACTS = {
   CORE_TABS: {
     TRANSACTIONS: 'Transactions',
     MERCHANTS: 'Merchants',
+    LINE_ITEMS: 'LineItems',
+    PRODUCTS: 'Products',
     CALENDAR: 'Calendar',
     BUDGET_50_30_20: '50/30/20',
     REFERENCE: '-',

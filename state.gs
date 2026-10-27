@@ -32,8 +32,21 @@ function savePendingTransactions(transactionsArray, existingToken) {
   const token = existingToken || Utilities.getUuid().substring(0, 8);
   const cache = CacheService.getScriptCache();
   const jsonPayload = JSON.stringify(transactionsArray);
-
-  cache.put(token, jsonPayload, CACHE_EXPIRATION_SECONDS);
+  // Receipt detail can exceed CacheService's 100KB per-value limit. Keep each
+  // chunk below 72KB even with four-byte characters; publish the manifest last.
+  if (jsonPayload.length <= 18000) cache.put(token, jsonPayload, CACHE_EXPIRATION_SECONDS);
+  else {
+    if (jsonPayload.length > 720000) throw new Error('This proposal is too large. Please approve a smaller receipt batch.');
+    const revision = Utilities.getUuid();
+    let chunks = 0;
+    for (let offset = 0; offset < jsonPayload.length;) {
+      let end = Math.min(offset + 18000, jsonPayload.length);
+      if (end < jsonPayload.length && /[\uD800-\uDBFF]/.test(jsonPayload[end - 1])) end--;
+      cache.put(token + ':' + revision + ':' + chunks++, jsonPayload.slice(offset, end), CACHE_EXPIRATION_SECONDS);
+      offset = end;
+    }
+    cache.put(token, JSON.stringify({ pending_chunks: chunks, revision: revision }), CACHE_EXPIRATION_SECONDS);
+  }
   Logger.log(`Saved pending state with token: ${token} (${transactionsArray.length} transaction(s), expires in 6h).`);
 
   return token;
@@ -62,7 +75,17 @@ function getPendingTransactions(token) {
   }
 
   try {
-    return JSON.parse(cachedJson);
+    const parsed = JSON.parse(cachedJson);
+    if (Array.isArray(parsed)) return parsed;
+    if (!parsed || !Number.isInteger(parsed.pending_chunks) || parsed.pending_chunks < 1 || parsed.pending_chunks > 41 || typeof parsed.revision !== 'string') return null;
+    let json = '';
+    for (let i = 0; i < parsed.pending_chunks; i++) {
+      const part = cache.get(token + ':' + parsed.revision + ':' + i);
+      if (part === null || part === undefined) return null;
+      json += part;
+    }
+    const transactions = JSON.parse(json);
+    return Array.isArray(transactions) ? transactions : null;
   } catch (e) {
     Logger.log(`Failed to parse cached transaction state for token "${token}": ${e.message}`);
     return null;

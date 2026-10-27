@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '..');
 const sourceFiles = ['constants.gs', 'config.gs', 'bootstrap.gs', 'calendar.gs', 'mandatory.gs', 'mandatoryCalendar.gs', 'monthlyInsights.gs', 'reader.gs', 'enricher.gs',
-  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'testStage3G.gs', 'coach.gs', 'nudge.gs', 'state.gs', 'proposalEdits.gs', 'webhook.gs', 'callbacks.gs', 'monthCreation.gs', 'cashCoverage.gs'];
+  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'testStage3G.gs', 'coach.gs', 'nudge.gs', 'state.gs', 'proposalEdits.gs', 'webhook.gs', 'callbacks.gs', 'monthCreation.gs', 'cashCoverage.gs', 'receiptItems.gs'];
 function parseCsv(text) {
   const rows = []; let row = [], value = '', quoted = false;
   for (let i = 0; i < text.length; i++) {
@@ -226,6 +226,9 @@ class Sheet {
   getLastRow() { return this.data.length; }
   getLastColumn() { return Math.max(0, ...this.data.map(r => r.length)); }
   getMaxRows() { return 100; }
+  getMaxColumns() { return 40; }
+  insertColumnsAfter() {}
+  insertRowsAfter() {}
   clear() { this.data = []; }
   deleteRows(row, count) { this.data.splice(row - 1, count); }
   clearConditionalFormatRules() {}
@@ -1017,4 +1020,5 @@ require('./mandatory-regressions.cjs')(test);
 require('./mandatory-calendar-regressions.cjs')(test);
 require('./month-creation-regressions.cjs')(test);
 require('./cash-coverage-regressions.cjs')(test);
+require('./receipt-items-regressions.cjs')(test, storage);
 console.log(`${passed} tests passed; ${assertions} existing assertions checked; all .gs files parsed.`);
