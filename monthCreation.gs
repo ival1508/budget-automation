@@ -80,7 +80,8 @@ function validateMonthCreationTemplate(source) {
     requireFormula(row, 12, '=INDIRECT(ADDRESS(ROW(); COLUMN()-1))-INDIRECT(ADDRESS(ROW(); COLUMN()-2))');
     if (row > 2) requireFormula(row, 11, '=IF(INDIRECT(ADDRESS(ROW()+36; COLUMN()-2)); INDIRECT(ADDRESS(ROW()-1; COLUMN()+1))+D$17; INDIRECT(ADDRESS(ROW()-1; COLUMN()+1)))');
     if (isGeneratedTemplate) {
-      if (normal(f(row, 9)) !== normal(monthCreationDescriptionFormula(row))) {
+      if (normal(f(row, 9)) !== normal(monthCreationDescriptionFormula(row)) &&
+          normal(f(row, 9)) !== normal(monthCreationLegacyDescriptionFormula(row))) {
         throw new Error('Description formula already exists at I' + row + '; review template version.');
       }
     } else if (f(row, 9)) {
@@ -250,7 +251,7 @@ function monthCreationStatusFormula(row) {
     ';"Данные недоступны")';
 }
 
-function monthCreationDescriptionFormula(row) {
+function monthCreationLegacyDescriptionFormula(row) {
   const a = monthCreationLedgerColumn('A'), c = monthCreationLedgerColumn('C');
   const e = monthCreationLedgerColumn('E'), h = monthCreationLedgerColumn('H'), i = monthCreationLedgerColumn('I');
   return '=IFERROR(IF(OR(H' + row + '="";H' + row + '>TODAY());"";LET(dates;' + a + ';types;' + c + ';amounts;' + e + ';cats;' + h + ';merchants;' + i +
@@ -258,6 +259,27 @@ function monthCreationDescriptionFormula(row) {
     'count;SUM(selected);bad;SUM(ARRAYFORMULA(selected*(1-ISNUMBER(amounts))));' +
     'IF(bad>0;"Данные недоступны";IF(count=0;"Нет расходов";' +
     'TEXTJOIN("; ";TRUE;FILTER(ARRAYFORMULA(IF(merchants<>"";merchants;IF(cats<>"";cats;"Без описания"))&" — S$"&TEXT(amounts;"0.00"));selected))))));"Данные недоступны")';
+}
+
+/** One largest transaction, then up to three categories ranked by remaining net SGD spend. */
+function monthCreationDescriptionFormula(row) {
+  const a = monthCreationLedgerColumn('A'), c = monthCreationLedgerColumn('C');
+  const e = monthCreationLedgerColumn('E'), h = monthCreationLedgerColumn('H'), i = monthCreationLedgerColumn('I');
+  return '=IFERROR(IF(OR(H' + row + '="";H' + row + '>TODAY());"";LET(dates;' + a + ';types;' + c + ';amounts;' + e + ';cats;' + h + ';merchants;' + i +
+    ';selected;ARRAYFORMULA((dates=H' + row + ')*(types="Расходы")*(cats<>"Отложения")*(cats<>"Аренда"));' +
+    'count;SUM(selected);bad;SUM(ARRAYFORMULA(selected*(1-ISNUMBER(amounts))));' +
+    'IF(bad>0;"Данные недоступны";IF(count=0;"Нет расходов";LET(' +
+    'charges;FILTER(amounts;selected);labels;FILTER(ARRAYFORMULA(IF(merchants<>"";merchants;IF(cats<>"";cats;"Без описания")));selected);' +
+    'categories;FILTER(ARRAYFORMULA(IF(cats<>"";cats;"Uncategorized"));selected);' +
+    'largest;MATCH(MAX(charges);charges;0);headline;INDEX(labels;largest)&" (S$"&TEXT(INDEX(charges;largest);"0.00")&").";' +
+    'IF(count=1;headline;LET(remaining;SEQUENCE(count)<>largest;' +
+    'restcats;FILTER(categories;remaining);restamounts;FILTER(charges;remaining);distinctcats;UNIQUE(restcats);' +
+    'totals;MAP(distinctcats;LAMBDA(category;SUM(FILTER(restamounts;restcats=category))));' +
+    'ranked;SORT(HSTACK(distinctcats;totals);2;FALSE;1;TRUE);' +
+    'topcats;ARRAY_CONSTRAIN(ranked;MIN(3;ROWS(distinctcats));1);' +
+    'categorycount;ROWS(topcats);categorytext;IF(categorycount=1;INDEX(topcats;1);IF(categorycount=2;TEXTJOIN(" and ";TRUE;topcats);' +
+    'INDEX(topcats;1)&", "&INDEX(topcats;2)&", and "&INDEX(topcats;3)));' +
+    'headline&" The rest was mainly "&categorytext&".")))))));"Данные недоступны")';
 }
 
 /** Pure planner. Snapshot supplies read-only cell values/formulas and workbook year. */

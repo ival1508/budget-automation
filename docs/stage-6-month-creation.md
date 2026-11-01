@@ -262,15 +262,20 @@ ordinary month creation; an existing month remains a no-op.
 
 ### I2:I32 — descriptions generated from each day's spending
 
-- Prefer native formulas producing factual Russian descriptions, without an LLM.
-  Example shape: `FairPrice — S$85.20; Grab — S$18.00`.
-- Include the day's ordinary spending from Transactions, with merchant (I),
-  category (H) as fallback, and SGD amount (E). Match the adjacent J formula's
-  date/type/category filters exactly, including its existing exclusions, so the
-  description explains the same spending shown beside it.
-- Include all matching occurrences, refunds and later edits; never silently
-  discard smaller transactions. Multiple purchases at the same merchant remain
-  distinguishable. No transactions on a reached day: `Нет расходов`.
+- Use native formulas for a concise daily summary, without an LLM. Show the
+  largest individual transaction as `Merchant (S$308.29).`, followed, when other
+  transactions exist, by `The rest was mainly groceries, restaurants, and shopping.`
+- Rank up to three distinct remaining categories by their net SGD amounts,
+  descending, with category name as the tie-breaker. Use actual ledger category
+  labels, with `Uncategorized` for blanks. Join two labels with “and” and three
+  with commas and “and”. Do not infer categories from merchant names.
+- Select the largest signed SGD transaction; ties use the first ledger occurrence.
+  Exclude only that occurrence from category totals, preserving duplicates and
+  signed refunds in the remaining totals. Refund-only days retain signed amounts.
+- Match the adjacent J formula's date/type/category filters exactly, including
+  exclusions. Merchant falls back to category, then `Без описания`. No matching
+  transactions on a reached day: `Нет расходов`. Invalid amounts surface an error.
+- This is a summary; all individual purchases remain available in Transactions.
 - Future days and nonexistent short-month dates remain blank. Do not suggest
   that an empty future date is a verified zero-spend day.
 - Use bounded, adequately sized ledger ranges or a shared helper to avoid 31
@@ -428,3 +433,7 @@ audit of every possible reference to I38.
 - Follow-up: accepted live G payment status, generated daily I descriptions and
   exact I38 replacement. Updated 6B and sandbox criteria; runtime implementation
   and live installation remain pending.
+
+Column I summary version: newly generated tabs use the largest-transaction plus
+remaining-category format. Existing full-list formula tabs remain valid templates;
+creation writes the new format into the new tab without migrating older tabs.

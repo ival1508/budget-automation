@@ -264,11 +264,28 @@ module.exports = test => {
     assert.match(f,/Частично/);assert.match(f,/Данные недоступны/);assert.match(f,/ISNUMBER\(amounts\)/);
     assert.match(f,/ROWS\(Transactions!\$A:\$A\)/);assert.match(f,/LOWER\(TRIM\(cats\)\)/);
   });
-  test('Stage 6B: description formulas retain all occurrences, refunds and spending exclusions', c => {
+  test('Stage 6B: description formulas summarize the largest occurrence and rank remaining categories', c => {
     const f=c.monthCreationDescriptionFormula(32);
     assert.match(f,/dates=H32/);assert.match(f,/types="Расходы"/);assert.match(f,/cats<>"Отложения"/);assert.match(f,/cats<>"Аренда"/);
     assert.match(f,/H32>TODAY/);assert.match(f,/Нет расходов/);assert.match(f,/TEXTJOIN/);assert.match(f,/FILTER/);
-    assert.doesNotMatch(f,/UNIQUE|SORTN|amounts>0/);
+    assert.match(f,/largest;MATCH\(MAX\(charges\);charges;0\)/);
+    assert.match(f,/remaining;SEQUENCE\(count\)<>largest/);
+    assert.match(f,/SUM\(FILTER\(restamounts;restcats=category\)\)/);
+    assert.match(f,/SORT\(HSTACK\(distinctcats;totals\);2;FALSE;1;TRUE\)/);
+    assert.match(f,/MIN\(3;ROWS\(distinctcats\)\)/);
+    assert.match(f,/IF\(count=1;headline/);
+    assert.match(f,/The rest was mainly/);
+    assert.doesNotMatch(f,/amounts>0/);
+  });
+  test('Stage 6B: previous full-list descriptions remain valid source templates', c => {
+    const s = fixture(), source = s.sheets[0];
+    source.formulas[37][8] = '=H38<=$D$1';
+    source.formulas[5][1] = c.monthCreationLightIncomeFormula();
+    for (let row = 2; row <= 32; row++) source.formulas[row - 1][8] = c.monthCreationLegacyDescriptionFormula(row);
+    const plan = c.buildMonthCreationPlan(s, 2026, 11);
+    assert.equal(plan.edits.find(e => e.range === 'I2:I32').formulas[0][0], c.monthCreationDescriptionFormula(2));
+    source.formulas[1][8] = '=0';
+    assert.throws(() => c.buildMonthCreationPlan(s, 2026, 11), /Description formula/);
   });
   test('Stage 6B: generated formula syntax has balanced parentheses and string literals', c => {
     const p=c.buildMonthCreationPlan(fixture(),2026,11);
