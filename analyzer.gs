@@ -477,7 +477,9 @@ function narrateBasketReview(report) {
       contents: [{ parts: [{ text: JSON.stringify(report.findings.map(finding => ({ id: finding.id, fact: finding.statement, actions: finding.actions }))) }] }],
       generationConfig: { temperature: 0.1, responseMimeType: 'application/json', responseSchema: { type: 'OBJECT', properties: {
         choices: { type: 'ARRAY', items: { type: 'OBJECT', properties: { id: { type: 'STRING' }, action_index: { type: 'INTEGER' } }, required: ['id', 'action_index'] } }
-      }, required: ['choices'] } } }, key, typeof COACH_MODEL_ID === 'string' ? COACH_MODEL_ID : undefined);
+      }, required: ['choices'] } } }, key,
+      typeof COACH_MODEL_ID === 'string' ? COACH_MODEL_ID : undefined,
+      typeof GEMINI_COACH_FALLBACKS !== 'undefined' ? GEMINI_COACH_FALLBACKS : undefined);
     const envelope = JSON.parse(typeof response === 'object' ? response.text : response), candidate = envelope.candidates && envelope.candidates[0];
     if (!candidate || candidate.finishReason && candidate.finishReason !== 'STOP') return fallback;
     const parsed = JSON.parse(candidate.content.parts.filter(part => !part.thought && typeof part.text === 'string').map(part => part.text).join(''));

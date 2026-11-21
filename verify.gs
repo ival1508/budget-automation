@@ -322,9 +322,10 @@ function verifyStages012() {
 
   // 4. Model Config
   assert(typeof GEMINI_MODEL_ID !== 'undefined' && GEMINI_MODEL_ID === 'gemini-3.5-flash-lite' &&
+         typeof TRANSACTION_MODEL_ID !== 'undefined' && TRANSACTION_MODEL_ID === 'gemini-4-hydrogen' &&
          typeof BACKUP_MODEL_1 !== 'undefined' && BACKUP_MODEL_1 === 'gemini-3.6-flash' &&
-         typeof BACKUP_MODEL_2 !== 'undefined' && BACKUP_MODEL_2 === 'gemini-3.7-flash',
-         'Gemini model constants: 3.5-flash-lite (default primary) -> 3.6-flash (b1) -> 3.7-flash (b2)',
+         typeof BACKUP_MODEL_2 !== 'undefined' && BACKUP_MODEL_2 === 'gemini-3.8-flash',
+         'Gemini model constants: distinct 4-pool setup (3.5-flash-lite, 4-hydrogen, 3.6-flash, 3.8-flash)',
          `Config: Primary=${typeof GEMINI_MODEL_ID !== 'undefined' ? GEMINI_MODEL_ID : 'undefined'}`);
 
   // 5. Generate Coach Brief

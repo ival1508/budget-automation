@@ -111,8 +111,8 @@ function parseCsvStatement(csvText, fileName) {
     return citiResult;
   }
 
-  // C. Fallback to Gemini 3.7 Flash for unknown CSV layouts
-  Logger.log('⚠️ [FALLBACK ACTIVE] CSV layout did not match DBS or Citibank templates. Falling back to gemini-3.7-flash for statement parsing.');
+  // C. Fallback to Gemini intake chain for unknown CSV layouts
+  Logger.log('⚠️ [FALLBACK ACTIVE] CSV layout did not match DBS or Citibank templates. Falling back to Gemini intake chain for statement parsing.');
   return parseCsvWithGeminiFallback(csvText, fileName);
 }
 
@@ -605,11 +605,16 @@ ${csvText.slice(0, 50000)}
   };
 
   try {
-    const apiResult = callGeminiApiWithRetry(payload, apiKey, 'gemini-3.7-flash');
+    const stmtPrimary = typeof TRANSACTION_MODEL_ID !== 'undefined' ? TRANSACTION_MODEL_ID : 'gemini-4-hydrogen';
+    const stmtFallbacks = typeof GEMINI_INTAKE_FALLBACKS !== 'undefined' ? GEMINI_INTAKE_FALLBACKS : undefined;
+    const apiResult = callGeminiApiWithRetry(payload, apiKey, stmtPrimary, stmtFallbacks);
     const responseText = (typeof apiResult === 'object') ? apiResult.text : apiResult;
     const responseJson = JSON.parse(responseText);
     const candidate = responseJson.candidates && responseJson.candidates[0];
-    const textOutput = candidate && candidate.content && candidate.content.parts && candidate.content.parts[0].text;
+    const parts = candidate && candidate.content && candidate.content.parts;
+    const textOutput = Array.isArray(parts)
+      ? parts.filter(part => !part.thought && typeof part.text === 'string').map(part => part.text).join('')
+      : '';
     const parsedData = JSON.parse(textOutput);
 
     const rawTxns = Array.isArray(parsedData) ? parsedData : (parsedData.transactions || parsedData.rows || []);
@@ -656,7 +661,7 @@ ${csvText.slice(0, 50000)}
 // ============================================================================
 
 /**
- * Parses PDF bank statement with encryption check and Gemini 3.7 Flash extraction.
+ * Parses PDF bank statement with encryption check and Gemini intake extraction.
  * 
  * @param {Object} fileDetails - File details { text, bytes, mimeType, name }.
  * @return {Object} Parsed statement result { account, rows[], period, error? }.
@@ -729,11 +734,16 @@ RULES:
   };
 
   try {
-    const apiResult = callGeminiApiWithRetry(payload, apiKey, 'gemini-3.7-flash');
+    const stmtPrimary = typeof TRANSACTION_MODEL_ID !== 'undefined' ? TRANSACTION_MODEL_ID : 'gemini-4-hydrogen';
+    const stmtFallbacks = typeof GEMINI_INTAKE_FALLBACKS !== 'undefined' ? GEMINI_INTAKE_FALLBACKS : undefined;
+    const apiResult = callGeminiApiWithRetry(payload, apiKey, stmtPrimary, stmtFallbacks);
     const responseText = (typeof apiResult === 'object') ? apiResult.text : apiResult;
     const responseJson = JSON.parse(responseText);
     const candidate = responseJson.candidates && responseJson.candidates[0];
-    const textOutput = candidate && candidate.content && candidate.content.parts && candidate.content.parts[0].text;
+    const parts = candidate && candidate.content && candidate.content.parts;
+    const textOutput = Array.isArray(parts)
+      ? parts.filter(part => !part.thought && typeof part.text === 'string').map(part => part.text).join('')
+      : '';
     const parsedData = JSON.parse(textOutput);
 
     if (parsedData.error === 'encrypted') {
@@ -3029,9 +3039,10 @@ Only valid JSON matching this schema, no markdown code fences or other commentar
   const startTime = Date.now();
 
   try {
+    const tier3Fallbacks = typeof GEMINI_ROUTING_FALLBACKS !== 'undefined' ? GEMINI_ROUTING_FALLBACKS : undefined;
     Logger.log(`🤖 [GEMINI TIER 3] Calling Gemini batch inference for ${unknownItems.length} unknown merchant(s) (Target: ${defaultModel})...`);
     const apiResult = (typeof callGeminiApiWithRetry === 'function')
-      ? callGeminiApiWithRetry(payload, effectiveKey, defaultModel)
+      ? callGeminiApiWithRetry(payload, effectiveKey, defaultModel, tier3Fallbacks)
       : null;
 
     if (!apiResult) {
@@ -3044,7 +3055,10 @@ Only valid JSON matching this schema, no markdown code fences or other commentar
     const elapsedMs = (typeof apiResult === 'object' && apiResult.elapsedTimeMs) ? apiResult.elapsedTimeMs : (Date.now() - startTime);
     const responseJson = JSON.parse(responseText);
     const candidate = responseJson.candidates && responseJson.candidates[0];
-    const textOutput = candidate && candidate.content && candidate.content.parts && candidate.content.parts[0].text;
+    const parts = candidate && candidate.content && candidate.content.parts;
+    const textOutput = Array.isArray(parts)
+      ? parts.filter(part => !part.thought && typeof part.text === 'string').map(part => part.text).join('')
+      : '';
 
     if (!textOutput) {
       Logger.log('⚠️ [GEMINI TIER 3] No text output returned by Gemini. Gracefully falling back to Tier 4.');

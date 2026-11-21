@@ -10,7 +10,7 @@ serves a specific deployed *version*. After pushing:
   Deploy → Manage deployments → ✏️ pencil → Version: New version → Deploy
 NEVER click "New deployment" — it mints a new URL and 404s the webhook.
 
-**Existing /exec URL** (version 109, merged v97–v108 + concise monthly daily spending summary deployed 21 Nov 2026; 35 application files):
+**Existing /exec URL** (version 110, 4-pool 503-resilient Gemini routing + jittered backoff deployed 21 Nov 2026; 35 application files):
 https://script.google.com/macros/s/AKfycbyhRAocN8rNBhWl3NBL7yIgStBCLIrgHfxNNOC-zt6Pa7HBvQPJ9b7tykdeu4QuMm3_/exec
 
 **Deployment settings MUST be:** Execute as = Me · Who has access = Anyone
@@ -27,6 +27,7 @@ The reported `url` must end in ?secret=...
 
 ## Script Properties required
 TELEGRAM_BOT_TOKEN · GEMINI_API_KEY · WEBHOOK_SECRET · AUTHORIZED_CHAT_IDS
+*(Optional)* `GEMINI_SERVICE_TIER=priority` (for paid/prepaid Gemini API keys; automatically downgrades to standard if rejected)
 
 The webhook requires a nonblank `WEBHOOK_SECRET` and a nonempty comma-separated
 `AUTHORIZED_CHAT_IDS` list of Telegram chat IDs. A chat must **both** appear in
@@ -93,7 +94,7 @@ trusted to report test output it did not execute.
 
 ## Docs
 See /docs for the PRD and the staged build prompts.
-The [28 October Phase 2 review](docs/phase-2-progress-review-2026-10-28.md) records the October checkpoint; versions 97–109 below supersede its pre-rollover items.
+The [28 October Phase 2 review](docs/phase-2-progress-review-2026-10-28.md) records the October checkpoint; versions 97–110 below supersede its pre-rollover items.
 
 ### Stage 7A & 7B — receipt item capture and Basket Review
 
@@ -101,8 +102,11 @@ Send an itemized receipt photo, image document or PDF and approve its transactio
 (or tap **🧾 Add line items** when the purchase is already recorded in `Transactions`).
 The bot stores products in `LineItems` (including printed unit prices and normalized
 pack measurements), maintains a `Products` catalog and flags totals that do not
-reconcile. Transaction intake uses `gemini-4-hydrogen` (`thinkingLevel: LOW`) with
-`gemini-3.5-flash-lite` fallback. There is no per-product approval; transaction
+reconcile. Transaction and receipt extraction use a 4-pool distinct fallback chain
+(`gemini-4-hydrogen` → `gemini-3.6-flash` → `gemini-3.5-flash-lite` → `gemini-3.8-flash`
+at `thinkingLevel: LOW` with jittered backoff), while PDF routing and proposal edits
+start on the 10M-TPM `gemini-3.5-flash-lite` pool (`thinkingLevel: MINIMAL`/`LOW`).
+There is no per-product approval; transaction
 balances and the eleven-column ledger keep their existing contract. Bank
 screenshots and typed/voice inputs produce no item history.
 

@@ -5,73 +5,163 @@
  * Implements the Provider Interface (§7, §7.2) for Gemini Flash multimodal extraction.
  */
 
-const GEMINI_MODEL_ID = 'gemini-3.5-flash-lite'; // general default and transaction intake backup
-const TRANSACTION_MODEL_ID = 'gemini-4-hydrogen';
-const COACH_MODEL_ID  = 'gemini-3.8-flash';      // coach reasoning model
-const PROPOSAL_EDIT_FALLBACK_MODEL_ID = 'gemini-3.8-flash'; // free-text edit fallback
-const BACKUP_MODEL_1  = 'gemini-3.6-flash';      // primary fallback
-const BACKUP_MODEL_2  = 'gemini-3.7-flash';      // secondary fallback
+const GEMINI_MODEL_ID = 'gemini-3.5-flash-lite'; // 10M TPM high-throughput pool for routing, edits & Tier-3 matching
+const TRANSACTION_MODEL_ID = 'gemini-4-hydrogen'; // primary multimodal transaction & receipt extraction
+const COACH_MODEL_ID  = 'gemini-4-hydrogen';      // primary coach reasoning model
+const PROPOSAL_EDIT_FALLBACK_MODEL_ID = 'gemini-3.6-flash'; // non-congested Flash fallback
+const BACKUP_MODEL_1  = 'gemini-3.6-flash';       // primary Flash fallback
+const BACKUP_MODEL_2  = 'gemini-3.8-flash';       // secondary Flash fallback (replaces deprecated 3.7-flash alias)
+
+const GEMINI_ROUTING_FALLBACKS = [BACKUP_MODEL_1, TRANSACTION_MODEL_ID, BACKUP_MODEL_2];
+const GEMINI_INTAKE_FALLBACKS  = [BACKUP_MODEL_1, GEMINI_MODEL_ID, BACKUP_MODEL_2];
+const GEMINI_COACH_FALLBACKS   = [BACKUP_MODEL_1, BACKUP_MODEL_2, GEMINI_MODEL_ID];
+const GEMINI_BACKOFF_BASE_MS   = [750, 1500, 2500, 3000];
+
+/** Clamp thinking levels to each model's documented supported enum. */
+function normalizeGeminiThinkingLevel(modelId, requestedLevel) {
+  const upper = String(requestedLevel || 'LOW').toUpperCase();
+  const level = ['MINIMAL', 'LOW', 'MEDIUM', 'HIGH', 'XHIGH'].includes(upper) ? upper : 'LOW';
+  if (/^gemini-4/i.test(modelId)) {
+    return level === 'MINIMAL' ? 'LOW' : level;
+  }
+  if (/^gemini-3\.8/i.test(modelId)) {
+    if (level === 'MINIMAL') return 'LOW';
+    if (level === 'XHIGH') return 'HIGH';
+    return level;
+  }
+  return level === 'XHIGH' ? 'HIGH' : level;
+}
+
+function getConfiguredGeminiServiceTier() {
+  try {
+    if (typeof PropertiesService === 'undefined' || typeof PropertiesService.getScriptProperties !== 'function') return null;
+    const raw = String(PropertiesService.getScriptProperties().getProperty('GEMINI_SERVICE_TIER') || '').trim().toLowerCase();
+    return ['priority', 'standard', 'flex'].includes(raw) ? raw : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function buildGeminiRequestPayload(payload, modelId, serviceTier) {
+  const basePayload = payload || {};
+  const generationConfig = { ...(basePayload.generationConfig || {}) };
+  if (/^gemini-(?:3\.[5-9]|4)/i.test(modelId)) {
+    const requested = generationConfig.thinkingConfig && generationConfig.thinkingConfig.thinkingLevel;
+    generationConfig.thinkingConfig = {
+      ...(generationConfig.thinkingConfig || {}),
+      thinkingLevel: normalizeGeminiThinkingLevel(modelId, requested || 'LOW')
+    };
+    delete generationConfig.temperature;
+  }
+  const requestPayload = { ...basePayload, generationConfig };
+  if (serviceTier && !requestPayload.serviceTier) {
+    requestPayload.serviceTier = serviceTier;
+  }
+  return requestPayload;
+}
+
+function isGeminiTransientStatus(statusCode) {
+  return statusCode === 408 || statusCode === 429 || (statusCode >= 500 && statusCode < 600);
+}
+
+function sleepGeminiBackoff(stepIndex) {
+  if (typeof Utilities === 'undefined' || typeof Utilities.sleep !== 'function') return 0;
+  const base = GEMINI_BACKOFF_BASE_MS[Math.min(stepIndex, GEMINI_BACKOFF_BASE_MS.length - 1)];
+  const waitMs = base + Math.floor(Math.random() * 350);
+  Utilities.sleep(waitMs);
+  return waitMs;
+}
 
 /**
- * Invokes the Gemini API with automatic model fallback for HTTP 503 / 429 capacity spikes.
- * Capped at 1 attempt per model for fast failover.
- * 
+ * Invokes the Gemini API with distinct-pool fallback and jittered backoff for HTTP 503 / 429 spikes.
+ * Non-transient client errors (400/401/403/404) fail fast instead of burning backup quota.
+ *
  * @param {Object} payload - Gemini request payload object.
  * @param {string} apiKey - Gemini API key.
- * @param {string} [preferredModel] - Optional preferred model ID to attempt first (e.g. 'gemini-3.8-flash').
+ * @param {string} [preferredModel] - Optional preferred model ID to attempt first.
  * @param {Array<string>} [customFallbackList] - Optional per-call-site fallback list.
  * @return {Object} { text: string, modelUsed: string, elapsedTimeMs: number }
  */
 function callGeminiApiWithRetry(payload, apiKey, preferredModel, customFallbackList) {
   const startTime = Date.now();
-  const defaultChain = [GEMINI_MODEL_ID, BACKUP_MODEL_1, BACKUP_MODEL_2];
+  const defaultChain = [GEMINI_MODEL_ID, BACKUP_MODEL_1, TRANSACTION_MODEL_ID, BACKUP_MODEL_2];
   let modelsToTry = defaultChain;
 
   if (Array.isArray(customFallbackList) && customFallbackList.length > 0) {
     modelsToTry = preferredModel
       ? [preferredModel, ...customFallbackList.filter(m => m !== preferredModel)]
-      : customFallbackList;
+      : customFallbackList.slice();
   } else if (preferredModel) {
     modelsToTry = [preferredModel, ...defaultChain.filter(m => m !== preferredModel)];
   }
+  // Dedup while preserving order, then add one final recovery pass on the 10M-TPM Flash-Lite pool.
+  const uniqueModels = Array.from(new Set(modelsToTry.filter(Boolean)));
+  const attemptPlan = uniqueModels.length >= 2 && uniqueModels[uniqueModels.length - 1] !== GEMINI_MODEL_ID
+    ? [...uniqueModels, GEMINI_MODEL_ID]
+    : uniqueModels.length >= 2
+      ? [...uniqueModels, BACKUP_MODEL_1]
+      : uniqueModels;
 
-  const primaryModel = modelsToTry[0];
+  const primaryModel = attemptPlan[0];
+  let activeServiceTier = getConfiguredGeminiServiceTier();
   let lastError = null;
   let lastFailedStatus = null;
 
-  for (let m = 0; m < modelsToTry.length; m++) {
-    const modelId = modelsToTry[m];
+  for (let m = 0; m < attemptPlan.length; m++) {
+    const modelId = attemptPlan[m];
 
-    // Log warning when falling back to a secondary model
-    if (m > 0 && lastFailedStatus) {
-      Logger.log(`⚠️ Fell back to ${modelId} after ${primaryModel} returned ${lastFailedStatus}`);
+    if (m > 0) {
+      const sleptMs = sleepGeminiBackoff(m - 1);
+      Logger.log(`⚠️ Fell back to ${modelId} after ${lastFailedStatus || 'network_error'} (backoff=${sleptMs}ms)`);
     }
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
-    let requestPayload = payload;
-    if (modelId === TRANSACTION_MODEL_ID) {
-      const generationConfig = { ...payload.generationConfig, thinkingConfig: { thinkingLevel: 'LOW' } };
-      delete generationConfig.temperature;
-      requestPayload = { ...payload, generationConfig };
-    }
-    const options = {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(requestPayload),
-      muteHttpExceptions: true
-    };
+    let requestPayload = buildGeminiRequestPayload(payload, modelId, activeServiceTier);
 
     Logger.log(`Calling Gemini API (${modelId})...`);
     const attemptStarted = Date.now();
-    const response = UrlFetchApp.fetch(url, options);
-    const responseCode = response.getResponseCode();
-    const responseText = response.getContentText();
+    let responseCode = 0;
+    let responseText = '';
+    try {
+      let response = UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify(requestPayload),
+        muteHttpExceptions: true
+      });
+      responseCode = response.getResponseCode();
+      responseText = response.getContentText();
+
+      // If Priority tier is configured on a key/model that rejects serviceTier, downgrade to standard immediately.
+      if (activeServiceTier === 'priority' && (responseCode === 400 || responseCode === 403) &&
+          /service.?tier|priority/i.test(responseText)) {
+        Logger.log(`ℹ️ Priority serviceTier rejected on ${modelId} (${responseCode}); retrying standard tier.`);
+        activeServiceTier = null;
+        requestPayload = buildGeminiRequestPayload(payload, modelId, null);
+        response = UrlFetchApp.fetch(url, {
+          method: 'post',
+          contentType: 'application/json',
+          payload: JSON.stringify(requestPayload),
+          muteHttpExceptions: true
+        });
+        responseCode = response.getResponseCode();
+        responseText = response.getContentText();
+      }
+    } catch (fetchErr) {
+      const elapsedMs = Date.now() - startTime;
+      Logger.log(`[Proposal timing] model_request ${modelId}: ${Date.now() - attemptStarted}ms; status=NETWORK_ERROR; total=${elapsedMs}ms`);
+      Logger.log(`Gemini API (${modelId}) transport error: ${fetchErr.message}`);
+      lastError = new Error(`Gemini API transport error on ${modelId}: ${fetchErr.message}`);
+      lastFailedStatus = 'NETWORK_ERROR';
+      continue;
+    }
+
     const elapsedMs = Date.now() - startTime;
     Logger.log(`[Proposal timing] model_request ${modelId}: ${Date.now() - attemptStarted}ms; status=${responseCode}; total=${elapsedMs}ms`);
 
     if (responseCode === 200) {
-      if (modelId !== primaryModel) {
-        Logger.log(`⚠️ [FALLBACK ACTIVE] Response successfully generated by backup model: ${modelId} in ${elapsedMs}ms`);
+      if (m > 0) {
+        Logger.log(`⚠️ [FALLBACK ACTIVE] Response successfully generated by ${modelId} on attempt ${m + 1} in ${elapsedMs}ms`);
       }
       return {
         text: responseText,
@@ -83,13 +173,25 @@ function callGeminiApiWithRetry(payload, apiKey, preferredModel, customFallbackL
     Logger.log(`Gemini API (${modelId}) returned error ${responseCode}: ${responseText}`);
     lastError = new Error(`Gemini API returned error code ${responseCode}: ${responseText}`);
     lastFailedStatus = responseCode;
+
+    if (!isGeminiTransientStatus(responseCode)) {
+      break;
+    }
   }
 
   throw lastError;
 }
 
 function callGeminiForTransactionIntake(payload, apiKey) {
-  return callGeminiApiWithRetry(payload, apiKey, TRANSACTION_MODEL_ID, [GEMINI_MODEL_ID]);
+  return callGeminiApiWithRetry(payload, apiKey, TRANSACTION_MODEL_ID, GEMINI_INTAKE_FALLBACKS);
+}
+
+function callGeminiForRouting(payload, apiKey) {
+  const generationConfig = {
+    ...(payload && payload.generationConfig),
+    thinkingConfig: { ...((payload && payload.generationConfig && payload.generationConfig.thinkingConfig) || {}), thinkingLevel: 'MINIMAL' }
+  };
+  return callGeminiApiWithRetry({ ...payload, generationConfig }, apiKey, GEMINI_MODEL_ID, GEMINI_ROUTING_FALLBACKS);
 }
 
 /** Classify a PDF by its contents, without requiring any itemized product lines. */
@@ -107,7 +209,7 @@ Set is_merchant_purchase=true for a merchant's purchase document, even if a bank
 Only an actual bank-issued account/card statement is "bank_statement": it must identify the bank and the customer's account/card, specify a statement period or statement date, and contain an account transaction history (dated debits/credits), rather than just one merchant purchase. Copy the printed bank_name, account_reference and statement_period (or statement date) as evidence; use empty strings when absent. A merchant's payment instructions are not the customer's account reference, and a payment due date alone is not a statement period. has_transaction_history refers to the account ledger, never purchased products or tax rows.
 A bank-app screenshot or bank-issued confirmation of one payment/transfer exported as PDF is "bank_transaction", not a statement. It belongs in transaction approval.
 Unreadable or unrelated documents are "other". Do not guess evidence. confidence is a number from 0 to 1.`;
-  const result = callGeminiForTransactionIntake({ systemInstruction: { parts: [{ text: prompt }] },
+  const result = callGeminiForRouting({ systemInstruction: { parts: [{ text: prompt }] },
     contents: [{ parts: [{ inlineData: { mimeType: 'application/pdf', data: media.data } }] }],
     generationConfig: { responseMimeType: 'application/json', responseSchema: PDF_DOCUMENT_RESPONSE_SCHEMA,
       temperature: 0.1 } }, apiKey);
@@ -312,7 +414,7 @@ function generateProposalEditPlan(comment, transactions, context) {
     }) }] }],
     generationConfig: { responseMimeType: 'application/json', responseSchema: PROPOSAL_EDIT_RESPONSE_SCHEMA, temperature: 0.1 }
   };
-  const result = callGeminiApiWithRetry(payload, apiKey, GEMINI_MODEL_ID, [PROPOSAL_EDIT_FALLBACK_MODEL_ID]);
+  const result = callGeminiApiWithRetry(payload, apiKey, GEMINI_MODEL_ID, GEMINI_ROUTING_FALLBACKS);
   try {
     const response = JSON.parse(typeof result === 'object' ? result.text : result);
     const candidate = response.candidates && response.candidates[0];

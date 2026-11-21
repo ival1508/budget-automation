@@ -502,21 +502,64 @@ module.exports = (test, storage) => {
     assert.match(over[2], /Worsened by S\$30\.00 today/);
     assert.match(c.buildEveningPacingLines({ error: 'missing' })[0], /unavailable/);
   });
-  test('transaction intake uses Gemini 4 Hydrogen with LOW thinking and falls back to 3.5 Flash-Lite', c => {
+  test('transaction intake uses 4-pool distinct fallback with jittered backoff on 503/network errors and fast-fails 400 client errors', c => {
     provider(c);
-    const seen = [];
+    const seen = [], sleeps = [];
+    c.Utilities.sleep = ms => sleeps.push(ms);
     c.UrlFetchApp = { fetch: (url, opts) => {
       seen.push({ url, body: JSON.parse(opts.payload) });
-      if (seen.length === 1) return { getResponseCode: () => 503, getContentText: () => 'unavailable' };
+      if (seen.length === 1) return { getResponseCode: () => 503, getContentText: () => 'UNAVAILABLE' };
+      if (seen.length === 2) throw new Error('Transient socket timeout');
+      if (seen.length === 3) return { getResponseCode: () => 503, getContentText: () => 'UNAVAILABLE' };
+      if (seen.length === 4) return { getResponseCode: () => 429, getContentText: () => 'RESOURCE_EXHAUSTED' };
       return { getResponseCode: () => 200, getContentText: () => modelReply([]).text };
     } };
-    c.Utilities.sleep = () => {};
     const res = c.callGeminiForTransactionIntake({ contents: [{ parts: [{ text: 'hi' }] }], generationConfig: { temperature: 0.2 } }, 'k');
     assert.equal(res.modelUsed, 'gemini-3.5-flash-lite');
+    assert.equal(seen.length, 5);
     assert.match(seen[0].url, /gemini-4-hydrogen/);
-    assert.deepEqual(seen[0].body.generationConfig.thinkingConfig, { thinkingLevel: 'LOW' });
-    assert.equal(seen[0].body.generationConfig.temperature, undefined);
-    assert.match(seen[1].url, /gemini-3.5-flash-lite/);
+    assert.match(seen[1].url, /gemini-3\.6-flash/);
+    assert.match(seen[2].url, /gemini-3\.5-flash-lite/);
+    assert.match(seen[3].url, /gemini-3\.8-flash/);
+    assert.match(seen[4].url, /gemini-3\.5-flash-lite/);
+    seen.forEach(req => {
+      assert.deepEqual(req.body.generationConfig.thinkingConfig, { thinkingLevel: 'LOW' });
+      assert.equal(req.body.generationConfig.temperature, undefined);
+    });
+    assert.equal(sleeps.length, 4);
+    assert.ok(sleeps[0] >= 750 && sleeps[1] >= 1500 && sleeps[2] >= 2500 && sleeps[3] >= 3000);
+
+    // Non-transient client errors (400) fail fast without burning backup models or sleeping
+    seen.length = 0; sleeps.length = 0;
+    c.UrlFetchApp = { fetch: (url, opts) => {
+      seen.push({ url, body: JSON.parse(opts.payload) });
+      return { getResponseCode: () => 400, getContentText: () => 'INVALID_ARGUMENT' };
+    } };
+    assert.throws(() => c.callGeminiForTransactionIntake({ contents: [] }, 'k'), /error code 400/);
+    assert.equal(seen.length, 1);
+    assert.equal(sleeps.length, 0);
+  });
+  test('PDF routing starts on 10M-TPM 3.5-flash-lite with MINIMAL thinking, clamps MINIMAL->LOW on 4-hydrogen/3.8-flash, and auto-downgrades rejected priority tier', c => {
+    provider(c);
+    c.PropertiesService.getScriptProperties().setProperty('GEMINI_SERVICE_TIER', 'priority');
+    const seen = [];
+    c.Utilities.sleep = () => {};
+    c.UrlFetchApp = { fetch: (url, opts) => {
+      const body = JSON.parse(opts.payload);
+      seen.push({ url, body });
+      if (seen.length === 1) return { getResponseCode: () => 400, getContentText: () => 'serviceTier priority is not supported on free tier' };
+      if (seen.length <= 3) return { getResponseCode: () => 503, getContentText: () => 'overloaded' };
+      return { getResponseCode: () => 200, getContentText: () => modelReply(pdfClassification()).text };
+    } };
+    assert.equal(c.classifyPdfDocument(pdfMedia()), 'receipt');
+    assert.equal(seen[0].body.serviceTier, 'priority');
+    assert.equal(seen[1].body.serviceTier, undefined);
+    assert.match(seen[1].url, /gemini-3\.5-flash-lite/);
+    assert.equal(seen[1].body.generationConfig.thinkingConfig.thinkingLevel, 'MINIMAL');
+    assert.match(seen[2].url, /gemini-3\.6-flash/);
+    assert.equal(seen[2].body.generationConfig.thinkingConfig.thinkingLevel, 'MINIMAL');
+    assert.match(seen[3].url, /gemini-4-hydrogen/);
+    assert.equal(seen[3].body.generationConfig.thinkingConfig.thinkingLevel, 'LOW');
   });
   test('Stage 7B Basket Review validates SGD parents, computes merchant price gaps, and excludes unreconciled or foreign rows', c => {
     const ledger = [
