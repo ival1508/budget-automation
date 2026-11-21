@@ -436,6 +436,12 @@ function dispatch() {
     catch (error) { Logger.log('Statement inbox scan failed: ' + error.message); }
   }
 
+  // Monthly money-market benchmark refresh for the "Папа" debt tab (once per SGT month).
+  if (typeof runScheduledPapaRateSync === 'function') {
+    try { runScheduledPapaRateSync(now); }
+    catch (error) { Logger.log('Папа monthly rate sync failed: ' + error.message); }
+  }
+
 }
 
 /**

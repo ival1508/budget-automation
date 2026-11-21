@@ -5081,6 +5081,7 @@ function buildBudgetMenu(ui) {
     .addItem('Preview monthly coach', 'showMonthlyCoachPreview')
     .addItem('Preview next month (read-only)', 'showMonthCreationPreview')
     .addItem('Create next month tab now', 'createNextMonthFromMenu')
+    .addItem('Update Папа monthly rates', 'updatePapaMonthlyRatesFromMenu')
     .addToUi();
 }
 

@@ -507,7 +507,7 @@ function enrichTransaction(parsedRow, categoryBucketMap) {
   let bucket = catMap ? catMap[category] : undefined;
 
   let needsReview = Boolean(parsedRow.needs_review);
-  const flags = Array.isArray(parsedRow.flags) ? [...parsedRow.flags] : [];
+  let flags = Array.isArray(parsedRow.flags) ? [...parsedRow.flags] : [];
 
   if (!bucket || bucket === 'UNKNOWN' || !(category in catMap)) {
     Logger.log(`⚠️ [LOUD WARNING] Unrecognized, absent, or UNKNOWN bucket for category "${category}". Flagging transaction for review.`);
@@ -543,13 +543,17 @@ function enrichTransaction(parsedRow, categoryBucketMap) {
     type = TRANSACTION_TYPES.EXPENSE;
   }
 
-  // Programmatic guarantee: All independent papa charges must be marked reimbursable AND set to "Снятие денег"
-  if (!isCardPayment && flags.indexOf('papa_charge') !== -1) {
+  // Protect dad inflows ("Получение денег" from dad): never force expense/reimbursable flags onto inflows.
+  if (type === TRANSACTION_TYPES.RECEIVED) {
+    flags = flags.filter(flag => flag !== 'papa_charge' && flag !== 'reimbursable');
+  } else if (!isCardPayment && flags.indexOf('papa_charge') !== -1) {
+    // Reimbursable dad charges stay under Расходы or Обязательные расходы so the Папа tab deducts them automatically.
     if (flags.indexOf('reimbursable') === -1) {
       flags.push('reimbursable');
     }
-    // Hard override to exclude from monthly budget
-    type = TRANSACTION_TYPES.PASS_THROUGH || 'Снятие денег';
+    if (type !== TRANSACTION_TYPES.EXPENSE && type !== TRANSACTION_TYPES.FIXED_EXPENSE) {
+      type = TRANSACTION_TYPES.EXPENSE;
+    }
   }
 
   // 4. Deduplication Key Generation (§6.7)

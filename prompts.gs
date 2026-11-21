@@ -144,17 +144,23 @@ ${previousProposalText}
    - Mention of reimbursement ("вернуть с Wise", "вернуть с Revolut", "R from Wise") -> Add "reimbursable" to "flags" and set "type" to "Снятие денег".
    - A credit card BILL PAYMENT / repayment / payoff is a transfer, category "Кредитка", with "cc_payoff" in "flags". A purchase paid USING a credit card is an ordinary expense, never a payoff.
    - DBS card bill payments are funded from "DBS SGD" and credited to "DBS CC SGD". Extract the observed payment ONCE, using the account shown in the source (default "DBS SGD" for a typed DBS bill payment). Use "Снятие денег" on "DBS SGD" or "Получение денег" on "DBS CC SGD", with a positive SGD amount. The writer creates the matching transfer leg; do not invent a second extracted transaction. Preserve explicit other-bank accounts/payment destinations.
-   - PAPA / PARENT SPEND RULES (papa_charge flag):
-     When the user mentions 'papa', 'dad', 'parents', or 'папа' in an expense:
+   - PAPA / PARENT SPEND & DEBT RULES:
+     When the user mentions 'papa', 'dad', 'parents', or 'папа':
      1. SHARED / FAMILY SPEND (No Flag Needed):
-        If the expense is for general groceries, food, restaurants, or cafes where the parents are dining with the family or buying household provisions:
+        If the expense is for general groceries, food, restaurants, or cafes where the parents are dining with the family or buying household provisions (NOT to be reimbursed by dad):
         - Do NOT add the "papa_charge" flag.
         - Classify it normally under Type: "Расходы" and the appropriate food/grocery category.
 
-     2. INDEPENDENT / PERSONAL SPEND (Flags & Type Required):
-        If the expense is for their own personal shopping (clothes, electronics, retail), personal trips, or meals/food eaten during their own independent travel:
-        - MUST add BOTH "papa_charge" and "reimbursable" to the flags array (which will output as '[👨‍👦 Papa Charge] [🔁 Reimbursable]' in the sheet).
-        - MUST classify under Type: "Снятие денег" (NOT "Расходы") so that it does not count against the user's monthly spending budget. Set the appropriate category (e.g., "Папа" or "Шопинг / Одежда").
+     2. REIMBURSABLE DAD SPEND (Reduces Debt on "Папа" Tab):
+        If the expense is dad's personal purchase/travel or explicitly marked to be reimbursed by dad:
+        - MUST add BOTH "papa_charge" and "reimbursable" to the flags array (which outputs '[👨‍👦 Papa Charge] [🔁 Reimbursable]' in Notes).
+        - Classify under Type: "Расходы" (or "Обязательные расходы" if it belongs to a fixed-expense category) — NEVER "Снятие денег".
+
+     3. MONEY RECEIVED FROM DAD (Increases Debt on "Папа" Tab):
+        If the user receives money/transfers/cash from dad (e.g. "от папы", "from dad", "папа перевёл"):
+        - MUST classify under Type: "Получение денег".
+        - Do NOT add "papa_charge" or "reimbursable" to flags.
+        - MUST preserve "от папы" / "from dad" in "notes" (and if denominated in USD or EUR, include the currency and amount in "notes", e.g. "от папы USD 5000" or "from dad EUR 3000").
 
 7. MULTI-IMAGE / ALBUM & SCROLLING SCREENSHOT CONTINUITY:
    - CRITICAL: You MUST process EVERY single image/document provided in the payload. Do not stop after the first image.

@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '..');
 const sourceFiles = ['constants.gs', 'config.gs', 'bootstrap.gs', 'calendar.gs', 'mandatory.gs', 'mandatoryCalendar.gs', 'monthlyInsights.gs', 'reader.gs', 'enricher.gs',
-  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'testStage3G.gs', 'coach.gs', 'nudge.gs', 'state.gs', 'proposalEdits.gs', 'webhook.gs', 'callbacks.gs', 'monthCreation.gs', 'cashCoverage.gs', 'receiptItems.gs', 'analyzer.gs'];
+  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'testStage3G.gs', 'coach.gs', 'nudge.gs', 'state.gs', 'proposalEdits.gs', 'webhook.gs', 'callbacks.gs', 'monthCreation.gs', 'cashCoverage.gs', 'receiptItems.gs', 'analyzer.gs', 'papaDebt.gs'];
 function parseCsv(text) {
   const rows = []; let row = [], value = '', quoted = false;
   for (let i = 0; i < text.length; i++) {
@@ -1288,4 +1288,5 @@ require('./mandatory-calendar-regressions.cjs')(test);
 require('./month-creation-regressions.cjs')(test);
 require('./cash-coverage-regressions.cjs')(test);
 require('./receipt-items-regressions.cjs')(test, storage);
+require('./papa-debt-regressions.cjs')(test);
 console.log(`${passed} tests passed; ${assertions} existing assertions checked; all .gs files parsed.`);

@@ -546,6 +546,10 @@ function createMonthTab(year, month, options) {
   if (result.created) {
     try { runMonthCreationConfirmations(undefined, ss); }
     catch (error) { Logger.log('Month creation confirmation pending: ' + error.message); }
+    if (typeof syncPapaRatesForCreatedMonth === 'function') {
+      try { syncPapaRatesForCreatedMonth(result.target.year, result.target.month, ss); }
+      catch (error) { Logger.log('Папа rate sync during month creation pending: ' + error.message); }
+    }
   }
   return result;
 }
