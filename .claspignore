@@ -1,0 +1,4 @@
+# Ignore everything by default, then whitelist only Apps Script source files and manifest.
+**/**
+!appsscript.json
+!*.gs

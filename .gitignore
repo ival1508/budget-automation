@@ -1,4 +1,5 @@
 .clasp.json
+.clasprc.json
 logs.txt
 node_modules/
 .DS_Store

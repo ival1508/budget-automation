@@ -1,0 +1,82 @@
+name: Deploy to Google Apps Script
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '*.gs'
+      - 'appsscript.json'
+      - '.claspignore'
+      - '.github/workflows/clasp-deploy.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: clasp-deploy-main
+  cancel-in-progress: false
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run offline regression tests
+        run: node scripts/test-regressions.cjs
+
+      - name: Check required clasp secrets
+        id: secrets
+        env:
+          CLASP_JSON: ${{ secrets.CLASP_JSON }}
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+          CLASP_DEPLOYMENT_ID: ${{ secrets.CLASP_DEPLOYMENT_ID }}
+        run: |
+          if [ -z "$CLASP_JSON" ] || [ -z "$CLASPRC_JSON" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping Apps Script push — add CLASP_JSON and CLASPRC_JSON secrets in repo Settings -> Secrets and variables -> Actions."
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            if [ -n "$CLASP_DEPLOYMENT_ID" ]; then
+              echo "has_deployment=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "has_deployment=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Write clasp config and credentials
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          CLASP_JSON: ${{ secrets.CLASP_JSON }}
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          printf '%s\n' "$CLASP_JSON" > .clasp.json
+          printf '%s\n' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 .clasp.json "$HOME/.clasprc.json"
+
+      - name: Push code to Google Apps Script
+        if: steps.secrets.outputs.ready == 'true'
+        run: npx --yes @google/clasp@3.4.1 push --force
+
+      - name: Update existing Web App deployment
+        if: steps.secrets.outputs.ready == 'true' && steps.secrets.outputs.has_deployment == 'true'
+        env:
+          CLASP_DEPLOYMENT_ID: ${{ secrets.CLASP_DEPLOYMENT_ID }}
+        run: |
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          SUBJECT="$(git log -1 --pretty=%s | tr -d '\n' | cut -c1-80)"
+          DESC="ci ${SHORT_SHA}: ${SUBJECT}"
+          npx --yes @google/clasp@3.4.1 deploy -i "$CLASP_DEPLOYMENT_ID" -d "$DESC"
+
+      - name: Skip deployment update when CLASP_DEPLOYMENT_ID is unset
+        if: steps.secrets.outputs.ready == 'true' && steps.secrets.outputs.has_deployment != 'true'
+        run: |
+          echo "::notice::Code pushed via clasp push, but CLASP_DEPLOYMENT_ID secret is unset. Skipping deploy (never minting a new URL)."
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f .clasp.json "$HOME/.clasprc.json"
