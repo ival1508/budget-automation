@@ -713,15 +713,34 @@ test('upload progress bar tracks completed, active, upcoming, and failed steps a
   c.enqueueStatementFile = () => {};
   c.sendConfirmationMessage = () => ({ ok: true });
 
-  let nextMsgId = 800, allowDelete = true;
-  const sent = [], edits = [], deletes = [], botErrors = [];
-  c.sendTelegramMessage = text => {
+  let nextMsgId = 800, allowDelete = true, mockPendingUpdates = null;
+  const sent = [], edits = [], deletes = [], botErrors = [], proposals = [];
+  const pendingStore = new Map();
+  c.savePendingTransactions = (rows, token) => {
+    const t = token || ('tok-' + (++nextMsgId));
+    pendingStore.set(t, rows);
+    return t;
+  };
+  c.getPendingTransactions = token => pendingStore.get(token) || null;
+  c.sendConfirmationMessage = (_, token, rows, isUpdate) => {
+    proposals.push({ token, count: rows.length, isUpdate });
+    return { ok: true };
+  };
+  c.sendTelegramMessage = (text, _, opts) => {
     const id = ++nextMsgId;
-    sent.push({ id, text });
+    sent.push({ id, text, silent: Boolean(opts && opts.disable_notification) });
     return [{ chat_id: '42', message_id: id }];
   };
   c.UrlFetchApp = { fetch: (url, opts) => {
-    const body = JSON.parse(opts.payload);
+    if (url.endsWith('/getWebhookInfo')) {
+      return {
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify(mockPendingUpdates === null
+          ? { ok: true }
+          : { ok: true, result: { pending_update_count: mockPendingUpdates } })
+      };
+    }
+    const body = opts && opts.payload ? JSON.parse(opts.payload) : {};
     if (url.endsWith('/editMessageText')) {
       edits.push({ id: body.message_id, text: body.text });
       return { getResponseCode: () => 200, getContentText: () => '{"ok":true}' };
@@ -773,7 +792,7 @@ test('upload progress bar tracks completed, active, upcoming, and failed steps a
   assert.match(stmtEdits.at(-1), /✅ <b>PDF received — processing<\/b> · Complete[\s\S]*\[██████████\] 100%/);
   allowDelete = true;
 
-  // 3. Voice & Text uploads track their dedicated pipelines, and album photos suppress duplicate bars
+  // 3. Voice & Text uploads track their dedicated pipelines
   sent.length = 0; edits.length = 0; deletes.length = 0;
   c.extractTransactions = (_, ctx) => {
     ctx.onProgress('extract_transactions_start');
@@ -791,14 +810,84 @@ test('upload progress bar tracks completed, active, upcoming, and failed steps a
   assert.match(sent[0].text, /✍️ <b>Processing transaction text<\/b> · Step 1 of 2[\s\S]*50%/);
   assert.ok(edits.some(e => /90%[\s\S]*✅ 1\. Extracted 2 transactions/.test(e.text)));
 
-  sent.length = 0;
-  post({ photo: [{ file_id: 'a1' }], media_group_id: 'alb-1' });
-  post({ photo: [{ file_id: 'a2' }], media_group_id: 'alb-1' });
-  assert.equal(sent.length, 1, 'Sibling album photos share a single progress bar');
-  assert.match(sent[0].text, /Processing album photos/);
+  // 4. Multi-photo upload (3 photos delivered sequentially by Telegram webhook: pending_update_count 3 -> 2 -> 1)
+  // Clearly tracks Image 1/3 -> Image 2/3 -> Image 3/3, re-anchors below a newly posted Proposal Card once, and deletes only after 3/3 finishes!
+  sent.length = 0; edits.length = 0; deletes.length = 0; proposals.length = 0;
+  userProps.clear(); pendingStore.clear();
+  let albumStep = 0;
+  c.extractTransactions = (_, ctx) => {
+    const idx = ++albumStep;
+    ctx.onProgress('extract_transactions_start');
+    ctx.onProgress('extract_transactions_done', { count: idx });
+    ctx.onProgress('receipt_items_skipped', { reason: 'Bank screenshot — skipped product scan' });
+    ctx.onProgress('duplicates_start');
+    return Array.from({ length: idx }, (_, i) => ({ ...sampleRow, where: `Photo${idx}_Row${i + 1}`, amount: idx * 10 + i }));
+  };
 
-  // 4. Failure marks completed steps ✅, failing step ❌, and keeps upcoming steps ⬜
-  sent.length = 0; edits.length = 0;
+  mockPendingUpdates = 3; // Image 1 in-flight + 2 waiting
+  post({ photo: [{ file_id: 'alb1' }], media_group_id: 'alb-seq' });
+  assert.equal(sent.length, 2, 'Initial progress card + silent re-anchor below newly posted Proposal Card');
+  assert.equal(sent[0].silent, false);
+  assert.equal(sent[1].silent, true);
+  assert.match(sent[0].text, /🖼️ <b>Processing images \(1\/3\)<\/b> · Image 1 of 3[\s\S]*🔄 <b>Image 1\/3 — Downloading image[\s\S]*⬜ Image 2\/3 — Queued[\s\S]*⬜ Image 3\/3 — Queued/);
+  assert.ok(deletes.includes(sent[0].id), 'Old card above Proposal Card deleted on re-anchor');
+  assert.ok(!deletes.includes(sent[1].id), 'Re-anchored progress card stays visible for Images 2/3 and 3/3');
+  assert.match(sent[1].text, /🖼️ <b>Processing images \(1\/3 done\)<\/b> · Next: Image 2 of 3[\s\S]*33%[\s\S]*✅ Image 1\/3 — Extracted 1 transaction[\s\S]*⏳ <b>Image 2\/3 — Starting next…<\/b>[\s\S]*⬜ Image 3\/3 — Queued/);
+
+  const anchoredCardId = sent[1].id;
+  mockPendingUpdates = 2; // Image 2 in-flight + 1 waiting
+  post({ photo: [{ file_id: 'alb2' }], media_group_id: 'alb-seq' });
+  assert.equal(sent.length, 2, 'Image 2 reuses the existing anchored progress card without sending a new message');
+  assert.ok(!deletes.includes(anchoredCardId), 'Progress card remains visible until Image 3/3 finishes');
+  const img2Edits = edits.filter(e => e.id === anchoredCardId).map(e => e.text);
+  assert.ok(img2Edits.some(t => /Processing images \(2\/3\)<\/b> · Image 2 of 3[\s\S]*✅ Image 1\/3 — Extracted 1 transaction[\s\S]*🔄 <b>Image 2\/3 — Extracting transactions[\s\S]*⬜ Image 3\/3 — Queued/.test(t)));
+  assert.match(img2Edits.at(-1), /Processing images \(2\/3 done\)<\/b> · Next: Image 3 of 3[\s\S]*67%[\s\S]*✅ Image 1\/3 — Extracted 1 transaction[\s\S]*✅ Image 2\/3 — Extracted 2 transactions[\s\S]*⏳ <b>Image 3\/3 — Starting next…<\/b>/);
+
+  mockPendingUpdates = 1; // Image 3 in-flight + 0 waiting
+  post({ photo: [{ file_id: 'alb3' }], media_group_id: 'alb-seq' });
+  assert.equal(sent.length, 2, 'Image 3 reuses the same progress card');
+  const img3Edits = edits.filter(e => e.id === anchoredCardId).map(e => e.text);
+  assert.ok(img3Edits.some(t => /Processing images \(3\/3\)<\/b> · Image 3 of 3[\s\S]*97%[\s\S]*✅ Image 1\/3 — Extracted 1 transaction[\s\S]*✅ Image 2\/3 — Extracted 2 transactions[\s\S]*🔄 <b>Image 3\/3 — Checking duplicates/.test(t)));
+  assert.ok(deletes.includes(anchoredCardId), 'Progress card deleted cleanly once Image 3/3 completes');
+
+  // 5. Partial failure in a 2-photo batch keeps the summary card showing ✅ Image 1/2 and ❌ Image 2/2
+  sent.length = 0; edits.length = 0; deletes.length = 0;
+  let partialCall = 0;
+  c.extractTransactions = (_, ctx) => {
+    ctx.onProgress('extract_transactions_start');
+    if (++partialCall === 2) throw new Error('Image 2 unreadable');
+    ctx.onProgress('extract_transactions_done', { count: 1 });
+    ctx.onProgress('duplicates_start');
+    return [{ ...sampleRow, where: 'GoodPhoto' }];
+  };
+  mockPendingUpdates = 2;
+  post({ photo: [{ file_id: 'pf1' }], media_group_id: 'alb-fail' });
+  const pfCardId = sent.at(-1).id;
+  mockPendingUpdates = 1;
+  post({ photo: [{ file_id: 'pf2' }], media_group_id: 'alb-fail' });
+  assert.ok(!deletes.includes(pfCardId), 'Partial-failure batch summary stays visible so user knows which image failed');
+  const pfEdits = edits.filter(e => e.id === pfCardId).map(e => e.text);
+  assert.match(pfEdits.at(-1), /⚠️ <b>Processed images \(1\/2 succeeded, 1 failed\)<\/b>[\s\S]*✅ Image 1\/2 — Extracted 1 transaction[\s\S]*❌ <b>Image 2\/2 — Extract transactions with AI — failed<\/b>/);
+
+  // 6. Follow-up non-photo message dismisses any waiting photo-batch card if the queued update was text
+  sent.length = 0; edits.length = 0; deletes.length = 0;
+  c.extractTransactions = (_, ctx) => {
+    ctx.onProgress('extract_transactions_start');
+    ctx.onProgress('extract_transactions_done', { count: 1 });
+    ctx.onProgress('duplicates_start');
+    return [{ ...sampleRow, where: 'PhotoBeforeText' }];
+  };
+  mockPendingUpdates = 2; // 1 photo + 1 text queued behind it
+  post({ photo: [{ file_id: 'p-before-text' }] });
+  const waitingPhotoCardId = sent.at(-1).id;
+  assert.ok(!deletes.includes(waitingPhotoCardId));
+  mockPendingUpdates = 1;
+  post({ text: 'coffee 5.50' });
+  assert.ok(deletes.includes(waitingPhotoCardId), 'Incoming text message dismisses the waiting photo-batch card');
+  mockPendingUpdates = null;
+
+  // 7. Single-photo failure marks completed steps ✅, failing step ❌, and keeps upcoming steps ⬜
+  sent.length = 0; edits.length = 0; deletes.length = 0;
   c.extractTransactions = (_, ctx) => {
     ctx.onProgress('extract_transactions_start');
     throw new Error('Gemini 503 capacity exhausted');

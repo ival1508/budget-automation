@@ -32,6 +32,7 @@ function sendTelegramMessage(htmlText, targetChatId, optOptions) {
       parse_mode: 'HTML'
     };
     if (optOptions && optOptions.reply_markup) payload.reply_markup = optOptions.reply_markup;
+    if (optOptions && optOptions.disable_notification) payload.disable_notification = true;
     let response;
     try {
       response = UrlFetchApp.fetch(url, {

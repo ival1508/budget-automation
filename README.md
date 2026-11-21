@@ -120,12 +120,14 @@ excluded receipt diagnostics, `/items YYYY-MM` reviews a specific month, and
 the month-end heartbeat delivers Basket Review after the closing month's coach is
 accepted. See [capture rules and acceptance](docs/stage-7a-receipt-capture.md).
 
-All inbound uploads (PDF, CSV, photo/image document, album, voice and text) display a
-live multi-step Telegram progress bar (`[█████░░░░░] %` with `✅` completed, `🔄` active
-and `⬜` upcoming stages) that updates in place as download, classification, extraction,
-line-item checking and duplicate checks complete, removes itself once the proposal or
-inbox confirmation is delivered, and marks the failing step with `❌` if an error stops
-processing. Receipt PDFs, including summary-only fuel receipts, invoices and card slips,
+All inbound uploads (PDF, photo/image document, multi-photo album/batch, voice and text)
+display a live multi-step Telegram progress bar (`[█████░░░░░] %` with `✅` completed,
+`🔄` active and `⬜` upcoming stages). When multiple photos are uploaded together, a
+single batch progress card tracks `Image 1/n`, `Image 2/n`, …, `Image n/n` with overall
+percentage, per-image extracted counts, active sub-steps, and queued images, re-anchors
+silently below a newly posted proposal card, and removes itself only once image `n/n`
+finishes (or stays visible with `❌` if any image fails). Receipt PDFs, including
+summary-only fuel receipts, invoices and card slips,
 start with `📄 PDF received — processing` and follow ordinary transaction
 approval. PDF routing reads the document's contents
 independently of product extraction. A bank statement requires a bank, customer

@@ -96,6 +96,18 @@ function doPost(e) {
       Logger.log('✅ Authorized Telegram Chat ID captured: ' + authorizedChatId);
     }
 
+    const incomingDoc = update.message && update.message.document;
+    const incomingDocMime = incomingDoc ? String(incomingDoc.mime_type || '').toLowerCase() : '';
+    const incomingDocName = incomingDoc ? String(incomingDoc.file_name || '').toLowerCase() : '';
+    const isIncomingImageUpload = Boolean(update.message && (
+      (Array.isArray(update.message.photo) && update.message.photo.length > 0) ||
+      (incomingDoc && !incomingDocMime.includes('pdf') && !incomingDocName.endsWith('.pdf') &&
+       !incomingDocMime.includes('csv') && !incomingDocName.endsWith('.csv') && incomingDocMime.startsWith('image/'))
+    ));
+    if (!isIncomingImageUpload) {
+      dismissIdlePhotoBatchProgress(authorizedChatId);
+    }
+
     // 3. Handle Callback Query (Button taps - Step 3)
     if (update.callback_query) {
       if (typeof handleCallbackQuery === 'function') {
@@ -256,7 +268,8 @@ function doPost(e) {
         : null;
       if (progressKind) {
         uploadProgress = startTelegramUploadProgress(chatId, progressKind, {
-          mediaGroupId: message.media_group_id || null
+          mediaGroupId: message.media_group_id || null,
+          botToken: botToken
         });
       }
 
@@ -382,6 +395,7 @@ function doPost(e) {
 
         // Proposal state uses the user lock only for the sub-second merge/commit step;
         // statement scans / ledger writes keep the separate script lock.
+        let isNewProposalCard = false;
         const sequentialLock = LockService.getUserLock();
         try {
           const lockStarted = Date.now();
@@ -411,7 +425,7 @@ function doPost(e) {
             );
             if (reconciled.alreadyCompleted) {
               sendTelegramMessage("ℹ️ The previous proposal was already completed while processing your message. Please resend if you want to log a new transaction.", chatId);
-              if (uploadProgress) uploadProgress.complete('Previous proposal already completed');
+              if (uploadProgress) uploadProgress.complete('Previous proposal already completed', { summary: 'Previous proposal completed' });
               return HtmlService.createHtmlOutput('OK');
             }
             finalTransactionsToConfirm = reconciled.transactions;
@@ -437,7 +451,7 @@ function doPost(e) {
 
           if (finalTransactionsToConfirm.length === 0) {
             sendTelegramMessage("ℹ️ No financial transactions detected in your input. Try sending a receipt photo, voice note, or text spend (e.g., 'lunch 12.50').", chatId);
-            if (uploadProgress) uploadProgress.complete('No transactions detected');
+            if (uploadProgress) uploadProgress.complete('No transactions detected', { summary: 'No transactions detected' });
             return HtmlService.createHtmlOutput('OK');
           }
 
@@ -455,6 +469,7 @@ function doPost(e) {
             const isUpdate = Boolean(effectiveBaseProposal && effectiveBaseProposal.length > 0 && activeToken);
             const confirmationStarted = Date.now();
             sendConfirmationMessage(chatId, token, finalTransactionsToConfirm, isUpdate);
+            isNewProposalCard = !isUpdate;
             logProposalTiming('confirmation_delivery', confirmationStarted);
             logProposalTiming('proposal_total', requestStarted);
           } else {
@@ -466,7 +481,12 @@ function doPost(e) {
         } finally {
           try { sequentialLock.releaseLock(); } catch (e) {}
         }
-        if (uploadProgress) uploadProgress.complete('Proposal ready');
+        if (uploadProgress) {
+          uploadProgress.complete('Proposal ready', {
+            newProposalPosted: isNewProposalCard,
+            summary: buildExtractedImageSummary(extractedTransactions)
+          });
+        }
       }
     }
   } catch (err) {
@@ -741,11 +761,494 @@ function deleteTelegramProgressMessage(chatId, messageId) {
   }
 }
 
+function buildExtractedImageSummary(extractedTransactions) {
+  const txnCount = Array.isArray(extractedTransactions) ? extractedTransactions.length : 0;
+  if (txnCount === 0) return 'No transactions detected';
+  const itemCount = extractedTransactions.reduce((sum, txn) =>
+    sum + (txn && txn.receipt_capture && Array.isArray(txn.receipt_capture.line_items) ? txn.receipt_capture.line_items.length : 0), 0);
+  const txnPart = txnCount === 1 ? 'Extracted 1 transaction' : `Extracted ${txnCount} transactions`;
+  const itemPart = itemCount > 0 ? (itemCount === 1 ? ' · 1 receipt item' : ` · ${itemCount} receipt items`) : '';
+  return txnPart + itemPart;
+}
+
+function getTelegramPendingUpdateCount(optBotToken) {
+  if (typeof UrlFetchApp === 'undefined' || !UrlFetchApp || typeof UrlFetchApp.fetch !== 'function') {
+    return null;
+  }
+  const botToken = optBotToken || PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
+  if (!botToken) return null;
+  try {
+    const response = UrlFetchApp.fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
+      method: 'get',
+      muteHttpExceptions: true
+    });
+    if (!response || typeof response.getContentText !== 'function') return null;
+    const parsed = JSON.parse(response.getContentText());
+    const count = parsed && parsed.ok && parsed.result && parsed.result.pending_update_count;
+    return (typeof count === 'number' && Number.isFinite(count) && count >= 0) ? count : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+const PHOTO_BATCH_TTL_SECONDS = 120;
+const PHOTO_BATCH_STALE_MS = 45000;
+
+function getProgressCacheSafe() {
+  if (typeof CacheService === 'undefined' || !CacheService || typeof CacheService.getScriptCache !== 'function') {
+    return null;
+  }
+  try {
+    return CacheService.getScriptCache();
+  } catch (_) {
+    return null;
+  }
+}
+
+function readProgressCacheJson(cache, key) {
+  if (!cache || !key) return null;
+  try {
+    const raw = cache.get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeProgressCacheJson(cache, key, value, ttlSeconds) {
+  if (!cache || !key) return;
+  try {
+    cache.put(key, JSON.stringify(value), ttlSeconds || PHOTO_BATCH_TTL_SECONDS);
+  } catch (_) {}
+}
+
+function photoBatchMetaKey(chatId) {
+  return 'upload_batch_meta_' + String(chatId);
+}
+
+function photoBatchItemKey(batchId, index) {
+  return 'upload_batch_item_' + String(batchId) + '_' + String(index);
+}
+
+function photoGroupHistKey(mediaGroupId) {
+  return 'upload_group_hist_' + String(mediaGroupId);
+}
+
+function readPhotoBatchItems(cache, batchId, maxIndex) {
+  const items = [];
+  const count = Math.max(0, Number(maxIndex) || 0);
+  for (let i = 1; i <= count; i++) {
+    items.push(readProgressCacheJson(cache, photoBatchItemKey(batchId, i)));
+  }
+  return items;
+}
+
+/**
+ * Dismisses any waiting (non-active) photo-batch progress card if the next queued update in the chat
+ * turns out to be a text edit, command, callback, voice note, or PDF rather than another photo.
+ */
+function dismissIdlePhotoBatchProgress(chatId) {
+  if (!chatId) return;
+  const cache = getProgressCacheSafe();
+  if (!cache) return;
+  const metaKey = photoBatchMetaKey(chatId);
+  const meta = readProgressCacheJson(cache, metaKey);
+  if (!meta || !meta.batchId) return;
+  const items = readPhotoBatchItems(cache, meta.batchId, meta.nextIndex || meta.total || 0);
+  if (items.some(item => item && item.status === 'active')) return;
+  try { cache.remove(metaKey); } catch (_) {}
+  const settledItems = items.filter(Boolean);
+  if (settledItems.some(item => item.status === 'failed')) {
+    if (meta.messageId) {
+      const html = formatTelegramPhotoBatchHtml({
+        total: Math.max(1, settledItems.length),
+        finished: 'failed',
+        isAlbum: Boolean(meta.mediaGroupId),
+        items: settledItems
+      });
+      editTelegramProgressMessage(chatId, meta.messageId, html);
+    }
+    return;
+  }
+  if (meta.messageId) {
+    deleteTelegramProgressMessage(chatId, meta.messageId);
+  }
+}
+
+/**
+ * Renders either a single-image progress card (when total === 1) or a clear multi-image
+ * "Image 1/n, 2/n, …" batch progress card showing completed images (✅), the active image
+ * with its step breakdown (🔄), and queued images (⬜).
+ */
+function formatTelegramPhotoBatchHtml(batchView) {
+  const total = Math.max(1, Number(batchView && batchView.total) || 1);
+  const items = (batchView && batchView.items) || [];
+  if (total === 1) {
+    const single = items[0] || { percent: 15, steps: getUploadProgressProfile('photo').steps };
+    return formatTelegramUploadProgressHtml({
+      icon: '🖼️',
+      title: 'Processing image',
+      percent: single.percent,
+      finished: batchView && batchView.finished,
+      steps: single.steps || []
+    });
+  }
+
+  let doneCount = 0;
+  let failedCount = 0;
+  let pointsSum = 0;
+  const activeIndices = [];
+  let firstQueuedIndex = null;
+
+  for (let i = 1; i <= total; i++) {
+    const slot = items[i - 1];
+    if (slot && slot.status === 'done') {
+      doneCount++;
+      pointsSum += 100;
+    } else if (slot && slot.status === 'failed') {
+      failedCount++;
+      pointsSum += 100;
+    } else if (slot && slot.status === 'active') {
+      activeIndices.push(i);
+      pointsSum += Math.max(5, Math.min(99, Number(slot.percent) || 15));
+    } else if (firstQueuedIndex === null) {
+      firstQueuedIndex = i;
+    }
+  }
+
+  const allSettled = (doneCount + failedCount) >= total;
+  const overallPercent = (batchView && batchView.finished === 'done') || (allSettled && failedCount === 0 && batchView && batchView.finished)
+    ? 100
+    : (allSettled ? 100 : Math.min(99, Math.max(1, Math.round(pointsSum / total))));
+
+  let header;
+  if (batchView && batchView.finished === 'done') {
+    header = `✅ <b>Processed ${total}/${total} images</b> · Complete\n<code>${renderTelegramProgressBar(100)}</code>`;
+  } else if (batchView && batchView.finished === 'failed') {
+    header = `⚠️ <b>Processed images (${doneCount}/${total} succeeded, ${failedCount} failed)</b>\n<code>${renderTelegramProgressBar(overallPercent)}</code>`;
+  } else if (activeIndices.length > 0) {
+    const currentNum = activeIndices[0];
+    header = `🖼️ <b>Processing images (${currentNum}/${total})</b> · Image ${currentNum} of ${total}\n<code>${renderTelegramProgressBar(overallPercent)}</code>`;
+  } else {
+    const nextNum = firstQueuedIndex || Math.min(total, doneCount + failedCount + 1);
+    header = `🖼️ <b>Processing images (${doneCount + failedCount}/${total} done)</b> · Next: Image ${nextNum} of ${total}\n<code>${renderTelegramProgressBar(overallPercent)}</code>`;
+  }
+
+  const lines = [];
+  for (let imgNum = 1; imgNum <= total; imgNum++) {
+    const slot = items[imgNum - 1];
+    if (slot && slot.status === 'done') {
+      lines.push(`✅ Image ${imgNum}/${total} — ${escapeUploadProgressHtml(slot.summary || 'Processed')}`);
+    } else if (slot && slot.status === 'failed') {
+      lines.push(`❌ <b>Image ${imgNum}/${total} — ${escapeUploadProgressHtml(slot.summary || 'Failed')}</b>`);
+    } else if (slot && slot.status === 'active') {
+      const steps = slot.steps || [];
+      const activeStep = steps.find(step => step.status === 'active');
+      const stageText = activeStep ? (activeStep.detail || activeStep.activeLabel || activeStep.pendingLabel) : 'Processing…';
+      lines.push(`🔄 <b>Image ${imgNum}/${total} — ${escapeUploadProgressHtml(stageText)}</b>`);
+      steps.forEach((step, idx) => {
+        const sNum = idx + 1;
+        if (step.status === 'done') {
+          lines.push(`   ✅ ${sNum}. ${escapeUploadProgressHtml(step.detail || step.doneLabel || step.pendingLabel)}`);
+        } else if (step.status === 'active') {
+          lines.push(`   🔄 <b>${sNum}. ${escapeUploadProgressHtml(step.detail || step.activeLabel || step.pendingLabel)}</b>`);
+        } else if (step.status === 'failed') {
+          lines.push(`   ❌ <b>${sNum}. ${escapeUploadProgressHtml(step.detail || (step.pendingLabel + ' — failed'))}</b>`);
+        } else {
+          lines.push(`   ⬜ ${sNum}. ${escapeUploadProgressHtml(step.pendingLabel)}`);
+        }
+      });
+    } else if (activeIndices.length === 0 && imgNum === firstQueuedIndex && !(batchView && batchView.finished)) {
+      lines.push(`⏳ <b>Image ${imgNum}/${total} — Starting next…</b>`);
+    } else {
+      lines.push(`⬜ Image ${imgNum}/${total} — Queued`);
+    }
+  }
+
+  return header + '\n\n' + lines.join('\n');
+}
+
+function sendTelegramProgressCard(htmlText, chatId, silent) {
+  if (typeof sendTelegramMessage !== 'function') return null;
+  try {
+    const opts = silent ? { disable_notification: true } : undefined;
+    const receipts = opts ? sendTelegramMessage(htmlText, chatId, opts) : sendTelegramMessage(htmlText, chatId);
+    if (Array.isArray(receipts) && receipts[0] && receipts[0].message_id) {
+      return receipts[0].message_id;
+    }
+  } catch (_) {
+    Logger.log('[Upload progress] Progress message could not be delivered.');
+  }
+  return null;
+}
+
+function startTelegramPhotoBatchProgress(chatId, optOptions) {
+  const profile = getUploadProgressProfile('photo', optOptions);
+  const mediaGroupId = (optOptions && optOptions.mediaGroupId) || null;
+  const botToken = (optOptions && optOptions.botToken) || undefined;
+  const cache = getProgressCacheSafe();
+  const metaKey = photoBatchMetaKey(chatId);
+
+  let meta = readProgressCacheJson(cache, metaKey);
+  if (meta && meta.batchId) {
+    const existingItems = readPhotoBatchItems(cache, meta.batchId, meta.nextIndex || meta.total || 0);
+    const hasActive = existingItems.some(item => item && item.status === 'active');
+    if (!hasActive && Date.now() - (meta.updatedAt || 0) > PHOTO_BATCH_STALE_MS) {
+      if (meta.messageId) deleteTelegramProgressMessage(chatId, meta.messageId);
+      try { cache.remove(metaKey); } catch (_) {}
+      meta = null;
+    }
+  }
+
+  // Restore completed sibling album history if a sequential album photo arrives after the prior one closed.
+  if (!meta && mediaGroupId && cache) {
+    const groupHist = readProgressCacheJson(cache, photoGroupHistKey(mediaGroupId));
+    if (groupHist && Array.isArray(groupHist.items) && groupHist.items.length > 0) {
+      const restoredId = String(Date.now()) + '_' + Math.floor(Math.random() * 100000);
+      groupHist.items.forEach((slot, idx) => {
+        if (slot) writeProgressCacheJson(cache, photoBatchItemKey(restoredId, idx + 1), slot, PHOTO_BATCH_TTL_SECONDS);
+      });
+      meta = {
+        batchId: restoredId,
+        messageId: null,
+        total: groupHist.items.length + 1,
+        nextIndex: groupHist.items.length,
+        mediaGroupId: mediaGroupId,
+        updatedAt: Date.now()
+      };
+      try { cache.remove(photoGroupHistKey(mediaGroupId)); } catch (_) {}
+    }
+  }
+
+  if (!meta || !meta.batchId) {
+    meta = {
+      batchId: String(Date.now()) + '_' + Math.floor(Math.random() * 100000),
+      messageId: null,
+      total: 1,
+      nextIndex: 0,
+      mediaGroupId: mediaGroupId,
+      updatedAt: Date.now()
+    };
+  }
+
+  const myIndex = (Number(meta.nextIndex) || 0) + 1;
+  meta.nextIndex = myIndex;
+  if (mediaGroupId && !meta.mediaGroupId) meta.mediaGroupId = mediaGroupId;
+  meta.updatedAt = Date.now();
+
+  const priorSlots = cache ? readPhotoBatchItems(cache, meta.batchId, myIndex - 1) : [];
+  const settledBefore = priorSlots.filter(item => item && (item.status === 'done' || item.status === 'failed')).length;
+  const pendingAtStart = getTelegramPendingUpdateCount(botToken);
+  if (pendingAtStart !== null && pendingAtStart > 0) {
+    meta.total = Math.max(Number(meta.total) || 1, myIndex, settledBefore + Math.min(pendingAtStart, 20));
+  } else {
+    meta.total = Math.max(Number(meta.total) || 1, myIndex);
+  }
+
+  const mySlot = {
+    index: myIndex,
+    status: 'active',
+    percent: profile.steps[0].percent,
+    summary: '',
+    steps: profile.steps.map((step, index) => ({
+      ...step,
+      status: index === 0 ? 'active' : 'pending',
+      detail: ''
+    }))
+  };
+  writeProgressCacheJson(cache, photoBatchItemKey(meta.batchId, myIndex), mySlot, PHOTO_BATCH_TTL_SECONDS);
+
+  const buildCurrentHtml = (overrideMeta, finishedState) => {
+    const activeMeta = overrideMeta || meta;
+    const total = Math.max(Number(activeMeta.total) || 1, Number(activeMeta.nextIndex) || 1, myIndex);
+    const items = cache
+      ? readPhotoBatchItems(cache, activeMeta.batchId, total)
+      : [mySlot];
+    if (!items[myIndex - 1]) items[myIndex - 1] = mySlot;
+    return formatTelegramPhotoBatchHtml({
+      total: total,
+      finished: finishedState || null,
+      isAlbum: Boolean(activeMeta.mediaGroupId || mediaGroupId),
+      items: items
+    });
+  };
+
+  let lastRenderedHtml = buildCurrentHtml(meta, null);
+  if (meta.messageId) {
+    writeProgressCacheJson(cache, metaKey, meta, PHOTO_BATCH_TTL_SECONDS);
+    editTelegramProgressMessage(chatId, meta.messageId, lastRenderedHtml);
+  } else {
+    meta.messageId = sendTelegramProgressCard(lastRenderedHtml, chatId, false);
+    writeProgressCacheJson(cache, metaKey, meta, PHOTO_BATCH_TTL_SECONDS);
+  }
+
+  const syncLatestMeta = () => {
+    const latest = readProgressCacheJson(cache, metaKey);
+    if (latest && latest.batchId === meta.batchId) {
+      meta = latest;
+    }
+    return meta;
+  };
+
+  const flushBatchEdit = () => {
+    writeProgressCacheJson(cache, photoBatchItemKey(meta.batchId, myIndex), mySlot, PHOTO_BATCH_TTL_SECONDS);
+    const activeMeta = syncLatestMeta();
+    const html = buildCurrentHtml(activeMeta, null);
+    if (!activeMeta.messageId || html === lastRenderedHtml) {
+      lastRenderedHtml = html;
+      return;
+    }
+    lastRenderedHtml = html;
+    editTelegramProgressMessage(chatId, activeMeta.messageId, html);
+  };
+
+  const settleSlot = (finalStatus, optCompleteOptions) => {
+    writeProgressCacheJson(cache, photoBatchItemKey(meta.batchId, myIndex), mySlot, PHOTO_BATCH_TTL_SECONDS);
+    const activeMeta = syncLatestMeta();
+    const maxSlot = Math.max(Number(activeMeta.nextIndex) || 1, myIndex);
+    const knownSlots = cache ? readPhotoBatchItems(cache, activeMeta.batchId, maxSlot) : [mySlot];
+    if (!knownSlots[myIndex - 1]) knownSlots[myIndex - 1] = mySlot;
+
+    const activeOthers = knownSlots.filter(item => item && item.index !== myIndex && item.status === 'active').length;
+    const settledCount = knownSlots.filter(item => item && (item.status === 'done' || item.status === 'failed')).length;
+    const hasFailed = knownSlots.some(item => item && item.status === 'failed');
+
+    const pendingEnd = getTelegramPendingUpdateCount(botToken);
+    const inFlight = activeOthers + 1;
+    const waitingBehind = pendingEnd !== null ? Math.max(0, Math.min(pendingEnd, 20) - inFlight) : 0;
+
+    if (activeOthers > 0 || waitingBehind > 0) {
+      activeMeta.total = pendingEnd !== null
+        ? Math.max(maxSlot, settledCount + activeOthers + waitingBehind)
+        : Math.max(Number(activeMeta.total) || 1, maxSlot, settledCount + activeOthers);
+      activeMeta.updatedAt = Date.now();
+      const html = buildCurrentHtml(activeMeta, null);
+      lastRenderedHtml = html;
+      if (optCompleteOptions && optCompleteOptions.newProposalPosted && activeMeta.messageId &&
+          deleteTelegramProgressMessage(chatId, activeMeta.messageId)) {
+        activeMeta.messageId = sendTelegramProgressCard(html, chatId, true);
+      } else if (activeMeta.messageId) {
+        editTelegramProgressMessage(chatId, activeMeta.messageId, html);
+      }
+      writeProgressCacheJson(cache, metaKey, activeMeta, PHOTO_BATCH_TTL_SECONDS);
+      meta = activeMeta;
+      return;
+    }
+
+    // All images in the batch have completed.
+    activeMeta.total = maxSlot;
+    activeMeta.nextIndex = maxSlot;
+    if (cache) {
+      try { cache.remove(metaKey); } catch (_) {}
+      const groupId = activeMeta.mediaGroupId || mediaGroupId;
+      if (groupId && pendingEnd === null) {
+        writeProgressCacheJson(cache, photoGroupHistKey(groupId), { items: knownSlots }, 60);
+      }
+    }
+
+    if (hasFailed || finalStatus === 'failed') {
+      const html = buildCurrentHtml(activeMeta, 'failed');
+      lastRenderedHtml = html;
+      if (activeMeta.messageId) editTelegramProgressMessage(chatId, activeMeta.messageId, html);
+      return;
+    }
+
+    if (activeMeta.messageId) {
+      if (!deleteTelegramProgressMessage(chatId, activeMeta.messageId)) {
+        const html = buildCurrentHtml(activeMeta, 'done');
+        lastRenderedHtml = html;
+        editTelegramProgressMessage(chatId, activeMeta.messageId, html);
+      }
+    }
+  };
+
+  let finished = false;
+  return {
+    getState: () => JSON.parse(JSON.stringify(mySlot)),
+    getMessageId: () => syncLatestMeta().messageId,
+    completeStep: (stepId, doneDetail) => {
+      if (finished) return;
+      const step = mySlot.steps.find(item => item.id === stepId);
+      if (!step) return;
+      step.status = 'done';
+      if (doneDetail) step.detail = doneDetail;
+      writeProgressCacheJson(cache, photoBatchItemKey(meta.batchId, myIndex), mySlot, PHOTO_BATCH_TTL_SECONDS);
+    },
+    startStep: (stepId, activeDetail) => {
+      if (finished) return;
+      const targetIndex = mySlot.steps.findIndex(item => item.id === stepId);
+      if (targetIndex === -1) return;
+      for (let i = 0; i < targetIndex; i++) {
+        if (mySlot.steps[i].status !== 'done') mySlot.steps[i].status = 'done';
+      }
+      mySlot.steps[targetIndex].status = 'active';
+      mySlot.steps[targetIndex].detail = activeDetail || '';
+      mySlot.percent = mySlot.steps[targetIndex].percent;
+      if (stepId === 'extract') {
+        const activeMeta = syncLatestMeta();
+        if ((Number(activeMeta.total) || 1) <= myIndex) {
+          const pendingNow = getTelegramPendingUpdateCount(botToken);
+          if (pendingNow !== null && pendingNow > 1) {
+            const priors = cache ? readPhotoBatchItems(cache, activeMeta.batchId, myIndex - 1) : [];
+            const settled = priors.filter(item => item && (item.status === 'done' || item.status === 'failed')).length;
+            activeMeta.total = Math.max(Number(activeMeta.total) || 1, myIndex, settled + Math.min(pendingNow, 20));
+            activeMeta.updatedAt = Date.now();
+            writeProgressCacheJson(cache, metaKey, activeMeta, PHOTO_BATCH_TTL_SECONDS);
+            meta = activeMeta;
+          }
+        }
+      }
+      flushBatchEdit();
+    },
+    ensureStepStarted: stepId => {
+      if (finished) return;
+      const target = mySlot.steps.find(item => item.id === stepId);
+      if (target && target.status === 'pending') {
+        const targetIndex = mySlot.steps.indexOf(target);
+        for (let i = 0; i < targetIndex; i++) {
+          if (mySlot.steps[i].status !== 'done') mySlot.steps[i].status = 'done';
+        }
+        target.status = 'active';
+        mySlot.percent = target.percent;
+        flushBatchEdit();
+      }
+    },
+    complete: (doneDetail, optCompleteOptions) => {
+      if (finished) return;
+      finished = true;
+      mySlot.steps.forEach((step, idx) => {
+        step.status = 'done';
+        if (idx === mySlot.steps.length - 1 && doneDetail && !step.detail) step.detail = doneDetail;
+      });
+      mySlot.percent = 100;
+      mySlot.status = 'done';
+      mySlot.summary = (optCompleteOptions && optCompleteOptions.summary) || doneDetail || 'Processed';
+      settleSlot('done', optCompleteOptions);
+    },
+    fail: () => {
+      if (finished) return;
+      finished = true;
+      let target = mySlot.steps.find(item => item.status === 'active');
+      if (!target) target = mySlot.steps.find(item => item.status === 'pending');
+      if (target) {
+        target.status = 'failed';
+        target.detail = target.pendingLabel + ' — failed';
+      }
+      mySlot.status = 'failed';
+      mySlot.summary = target ? target.detail : 'Failed';
+      settleSlot('failed');
+    }
+  };
+}
+
 /**
  * Sends and updates a single in-place Telegram progress card for an upload pipeline.
- * All network operations fail open so progress updates never interrupt transaction processing.
+ * Photo uploads use multi-image batch tracking ("Image 1/n, 2/n, …") across sequential and concurrent updates.
  */
 function startTelegramUploadProgress(chatId, kind, optOptions) {
+  if (kind === 'photo') {
+    return startTelegramPhotoBatchProgress(chatId, optOptions);
+  }
   const profile = getUploadProgressProfile(kind, optOptions);
   const state = {
     icon: profile.icon,
@@ -759,32 +1262,12 @@ function startTelegramUploadProgress(chatId, kind, optOptions) {
     }))
   };
 
-  let suppressed = false;
-  if (optOptions && optOptions.mediaGroupId && typeof CacheService !== 'undefined' && CacheService.getScriptCache) {
-    try {
-      const cache = CacheService.getScriptCache();
-      const albumKey = 'album_progress_' + optOptions.mediaGroupId;
-      if (cache.get(albumKey)) suppressed = true;
-      else cache.put(albumKey, '1', 120);
-    } catch (_) {}
-  }
-
-  let messageId = null;
+  let messageId = sendTelegramProgressCard(formatTelegramUploadProgressHtml(state), chatId, false);
   let lastRenderedHtml = formatTelegramUploadProgressHtml(state);
-  if (!suppressed && typeof sendTelegramMessage === 'function') {
-    try {
-      const receipts = sendTelegramMessage(lastRenderedHtml, chatId);
-      if (Array.isArray(receipts) && receipts[0] && receipts[0].message_id) {
-        messageId = receipts[0].message_id;
-      }
-    } catch (_) {
-      Logger.log('[Upload progress] Initial progress message could not be delivered.');
-    }
-  }
 
   const flushEdit = () => {
     const html = formatTelegramUploadProgressHtml(state);
-    if (suppressed || !messageId || html === lastRenderedHtml) {
+    if (!messageId || html === lastRenderedHtml) {
       lastRenderedHtml = html;
       return;
     }
@@ -835,7 +1318,7 @@ function startTelegramUploadProgress(chatId, kind, optOptions) {
       });
       state.percent = 100;
       state.finished = 'done';
-      if (!suppressed && messageId) {
+      if (messageId) {
         if (!deleteTelegramProgressMessage(chatId, messageId)) {
           flushEdit();
         }
