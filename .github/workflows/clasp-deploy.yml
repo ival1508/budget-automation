@@ -67,10 +67,20 @@ jobs:
         env:
           CLASP_DEPLOYMENT_ID: ${{ secrets.CLASP_DEPLOYMENT_ID }}
         run: |
+          CLEAN_ID="$(printf '%s' "$CLASP_DEPLOYMENT_ID" | grep -oE 'AKfycb[A-Za-z0-9_-]+' | head -n 1 || true)"
+          if [ -z "$CLEAN_ID" ]; then
+            echo "::error::CLASP_DEPLOYMENT_ID does not contain a valid AKfycb... deployment ID."
+            exit 1
+          fi
           SHORT_SHA="$(git rev-parse --short HEAD)"
           SUBJECT="$(git log -1 --pretty=%s | tr -d '\n' | cut -c1-80)"
           DESC="ci ${SHORT_SHA}: ${SUBJECT}"
-          npx --yes @google/clasp@3.4.1 deploy -i "$CLASP_DEPLOYMENT_ID" -d "$DESC"
+          OUTPUT="$(npx --yes @google/clasp@3.4.1 deploy -i "$CLEAN_ID" -d "$DESC" 2>&1)"
+          echo "$OUTPUT"
+          if ! printf '%s' "$OUTPUT" | grep -qE '@[0-9]+'; then
+            echo "::error::clasp deploy did not confirm an updated version."
+            exit 1
+          fi
 
       - name: Skip deployment update when CLASP_DEPLOYMENT_ID is unset
         if: steps.secrets.outputs.ready == 'true' && steps.secrets.outputs.has_deployment != 'true'
