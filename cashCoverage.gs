@@ -54,11 +54,11 @@ function cashCoverageRuleFormulas(row) {
   const source = '"\'"&SUBSTITUTE($B$2;"\'";"\'\'")&"\'!"';
   const labels = 'INDIRECT(' + source + '&"D3:D13")';
   const label = '=INDIRECT(' + source + '&"D' + planRow + '")';
-  const basis = '=IF(A' + row + '="CPF";"Non-cash / excluded";IF(A' + row + '="Родители";"Category or [Родители] tag";"Exact category"))';
+  const basis = '=IF(A' + row + '="CPF";"Automatically deducted in payroll";IF(A' + row + '="Родители";"Category or [Родители] tag";"Exact category"))';
   const planned = '=IF(OR(A' + row + '="";COUNTIF(' + labels + ';A' + row + ')<>1);NA();' +
     'LET(amount;INDIRECT(' + source + '&"E' + planRow + '");IF(AND(ISNUMBER(amount);amount>=0);amount;NA())))';
   const column = name => 'Transactions!$' + name + '$2:INDEX(Transactions!$' + name + ':$' + name + ';ROWS(Transactions!$A:$A))';
-  const logged = '=IF(A' + row + '="CPF";0;LET(dates;' + column('A') + ';types;' + column('C') +
+  const logged = '=IF(A' + row + '="CPF";C' + row + ';LET(dates;' + column('A') + ';types;' + column('C') +
     ';amounts;' + column('E') + ';categories;' + column('H') + ';merchants;' + column('I') + ';' +
     'parents;ARRAYFORMULA(REGEXMATCH(merchants&"";"(?i)^\\[Родители\\](\\s|$)"));' +
     'matches;ARRAYFORMULA(IF(A' + row + '="Родители";((categories=A' + row + ')+parents)>0;(categories=A' + row + ')*(1-parents)));' +
@@ -66,7 +66,7 @@ function cashCoverageRuleFormulas(row) {
     'selected;ARRAYFORMULA(identity*(dates>=$B$3)*(dates<EDATE($B$3;1))*(dates<TODAY()+1));' +
     'bad;SUM(ARRAYFORMULA(identity*(1-ISNUMBER(dates))))+SUM(ARRAYFORMULA(selected*(1-ISNUMBER(amounts))));' +
     'IF(bad>0;NA();ROUND(SUM(ARRAYFORMULA(IF(selected;amounts;0)));2))))';
-  const unpaid = '=IF(A' + row + '="CPF";0;IF(COUNT(C' + row + ':D' + row + ')=2;MAX(0;ROUND(C' + row + '-D' + row + ';2));NA()))';
+  const unpaid = '=IF(COUNT(C' + row + ':D' + row + ')=2;MAX(0;ROUND(C' + row + '-D' + row + ';2));NA())';
   return [label, basis, planned, logged, unpaid, ''];
 }
 
@@ -109,7 +109,7 @@ function buildCashCoverageRows(previousFormula) {
   const rows = [row('Settlement coverage', 'Value', 'What it covers'),
     row('Budget month', buildCashCoverageMonthFormula(), 'Uses the current Singapore calendar month, even when next month is prepared early.'),
     row('Month begins', '=DATE(YEAR(TODAY());MONTH(TODAY());1)', 'Singapore calendar date.'),
-    row('Pending mandatory costs', '=IF(COUNT(E14:E24)=11;SUM(E14:E24);NA())', 'All current-month mandatory plans less net logged payments. CPF is excluded from cash commitments.'),
+    row('Pending mandatory costs', '=IF(COUNT(E14:E24)=11;SUM(E14:E24);NA())', 'Current-month mandatory plans less net payments. Full CPF is deducted in the monthly budget and treated as already withheld from payroll; no second cash payment is reserved.'),
     row('Remaining Расходы budget', '=LET(value;INDIRECT("\'"&SUBSTITUTE(B2;"\'";"\'\'")&"\'!L33");IF(ISNUMBER(value);MAX(0;value);NA()))', 'Remaining ordinary spending reserve. Overspend is already reflected in bank/card balances; it cannot create available cash.'),
     row('Total cash required / reserved', '=IF(COUNT(B4:B5;B25)=3;SUM(B4:B5;B25);NA())', 'Pending current-month costs plus salary already assigned to next month.'),
     row('Recorded cash after cards', '=IF(AND(Summary!A2="Citibank CC";Summary!A3="DBS CC SGD";Summary!A4="DBS SGD";COUNT(Summary!D2:D4)=3);SUM(Summary!D2:D4);NA())', 'Latest DBS cash plus signed card balances. Received payroll reserved below is not free current-month funding.'),
@@ -147,7 +147,7 @@ function calculateCashCoverage(snapshot) {
     if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isSafeInteger(Math.round(value * 100))) throw new Error('Unreadable cash-coverage input.');
     return Math.round(value * 100);
   };
-  const categories = snapshot.plans.map(row => row[0]).filter(label => label !== 'CPF');
+  const categories = snapshot.plans.map(row => row[0]);
   const selected = new Set(categories);
   if (selected.size !== categories.length || selected.has('')) throw new Error('Missing or duplicate monthly plan label.');
   const components = Array.from(selected, category => {
@@ -155,6 +155,8 @@ function calculateCashCoverage(snapshot) {
     if (plans.length !== 1) throw new Error('Missing or duplicate monthly plan for ' + category);
     const planned = cents(plans[0][1]);
     if (planned < 0) throw new Error('Negative monthly plan.');
+    if (category === 'CPF') return { category: category, planned_sgd: planned / 100,
+      logged_sgd: planned / 100, unpaid_sgd: 0 };
     let paid = 0;
     snapshot.ledger.forEach(row => {
       const parents = /^\[Родители\](\s|$)/i.test(String(row[8] || ''));

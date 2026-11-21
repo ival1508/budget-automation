@@ -398,6 +398,7 @@ function flagExistingDuplicates(transactions) {
     const existingExactKeys = new Set();
     const existingFuzzyKeys = new Map();
     const existingPaymentKeys = new Set();
+    const existingReceiptParents = new Set();
 
     for (let i = 0; i < existingValues.length; i++) {
       const row = existingValues[i];
@@ -405,6 +406,9 @@ function flagExistingDuplicates(transactions) {
       const accountStr = String(row[1] || '').trim();
       const amountNum = Number(row[3]) || 0;
       const whereStr = String(row[8] || '').trim();
+      if ([TRANSACTION_TYPES.EXPENSE, TRANSACTION_TYPES.FIXED_EXPENSE.trim()].includes(String(row[2]).trim()) && amountNum > 0) {
+        existingReceiptParents.add(generateDedupeKey(dateStr, accountStr, amountNum, ''));
+      }
       const paymentKey = dbsCreditCardPaymentKey({ date: dateStr, account: accountStr,
         amount: amountNum, category: row[7], where: whereStr, notes: row[9] });
       if (paymentKey) existingPaymentKeys.add(paymentKey);
@@ -456,6 +460,12 @@ function flagExistingDuplicates(transactions) {
           }
         }
       }
+
+      // The proposal can offer receipt-only capture only for a recorded
+      // purchase. A duplicate within this upload has no recorded parent yet.
+      const receiptAmount = Number((item.currency || 'SGD') === 'SGD' ? item.amount : item.amount_sgd);
+      item.receipt_existing_purchase = Boolean(item.receipt_capture && isDuplicate &&
+        existingReceiptParents.has(generateDedupeKey(item.date, item.account, receiptAmount, '')));
 
       // 2. Check for intra-batch duplicate (same message / receipt)
       if (!isDuplicate) {

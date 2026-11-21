@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '..');
 const sourceFiles = ['constants.gs', 'config.gs', 'bootstrap.gs', 'calendar.gs', 'mandatory.gs', 'mandatoryCalendar.gs', 'monthlyInsights.gs', 'reader.gs', 'enricher.gs',
-  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'testStage3G.gs', 'coach.gs', 'nudge.gs', 'state.gs', 'proposalEdits.gs', 'webhook.gs', 'callbacks.gs', 'monthCreation.gs', 'cashCoverage.gs', 'receiptItems.gs'];
+  'writer.gs', 'reconciler.gs', 'tests.gs', 'matchingRegressionTests.gs', 'testStage3G.gs', 'coach.gs', 'nudge.gs', 'state.gs', 'proposalEdits.gs', 'webhook.gs', 'callbacks.gs', 'monthCreation.gs', 'cashCoverage.gs', 'receiptItems.gs', 'analyzer.gs'];
 function parseCsv(text) {
   const rows = []; let row = [], value = '', quoted = false;
   for (let i = 0; i < text.length; i++) {
@@ -31,7 +31,7 @@ function context() {
     SpreadsheetApp: { flush: () => {} },
     PropertiesService: { getScriptProperties: () => ({
       getProperty: key => props[key] || null, setProperty: (key, value) => { props[key] = value; },
-      deleteProperty: key => { delete props[key]; }
+      deleteProperty: key => { delete props[key]; }, getProperties: () => ({ ...props })
     }) },
     Utilities: {
       parseCsv, base64Encode: bytes => Buffer.from(bytes).toString('base64'), getUuid: () => crypto.randomUUID(),

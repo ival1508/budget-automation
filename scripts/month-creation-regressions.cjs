@@ -12,7 +12,7 @@ module.exports = test => {
     assert.equal(p.target.name,'Ноябрь'); assert.equal(p.target.days,30); assert.equal(p.source,"Октябрь'26");
     assert.deepEqual(Array.from(p.edits,e=>e.range),['B1','B3:B4','B5','B6','I38','G3:G13','I2:I32']);
     assert.equal(p.edits[0].value,46327); assert.equal(p.edits[4].formula,'=H38<=$D$1');
-    assert.equal(p.salary.entries[0].amount,32360); assert.equal(p.edits[1].formulas.length,2); assert.equal(p.edits[5].values.length,11); assert.equal(p.edits[6].formulas.length,31);
+    assert.equal(p.salary.entries[0].amount,33960); assert.equal(p.edits[1].formulas.length,2); assert.equal(p.edits[5].values.length,11); assert.equal(p.edits[6].formulas.length,31);
   });
   test('Stage 6B: derives compensation from ledger income and replaces stale light-income inputs', c => {
     for (const templateValue of [99000, '#REF!', '']) {
@@ -26,7 +26,7 @@ module.exports = test => {
       const salary = plan.edits.find(edit => edit.range === 'B3:B4');
       const balance = plan.edits.find(edit => edit.range === 'B5');
       const extra = plan.edits.find(edit => edit.range === 'B6');
-      assert.deepEqual(Array.from(plan.salary.entries, e => e.amount), [32360, 13220]);
+      assert.deepEqual(Array.from(plan.salary.entries, e => e.amount), [33960, 14420]);
       assert.equal(salary.values, undefined);
       assert.equal(salary.formulas.length, 2);
       assert.equal(balance.value, 0);
@@ -34,17 +34,17 @@ module.exports = test => {
       assert.equal(plan.lightIncome.amount, 0);
       assert.equal(JSON.stringify(s), before);
       s.transactions[0].amountSgd = 32000;
-      assert.equal(plan.salary.entries[0].amount, 32360);
+      assert.equal(plan.salary.entries[0].amount, 33960);
     }
   });
-  test('Stage 6B: salaries add employer CPF only, preserve E13 and never gross up provisional totals twice', c => {
+  test('Stage 6B: salaries add employee and employer CPF, preserve E13 and never gross up provisional totals twice', c => {
     const s = fixture(), p = c.buildMonthCreationPlan(s, 2026, 11);
     const [valera, rita] = p.salary.entries;
     assert.equal(valera.cashAmount, 31000); assert.equal(valera.cpf.employerPercent, 17);
-    assert.equal(valera.cpf.employeePercent, 20); assert.equal(valera.cpf.amount, 1360);
+    assert.equal(valera.cpf.employeePercent, 20); assert.equal(valera.cpf.amount, 2960);
     assert.equal(rita.cashAmount, 12500); assert.equal(rita.cpf.employerPercent, 9);
-    assert.equal(rita.cpf.employeePercent, 15); assert.equal(rita.cpf.amount, 720);
-    assert.equal(valera.amount-valera.cashAmount, 1360);assert.equal(rita.amount-rita.cashAmount, 720);
+    assert.equal(rita.cpf.employeePercent, 15); assert.equal(rita.cpf.amount, 1920);
+    assert.equal(valera.amount-valera.cashAmount, 2960);assert.equal(rita.amount-rita.cashAmount, 1920);
     assert.ok(p.preserve.includes('D3:F13')); assert.ok(!p.edits.some(e=>e.range==='E13'));
     s.transactions = [];
     const fallback = c.buildMonthCreationPlan(s, 2026, 11);
@@ -130,7 +130,7 @@ module.exports = test => {
     salary.type = ' Доходы '; salary.source = 'GOOGLE Singapore';
     const p = c.buildMonthCreationPlan(s, 2026, 11);
     assert.equal(p.status, 'preview');
-    assert.deepEqual(Array.from(p.salary.entries, e => e.amount), [32360, 13220]);
+    assert.deepEqual(Array.from(p.salary.entries, e => e.amount), [33960, 14420]);
     assert.equal(p.salary.entries[0].transactions.length, 1);
   });
   test('Stage 6B: salary lookup sums split income and net corrections in cents', c => {
@@ -139,11 +139,11 @@ module.exports = test => {
     s.transactions.push({ ...salary, row: 4, amountSgd: 10000.20 });
     s.transactions.push({ ...salary, row: 5, amountSgd: -100.10 });
     const p = c.buildMonthCreationPlan(s, 2026, 11);
-    assert.equal(p.salary.entries[0].amount, 31260.20);
+    assert.equal(p.salary.entries[0].amount, 32860.20);
     assert.deepEqual(Array.from(p.salary.entries[0].transactions, t => t.row), [2, 4, 5]);
     const correction = fixture();
     correction.transactions.push({ ...correction.transactions[0], row: 4, amountSgd: -0.005 });
-    assert.equal(c.buildMonthCreationPlan(correction, 2026, 11).salary.entries[0].amount, 32359.99);
+    assert.equal(c.buildMonthCreationPlan(correction, 2026, 11).salary.entries[0].amount, 33959.99);
     for (const amount of [0, -1]) {
       const rows = fixture().transactions; rows[0].amountSgd = amount;
       assert.equal(c.buildMonthCreationSalaries(rows, 2026, 11).ready, false);
@@ -161,8 +161,8 @@ module.exports = test => {
     assert.match(valera, /sources;Transactions!\$I\$2:/);
     assert.match(valera, /IF\(count=0;3000000\/100;/);
     assert.match(rita, /IF\(count=0;1200000\/100;/);
-    assert.match(valera, /\(cents\+136000\)\/100/);
-    assert.match(rita, /\(cents\+72000\)\/100/);
+    assert.match(valera, /\(cents\+296000\)\/100/);
+    assert.match(rita, /\(cents\+192000\)\/100/);
     assert.match(valera, /IF\(bad>0;NA\(\)/);
     const entry = { ...p.salary.entries[0], fallback: { amount: 12345.67 } };
     assert.match(c.monthCreationSalaryFormula(entry), /1234567\/100/);
@@ -173,7 +173,7 @@ module.exports = test => {
     const s = fixture(), rita = s.transactions.pop();
     const p = c.buildMonthCreationPlan(s, 2026, 11);
     assert.equal(p.status, 'preview'); assert.equal(p.edits.length, 7);
-    assert.equal(p.salary.entries[0].amount, 32360);
+    assert.equal(p.salary.entries[0].amount, 33960);
     assert.equal(p.salary.entries[1].amount, 12000);
     assert.equal(p.salary.entries[1].status, 'provisional');
     assert.equal(p.salary.entries[1].fallback.cell, 'B4');
@@ -182,7 +182,7 @@ module.exports = test => {
     assert.match(c.buildMonthCreationPreviewHtml(p), /Provisional template amount/);
     s.transactions.push(rita);
     const updated = c.buildMonthCreationPlan(s, 2026, 11);
-    assert.equal(updated.salary.entries[1].amount, 13220);
+    assert.equal(updated.salary.entries[1].amount, 14420);
     assert.equal(updated.salary.entries[1].basis, 'ledger');
     assert.equal(updated.salary.provisional, false);
     s.transactions = [];
@@ -214,7 +214,7 @@ module.exports = test => {
     s.sheets[0].name = "Сентябрь'26"; s.sheets[0].anchor = 46266;
     const p = c.buildMonthCreationPlan(s, 2026, 11);
     assert.equal(p.source, "Сентябрь'26"); assert.equal(p.salary.period.month, 10);
-    assert.equal(p.salary.entries[0].amount, 32360);
+    assert.equal(p.salary.entries[0].amount, 33960);
     const january = fixture().transactions.map(t => ({ ...t, date: serial('2025-12-31') }));
     assert.equal(c.buildMonthCreationSalaries(january, 2026, 1).period.year, 2025);
     assert.equal(c.buildMonthCreationSalaries(january, 2026, 1).ready, true);
@@ -308,7 +308,7 @@ module.exports = test => {
       getName:()=>t.name,getSheetId:()=>t.id,getRange:a=>{assert.equal(a,'A1:L70');return {getValues:()=>t.values,getFormulas:()=>t.formulas};}
     }]};
     const p=c.previewMonthCreation(2026,11,ss);assert.equal(p.status,'preview');
-    assert.equal(p.salary.entries[1].amount, 13220);
+    assert.equal(p.salary.entries[1].amount, 14420);
     p.salary.entries[0].transactions[0].source = '<img src=x onerror=alert(1)>';
     p.source='<script>alert(1)</script>';const html=c.buildMonthCreationPreviewHtml(p);
     assert.ok(html.includes('&lt;script&gt;'));assert.ok(!html.includes('<script>'));
@@ -866,5 +866,30 @@ module.exports = test => {
       c.runMandatorySameDayAlerts = origAlerts;
       c.scanConfiguredStatementInbox = origScan;
     }
+  });
+
+  test('Stage 6D: month creation queues Telegram confirmation for opted-in live users and skips sandbox', c => {
+    const liveSs = buildSandboxWorkbook(c, fixture());
+    liveSs.getId = () => '1ufn6CoHqxEUPwqBf--RX2H2DR_C1t1CfyG6QxSUVvR8';
+    const sandboxSs = buildSandboxWorkbook(c, fixture());
+    const sent = [];
+    let held = false;
+    c.LockService = { getScriptLock: () => ({ tryLock: () => { held = true; return true; }, waitLock() { held = true; }, releaseLock() { held = false; }, hasLock: () => held }) };
+    c.getActiveTelegramUsers = () => [
+      { name: 'Val', chat_id: '96069960', morning_time: '08:00' },
+      { name: 'Rita', chat_id: '402188776', morning_time: '08:00' }
+    ];
+    c.deliverScheduledMessage = (key, _slot, chatId, buildText) => {
+      sent.push({ key, chatId, text: buildText() });
+      return true;
+    };
+    c.createMonthTab(2026, 11, { spreadsheet: sandboxSs, sandbox: true });
+    assert.equal(sent.length, 0);
+    const res = c.createMonthTab(2026, 11, { spreadsheet: liveSs, sandbox: false });
+    assert.equal(res.created, true);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].chatId, '96069960');
+    assert.match(sent[0].text, /New budget month created: Ноябрь 2026/);
+    assert.match(sent[0].text, /gid=/);
   });
 };

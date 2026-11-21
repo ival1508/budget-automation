@@ -222,80 +222,31 @@ function sendDailyNudge(targetChatId) {
 function generateDailyTransactionsRecap(optSs, optDate) {
   const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
   const tz = (ss && typeof ss.getSpreadsheetTimeZone === 'function') ? ss.getSpreadsheetTimeZone() : 'Asia/Singapore';
-  const now = new Date();
-  
-  let dateStr = '';
-  if (optDate) {
-    if (optDate instanceof Date) {
-      dateStr = Utilities.formatDate(optDate, tz, 'dd.MM.yyyy');
-    } else {
-      dateStr = typeof normalizeDateString === 'function' ? normalizeDateString(optDate) : String(optDate).trim();
-    }
-  } else {
-    dateStr = Utilities.formatDate(now, tz, 'dd.MM.yyyy');
+  let reportDate = optDate || new Date();
+  if (typeof reportDate === 'string') {
+    const parts = calendarDateParts(reportDate);
+    reportDate = new Date(Date.UTC(parts.year, parts.month - 1, parts.day, 4));
   }
+  const dateStr = Utilities.formatDate(reportDate, tz, 'dd.MM.yyyy');
 
-  const todaysTxns = typeof getTodaysTransactions === 'function' ? getTodaysTransactions(ss, optDate) : [];
-  const pacing = typeof getDailyPacing === 'function' ? getDailyPacing(optDate, ss) : {
-    K_cumulative_today: 0,
-    L_saldo_yesterday: 0,
-    D17_flat_daily: 0,
-    D19_realistic_daily: 0,
-    days_left: 1,
-    days_to_positive: 0
-  };
+  const todaysTxns = typeof getTodaysTransactions === 'function' ? getTodaysTransactions(ss, reportDate) : [];
+  const pacing = typeof getDailyPacing === 'function' ? getDailyPacing(reportDate, ss) : { error: 'unavailable' };
 
   const todaySpend = typeof getTodaySpend === 'function' 
-    ? getTodaySpend(optDate, ss) 
+    ? getTodaySpend(reportDate, ss)
     : todaysTxns.reduce((sum, t) => sum + Number(t.amount || 0), 0);
 
   const totalSpend = Number(Number(todaySpend || 0).toFixed(2));
-  const realisticDaily = Number(Number(pacing.D19_realistic_daily || 0).toFixed(2));
-  const cumulativePosition = Number(Number(pacing.K_cumulative_today || 0).toFixed(2));
-  const daysLeft = pacing.days_left || 1;
-  const isLastDay = (daysLeft <= 1);
-  const daysToPositive = pacing.days_to_positive || 0;
+  const pacingLines = buildEveningPacingLines(pacing);
+  const parts = calendarDateParts(reportDate);
+  const isLastDay = parts.day === parts.lastDay;
 
-  // 1. Allowance / Over-budget logic (shared with Morning Coach Brief)
-  const isOverBudget = realisticDaily < 0;
-  const overBudgetBy = isOverBudget ? Math.abs(realisticDaily) : 0;
+  // Sign-off message
+  const zeroSpendSignoff = isLastDay
+    ? `✨ <i>No spending logged for the final day of the month. Rest up!</i>`
+    : `✨ <i>No spending logged today. Rest up!</i>`;
 
-  let allowanceLine = '';
-  if (isOverBudget) {
-    allowanceLine = `• 🎯 <b>Budget status:</b> You're S$${overBudgetBy.toFixed(2)} past the month's budget.`;
-  } else {
-    allowanceLine = `• 🎯 <b>Spendable per day:</b> S$${realisticDaily.toFixed(2)}/day`;
-  }
-
-  // 2. Cumulative position framing (month-end close vs mid-month runway)
-  let positionLine = '';
-  if (isLastDay) {
-    if (cumulativePosition < 0) {
-      const behindAmount = Math.abs(Math.round(cumulativePosition));
-      positionLine = `• 📊 <b>Cumulative position:</b> You're S$${behindAmount} behind pace at month-end.`;
-    } else if (cumulativePosition > 0) {
-      positionLine = `• 📊 <b>Cumulative position:</b> S$${cumulativePosition.toFixed(2)} ahead of pace at month-end.`;
-    } else {
-      positionLine = `• 📊 <b>Cumulative position:</b> Exactly on pace at month-end.`;
-    }
-  } else {
-    if (cumulativePosition < 0) {
-      const behindAmount = Math.abs(Math.round(cumulativePosition));
-      const dayText = daysToPositive === 1 ? 'one zero-spend day clears it' : `${daysToPositive} zero-spend days clear it`;
-      positionLine = `• 📊 <b>Cumulative position:</b> You're S$${behindAmount} behind pace — ${dayText}.`;
-    } else if (cumulativePosition > 0) {
-      positionLine = `• 📊 <b>Cumulative position:</b> S$${cumulativePosition.toFixed(2)} ahead of pace.`;
-    } else {
-      positionLine = `• 📊 <b>Cumulative position:</b> Exactly on pace.`;
-    }
-  }
-
-  // 3. Sign-off message
-  let zeroSpendSignoff = isLastDay
-    ? `✨ <i>Great job closing out the month with a zero-spend day! Rest up for the new month ahead.</i>`
-    : `✨ <i>Great job! Zero-spend days protect your runway and boost your pacing for the rest of the month.</i>`;
-
-  let activeSpendSignoff = isLastDay
+  const activeSpendSignoff = isLastDay
     ? `\n✨ <i>Logged & tracked in Budget 2026 for month-end close. Rest up!</i>`
     : `\n✨ <i>Logged & tracked in Budget 2026. Rest up!</i>`;
 
@@ -303,8 +254,9 @@ function generateDailyTransactionsRecap(optSs, optDate) {
     return [
       `🌙 <b>Daily Recap — ${dateStr}</b>\n`,
       `😴 <b>Zero Spend Day!</b> No transactions were logged for today.\n`,
-      allowanceLine,
-      positionLine + `\n`,
+      `• 💰 <b>Total Spend Today:</b> <b>S$${totalSpend.toFixed(2)}</b>`,
+      ...pacingLines,
+      '',
       zeroSpendSignoff
     ].join('\n');
   }
@@ -312,8 +264,8 @@ function generateDailyTransactionsRecap(optSs, optDate) {
   const lines = [
     `🌙 <b>Daily Spending Recap — ${dateStr}</b>\n`,
     `• 💰 <b>Total Spend Today:</b> <b>S$${totalSpend.toFixed(2)}</b>`,
-    allowanceLine,
-    positionLine + `\n`,
+    ...pacingLines,
+    '',
     `<b>Logged Transactions (${todaysTxns.length}):</b>`
   ];
 
@@ -328,6 +280,35 @@ function generateDailyTransactionsRecap(optSs, optDate) {
 
   lines.push(activeSpendSignoff);
   return lines.join('\n');
+}
+
+/** Opening allowance (K), closing saldo (L), and change versus yesterday's close. */
+function buildEveningPacingLines(pacing) {
+  if (!pacing || pacing.error || !['K_cumulative_today', 'L_saldo_today', 'L_saldo_yesterday']
+    .every(key => typeof pacing[key] === 'number' && Number.isFinite(pacing[key]))) {
+    return [`• 📊 <b>Budget position:</b> Today's budget position is unavailable.`];
+  }
+  const opening = Number(pacing.K_cumulative_today.toFixed(2));
+  const closing = Number(pacing.L_saldo_today.toFixed(2));
+  const change = Number((pacing.L_saldo_today - pacing.L_saldo_yesterday).toFixed(2));
+  const available = opening < 0
+    ? `No spending room — S$${Math.abs(opening).toFixed(2)} behind pace before spending.`
+    : `S$${opening.toFixed(2)}`;
+  const result = closing < 0
+    ? `S$${Math.abs(closing).toFixed(2)} overspent — behind pace at close.`
+    : closing > 0
+      ? `S$${closing.toFixed(2)} underspent — ahead of pace at close.`
+      : `Exactly used today's available budget — on pace at close.`;
+  const movement = change > 0
+    ? `Improved by S$${change.toFixed(2)} today.`
+    : change < 0
+      ? `Worsened by S$${Math.abs(change).toFixed(2)} today.`
+      : `Unchanged today.`;
+  return [
+    `• 🎯 <b>Available Today:</b> ${available}`,
+    `• 📊 <b>Result:</b> ${result}`,
+    `• ${change > 0 ? '↗️' : change < 0 ? '↘️' : '↔️'} <b>Daily position:</b> ${movement}`
+  ];
 }
 
 /**
@@ -413,6 +394,8 @@ function dispatch() {
     try { runScheduledMonthCreation(now); }
     catch (error) { Logger.log('Scheduled month creation failed: ' + error.message); }
   }
+  try { runMonthCreationConfirmations(now); }
+  catch (error) { Logger.log('Month creation confirmation pending: ' + error.message); }
   const users = getActiveTelegramUsers();
   let morningBrief = null, recap = null, weeklyReport = null;
   const nudgeSlot = getDailyDeliverySlot(now, '21:00', 60);
@@ -443,6 +426,8 @@ function dispatch() {
   if (monthEndSlot) {
     try { runMonthEndJobs(monthEndSlot.reportDate, undefined, monthEndSlot); }
     catch (error) { Logger.log('Month-end jobs failed: ' + error.message); }
+    try { runScheduledBasketReview(monthEndSlot.reportDate, undefined, monthEndSlot); }
+    catch (error) { Logger.log('Monthly Basket Review failed: ' + error.message); }
   }
 
   // Drive statements share this heartbeat; no additional scheduler is needed.

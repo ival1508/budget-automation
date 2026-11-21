@@ -10,7 +10,7 @@ serves a specific deployed *version*. After pushing:
   Deploy → Manage deployments → ✏️ pencil → Version: New version → Deploy
 NEVER click "New deployment" — it mints a new URL and 404s the webhook.
 
-**Existing /exec URL** (version 96, PDF receipt routing fix deployed 28 Oct 2026; 34 application files):
+**Existing /exec URL** (version 109, merged v97–v108 + concise monthly daily spending summary deployed 21 Nov 2026; 35 application files):
 https://script.google.com/macros/s/AKfycbyhRAocN8rNBhWl3NBL7yIgStBCLIrgHfxNNOC-zt6Pa7HBvQPJ9b7tykdeu4QuMm3_/exec
 
 **Deployment settings MUST be:** Execute as = Me · Who has access = Anyone
@@ -62,7 +62,7 @@ The heartbeat retries failed or missed sends only within these SGT windows
 | Evening nudge | 21:00 daily | 22:00 that day |
 | Transactions recap | 22:00 daily | 23:30 that day |
 | Weekly mandatory audit | Monday 09:00 | Monday 12:00 |
-| Month-end reminder → coach | Last day 23:30 | Next day 02:30, retaining the closing month |
+| Month-end reminder → coach → Basket Review | Last day 23:30 | Next day 02:30, retaining the closing month |
 
 `sendTelegramMessage()` requires HTTP 200 and Telegram `ok:true` for every send;
 rejections, malformed replies and network errors throw. A broadcast attempts all
@@ -93,20 +93,30 @@ trusted to report test output it did not execute.
 
 ## Docs
 See /docs for the PRD and the staged build prompts.
-The [28 October Phase 2 review](docs/phase-2-progress-review-2026-10-28.md) records current stage status and the remaining closure work.
+The [28 October Phase 2 review](docs/phase-2-progress-review-2026-10-28.md) records the October checkpoint; versions 97–109 below supersede its pre-rollover items.
 
-### Stage 7A — receipt item capture
+### Stage 7A & 7B — receipt item capture and Basket Review
 
-Send an itemized receipt photo, image document or PDF and approve its transaction.
-The bot stores the products in `LineItems`, maintains a `Products` catalog and
-flags totals that do not reconcile. There is no per-product approval; transaction
+Send an itemized receipt photo, image document or PDF and approve its transaction
+(or tap **🧾 Add line items** when the purchase is already recorded in `Transactions`).
+The bot stores products in `LineItems` (including printed unit prices and normalized
+pack measurements), maintains a `Products` catalog and flags totals that do not
+reconcile. Transaction intake uses `gemini-4-hydrogen` (`thinkingLevel: LOW`) with
+`gemini-3.5-flash-lite` fallback. There is no per-product approval; transaction
 balances and the eleven-column ledger keep their existing contract. Bank
-screenshots and typed/voice inputs produce no item history. `/items` or
-**Budget → Receipt capture status** shows progress. Basket Review is deferred
-until receipt history accumulates. See [capture rules and acceptance](docs/stage-7a-receipt-capture.md).
+screenshots and typed/voice inputs produce no item history.
+
+`analyzer.gs` implements Stage 7B **Basket Review**: `/items` sends the current
+period's Basket Review, `/items details` includes top products, brand/tier mix and
+excluded receipt diagnostics, `/items YYYY-MM` reviews a specific month, and
+`/items status` (or **Budget → Receipt capture status**) shows capture diagnostics.
+**Budget → Preview Basket Review (read-only)** previews the report in Sheets, and
+the month-end heartbeat delivers Basket Review after the closing month's coach is
+accepted. See [capture rules and acceptance](docs/stage-7a-receipt-capture.md).
 
 Receipt PDFs, including summary-only fuel receipts, invoices and card slips,
-follow ordinary transaction approval. PDF routing reads the document's contents
+send an immediate `📄 PDF received` acknowledgement and follow ordinary transaction
+approval. PDF routing reads the document's contents
 independently of product extraction. A bank statement requires a bank, customer
 account, statement period/date and account transaction history; printed card or
 bank details on a merchant receipt do not qualify. Individual bank confirmations
@@ -116,46 +126,46 @@ previously reviewed items. CSV statements retain the inbox workflow.
 
 ### Stage 6 — month creation and read-only preview
 
-`previewMonthCreation(2026, 11, spreadsheet)` returns the proposed new-month
+`previewMonthCreation(2026, 12, spreadsheet)` returns the proposed new-month
 name, source template and exact cell edits without changing the workbook.
 The optional spreadsheet defaults to the bound workbook. With no arguments,
-it previews next month. After syncing source and reloading Sheets, use
-**Budget → Preview next month (read-only)** for the same plan in a dialog.
-The preview shows prior-month regular salary income from Google for Валера and
-Kaspersky for Рита, with transaction evidence and employer-only CPF additions
-(17% and 9% on the existing wage base). Missing salaries use provisional template
-compensation unchanged; proposed salary formulas update when payroll is logged.
-B6 follows the tab's own month-to-date light-income total, while B5 starts at zero.
+it previews next month. Use **Budget → Preview next month (read-only)** for the
+same plan in a dialog. The preview shows prior-month regular salary income from
+Google for Валера and Kaspersky for Рита, with transaction evidence and full
+employee + employer CPF gross-up (`20% + 17%` Google, `15% + 9%` Kaspersky on the
+`S$8,000` wage base, with `E13` deducting full CPF once). Missing salaries use
+provisional template compensation unchanged; proposed salary formulas update when
+payroll is logged. B6 follows the tab's own month-to-date light-income total,
+while B5 starts at zero, `G3:G13` is cleared to blank, and `I2:I32` summarizes
+each day's largest purchase plus up to three remaining categories.
+
 Existing months are no-ops; creation across the configured workbook year is
-refused. Automatic creation is enabled in the deployed source. The shared
-heartbeat attempts next-month creation from 00:00 SGT on the preceding month's
-last day and recovers a missing current month. A successful live November trial
-is recorded on 25 October; November is absent in the 28 October workbook check.
-Verify the scheduled 31 October creation and existing-month no-op. G3:G13 is
-deliberately cleared to blank. Summary!E4 now selects its current month through
-the cash-coverage feature below, independently of month creation.
-See [Stage 6 plan and checkpoint](docs/stage-6-month-creation.md).
+refused. Automatic creation is enabled (`Ноябрь'26` live in production), and
+opted-in users (`confirmationUserKeys: ['VAL']`) receive a Telegram confirmation
+link once a live month tab is created. The shared heartbeat attempts next-month
+creation from 00:00 SGT on the preceding month's last day and recovers a missing
+current month. See [Stage 6 plan and checkpoint](docs/stage-6-month-creation.md).
 
 ### Daily settlement coverage — Summary!E4
 
-E4 now compares current recorded DBS cash and signed card balances with all
-pending monthly mandatory costs, the remaining Расходы budget and next month's
-received payroll funding. Regular salary credited this month stays reserved for
-the following budget month until rollover. The `CashCoverage` tab shows the plan/payment
-breakdown and selects the current SGT month automatically. The daily coach adds
-a checked Settlement line, with a funding/transfer action for a shortfall and
-an unavailable status for missing or invalid inputs. D19 remains the spending
-allowance. See the [implementation, tests and rollback](docs/summary-cash-coverage.md).
+E4 compares current recorded DBS cash and signed card balances with all
+pending monthly mandatory costs (treating full CPF as automatically deducted in
+payroll), the remaining Расходы budget and next month's received payroll funding.
+Regular salary credited this month stays reserved for the following budget month
+until rollover. The `CashCoverage` tab shows the plan/payment breakdown and
+selects the current SGT month automatically. The daily coach adds a checked
+Settlement line, while the evening recap reports today's opening allowance (`K`),
+closing saldo (`L`) and daily movement without `D19`.
+See the [implementation, tests and rollback](docs/summary-cash-coverage.md).
 
 ## Editing a Telegram proposal with a comment
 
-On a pending proposal, tap **💬 Comment**, then describe the changes in one message.
+On a pending proposal, reply directly to the proposal message (or send
+`/edit <your changes>`) to describe your edits in one message.
 For example: “Change Cold Storage to Дом” or “Rename item 2 to Unity, classify it
-as medicine, and change the amount to 46.86.” You can also send `/edit <your changes>` for the latest
-proposal, send `/edit` and then your comment, or reply directly to the latest
-proposal message. Merchant names can be shortened or loosely spelled when the
-intended purchase is clear. If several purchases match, give an amount or date;
-item numbers remain optional.
+as medicine, and change the amount to 46.86.” Merchant names can be shortened or
+loosely spelled when the intended purchase is clear. If several purchases match,
+give an amount or date; item numbers remain optional.
 
 The bot updates the proposal and sends a before/after recap. It asks for
 clarification if it cannot identify the target. It retains recent edits and

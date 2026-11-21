@@ -94,7 +94,7 @@ function handleTelegramProposalComment(message) {
       const rows = getPendingTransactions(token);
       if (!Array.isArray(rows) || !rows.length || (state &&
           (state.expiresAt < Date.now() || state.revision !== telegramProposalRevision(rows)))) {
-        throw new Error('The proposal changed or this edit request expired. Tap 💬 Comment on the current proposal to try again.');
+        throw new Error('The proposal changed or this edit request expired. Reply to the current proposal or send /edit to try again.');
       }
       snapshot = rows;
       state = rememberTelegramProposalComment(chatId, state ? state.messageId : latestMessageId, token, rows);
@@ -115,7 +115,7 @@ function handleTelegramProposalComment(message) {
       const request = activeRequest ? JSON.parse(activeRequest) : null;
       if (!Array.isArray(current) || telegramProposalRevision(current) !== state.revision ||
           !request || request.requestId !== state.requestId || request.token !== state.token) {
-        throw new Error('The proposal changed while I was interpreting your comment. Tap 💬 Comment to try again.');
+        throw new Error('The proposal changed while I was interpreting your comment. Reply to the current proposal or send /edit to try again.');
       }
       if (result.clarification) {
         saveTelegramProposalCommentContext(chatId, state.token, current, context, comment, result.clarification);

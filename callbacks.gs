@@ -71,6 +71,70 @@ function handleCallbackQuery(callbackQuery) {
     return;
   }
 
+  if (action === 'receipt_menu' || action === 'receipt_save' || action === 'receipt_new') {
+    const index = Number(dataParts[2]), txn = transactions[index];
+    if (!Number.isInteger(index) || index < 0 || !txn || !txn.receipt_capture) {
+      answerCallbackQuery(queryId, 'No receipt items available. Upload the detailed receipt again.', true);
+      return;
+    }
+    if (action === 'receipt_new') {
+      transactions = flagExistingDuplicates(transactions);
+      savePendingTransactions(transactions, token);
+      if (findNextUnresolvedDuplicate([transactions[index]]) === 0) {
+        sendDuplicateWizardMessage(chatId, messageId, token, transactions, index);
+        answerCallbackQuery(queryId, 'Review before recording a separate purchase');
+      } else {
+        refreshProposalCard(chatId, messageId, token, transactions);
+        answerCallbackQuery(queryId, 'Review and approve as a new purchase');
+      }
+      return;
+    }
+    if (action === 'receipt_menu') {
+      showReceiptAttachmentOptions(chatId, messageId, token, transactions, index);
+      answerCallbackQuery(queryId, 'Review the recorded purchase');
+      return;
+    }
+    const candidateIndex = Number(dataParts[3]);
+    const candidate = Number.isInteger(candidateIndex) && candidateIndex >= 0 &&
+      (txn.receipt_attachment_candidates || [])[candidateIndex];
+    if (!candidate || !dataParts[4] || dataParts[4] !== txn.receipt_attachment_selection) {
+      answerCallbackQuery(queryId, 'This receipt choice changed. Open Add line items again.', true);
+      return;
+    }
+    let result;
+    try {
+      result = saveReceiptItemsToExisting(txn, candidate);
+    } catch (error) {
+      Logger.log('[Receipt capture] Attachment failed: ' + error.message);
+      const reason = /^(The proposal changed|The recorded transaction changed)/.test(error.message)
+        ? error.message : 'Receipt-item storage needs a retry. The recorded transaction was preserved.';
+      result = { receiptCapture: { items: 0, warnings: [reason] } };
+    }
+    rememberReceiptCaptureEvent(chatId, 'attach to existing', [txn], result);
+    const summary = receiptCaptureSummary(result);
+    if (!result.receiptCapture.items && !result.receiptCapture.already_saved) {
+      showReceiptAttachmentOptions(chatId, messageId, token, transactions, index,
+        '<b>Receipt items were not saved.</b>' + summary);
+      answerCallbackQuery(queryId, 'Receipt not saved. Review the message before retrying.', true);
+      return;
+    }
+    transactions.splice(index, 1);
+    finishTelegramProposalComment(chatId, token);
+    const details = formatReceiptItemDetailsHtml(txn, 3, transactions.length ? 800 : 1900);
+    const notice = '✅ <b>Receipt attached to the existing transaction.</b> No new payment recorded.' + summary +
+      (details ? '\n\n' + details : '');
+    if (transactions.length) {
+      savePendingTransactions(transactions, token);
+      editTelegramMessage(chatId, messageId, notice + '\n\n' + formatTransactionConfirmationHtml(transactions),
+        getMainProposalKeyboard(token, transactions));
+    } else {
+      editTelegramMessage(chatId, messageId, notice, null);
+      clearPendingTransactions(token);
+    }
+    answerCallbackQuery(queryId, 'Receipt items saved; payment unchanged');
+    return;
+  }
+
   // 3. ACTION: APPROVE ALL
   if (action === 'approve') {
     // Re-evaluate duplicates against sheet on latest transaction state
@@ -91,6 +155,7 @@ function handleCallbackQuery(callbackQuery) {
 
     // Otherwise, proceed with normal clean write
     const result = appendTransactions(transactions, undefined, false);
+    rememberReceiptCaptureEvent(chatId, 'approve', transactions, result);
 
     try {
       updateMerchantLearningStore(transactions, chatId, result);
@@ -102,8 +167,8 @@ function handleCallbackQuery(callbackQuery) {
     answerCallbackQuery(queryId, `Saved ${result.writtenCount} row(s) to Sheet! ✅`);
 
     const summaryHeader = `<b>✅ Logged to Sheet!</b> (${result.writtenCount} added${result.skippedCount > 0 ? `, ${result.skippedCount} duplicate skipped` : ''})\n\n`;
-    const updatedBody = formatTransactionConfirmationHtml(transactions);
-    const finalMessage = summaryHeader + updatedBody.replace('Tap <b>Approve All</b> to log into Budget 2026, <b>Edit</b> to modify, or <b>Discard</b> to cancel.', '') +
+    const updatedBody = formatTransactionConfirmationHtml(transactions, false);
+    const finalMessage = summaryHeader + updatedBody +
       (typeof receiptCaptureSummary === 'function' ? receiptCaptureSummary(result) : '');
 
     editTelegramMessage(chatId, messageId, finalMessage, null);
@@ -336,6 +401,7 @@ function handleCallbackQuery(callbackQuery) {
         }
       }
       const writeResult = appendTransactions(transactions, undefined, false);
+      rememberReceiptCaptureEvent(chatId, 'approve', transactions, writeResult);
       
       // Update learning store for all items
       try {
@@ -380,7 +446,7 @@ function handleCallbackQuery(callbackQuery) {
       sendTelegramMessage("⚠️ Transactions saved, but rule recording or recap failed. Please review before relying on the new rules.", chatId);
         }
       }
-      if (typeof captureSkippedReceiptItems === 'function') captureSkippedReceiptItems(transactions, itemResult);
+      rememberReceiptCaptureEvent(chatId, 'skip duplicates', transactions, itemResult);
       sendDiscardedMessage(chatId, messageId, (cleanToLog.length
         ? `✅ <b>Logged clean items!</b> (${skippedCount} duplicate(s) skipped)`
         : 'All duplicate transactions skipped; no new ledger rows.') +
@@ -458,7 +524,7 @@ function handleCallbackQuery(callbackQuery) {
       }
       
     }
-    if (typeof captureSkippedReceiptItems === 'function') captureSkippedReceiptItems(transactions, itemResult);
+    rememberReceiptCaptureEvent(chatId, 'resolve duplicates', transactions, itemResult);
     const msg = cleanToLog.length
       ? `✅ <b>Logged to Sheet!</b> (${cleanToLog.length} added${skippedCount > 0 ? `, ${skippedCount} duplicate skipped` : ''})`
       : 'All duplicate transactions skipped; no new ledger rows.';
@@ -466,7 +532,7 @@ function handleCallbackQuery(callbackQuery) {
     
     clearPendingTransactions(token);
     finishTelegramProposalComment(chatId, token);
-    answerCallbackQuery(queryId, 'All resolved and logged!');
+    answerCallbackQuery(queryId, 'All choices applied');
     return;
   }
 

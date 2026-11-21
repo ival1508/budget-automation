@@ -1,7 +1,7 @@
 /** Stage 6B–6C: month creation plans, preview and controlled sandbox-safe creator. */
 const MONTH_CREATION_NAMES = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
-// Employer-only salary top-up. Employee rates describe the preserved E13 deduction.
+// Banked salaries are net of CPF; restore both shares before E13 deducts CPF.
 const MONTH_CREATION_CPF = Object.freeze({
   Google: { wageBase: 8000, employerPercent: 17, employeePercent: 20 },
   Kaspersky: { wageBase: 8000, employerPercent: 9, employeePercent: 15 }
@@ -143,7 +143,7 @@ function buildMonthCreationSalaries(transactions, year, month, template) {
   entries.forEach(entry => {
     delete entry.pattern;
     entry.cpf = { ...MONTH_CREATION_CPF[entry.employer] };
-    entry.cpf.amount = entry.cpf.wageBase * entry.cpf.employerPercent / 100;
+    entry.cpf.amount = entry.cpf.wageBase * (entry.cpf.employerPercent + entry.cpf.employeePercent) / 100;
     entry.cashAmount = null;
     const templateAmount = template && monthCreationCell(template, Number(entry.cell.slice(1)), 2);
     if (typeof templateAmount === 'number' && Number.isFinite(templateAmount) && templateAmount >= 0 && Number.isSafeInteger(Math.round(templateAmount * 100))) {
@@ -215,7 +215,7 @@ function monthCreationSalaryFormula(entry) {
   const employer = entry.employer.toLowerCase(), other = employer === 'google' ? 'kaspersky' : 'google';
   const fallback = entry.fallback ? Math.round(entry.fallback.amount * 100) + '/100' : 'NA()';
   const cpf = MONTH_CREATION_CPF[entry.employer];
-  const cpfCents = cpf.wageBase * cpf.employerPercent;
+  const cpfCents = cpf.wageBase * (cpf.employerPercent + cpf.employeePercent);
   return '=IFERROR(LET(dates;' + monthCreationLedgerColumn('A') + ';types;' + monthCreationLedgerColumn('C') +
     ';amounts;' + monthCreationLedgerColumn('E') + ';sources;' + monthCreationLedgerColumn('I') +
     ';employer;ARRAYFORMULA(REGEXMATCH(LOWER(sources);"\\b' + employer + '\\b"));' +
@@ -307,7 +307,7 @@ function buildMonthCreationPlan(snapshot, year, month) {
   const lightIncome = buildMonthCreationLightIncome(snapshot.transactions, year, month, snapshot.asOf);
   const warnings = ['Read-only plan; formulas have not been evaluated by Google Sheets.',
     'Creation, live reader integration and deployment are separate steps.',
-    'Salary B3:B4 adds employer CPF only: Google 17% and Kaspersky 9% on the existing wage base. E13 is preserved. Provisional template compensation is carried unchanged.',
+    'Salary B3:B4 adds employee and employer CPF: Google 20% + 17%; Kaspersky year 2 PR 15% + 9%, on the existing wage base. E13 deducts full CPF once. Provisional template compensation is carried unchanged.',
     'B6 tracks this tab\'s month-to-date light income, including signed corrections; B5 starts at zero.',
     'Native sandbox must verify formula recalculation, Russian number formatting, long descriptions and wrapped status layout.',
     'Summary and 50/30/20 are not modified.'].concat(salary.warnings);
@@ -316,7 +316,7 @@ function buildMonthCreationPlan(snapshot, year, month) {
       ['Resolve the income data or template baseline, then preview again.']) };
   const edits = [
     { range: 'B1', value: Math.round((Date.UTC(year, month - 1, 1) - Date.UTC(1899, 11, 30)) / 86400000), purpose: 'First day; existing date formatting retained' },
-    { range: 'B3:B4', formulas: salary.entries.map(entry => [monthCreationSalaryFormula(entry)]), purpose: 'Previous-month banked salaries plus employer CPF only; missing salaries use provisional template compensation unchanged' },
+    { range: 'B3:B4', formulas: salary.entries.map(entry => [monthCreationSalaryFormula(entry)]), purpose: 'Previous-month banked salaries plus employee and employer CPF; missing salaries use provisional template compensation unchanged' },
     { range: 'B5', value: 0, purpose: 'Reset carried balance' },
     { range: 'B6', formula: monthCreationLightIncomeFormula(), purpose: 'Live light income in SGD for this tab\'s month, through today' },
     { range: 'I38', formula: '=H38<=$D$1', purpose: 'Correct date-in-month helper' },
@@ -372,7 +372,7 @@ function buildMonthCreationPreviewHtml(plan) {
     '</h3><table border="1" cellpadding="6" style="border-collapse:collapse"><thead><tr><th>Cell / person</th><th>Employer</th><th>SGD / status</th><th>Evidence</th></tr></thead><tbody>' +
     plan.salary.entries.map(entry => '<tr><td>' + escape(entry.cell + ' · ' + entry.person) + '</td><td>' + escape(entry.employer) +
       '</td><td>' + escape(entry.amount !== null ? 'S$' + entry.amount.toFixed(2) + ' · ' + entry.status : entry.status) + '</td><td style="white-space:pre-wrap">' +
-      escape((entry.cashAmount !== null ? 'Banked S$' + entry.cashAmount.toFixed(2) + ' + employer CPF S$' + entry.cpf.amount.toFixed(2) + '\n' : '') +
+      escape((entry.cashAmount !== null ? 'Banked S$' + entry.cashAmount.toFixed(2) + ' + employee and employer CPF S$' + entry.cpf.amount.toFixed(2) + '\n' : '') +
         (entry.transactions.map(transaction => 'Transactions row ' + transaction.row + ' · ' + transaction.date + ' · ' + transaction.source + ' · S$' + transaction.amount.toFixed(2)).join('\n') ||
         (entry.fallback ? 'Provisional template amount: ' + entry.fallback.sheet + '!' + entry.fallback.cell + '. Review when the salary transaction is logged.' : 'No matching salary transaction.'))) +
       '</td></tr>').join('') + '</tbody></table>';
@@ -451,7 +451,7 @@ function createMonthTab(year, month, options) {
   }
   const useSandbox = opts.sandbox !== undefined ? Boolean(opts.sandbox) : (!creationEnabled && !allowManualLive);
   const ss = getTargetSpreadsheet(useSandbox, opts.spreadsheet);
-  return withBudgetWriteLock(() => {
+  const result = withBudgetWriteLock(() => {
     const snapshot = readMonthCreationSnapshot(ss);
     const plan = buildMonthCreationPlan(snapshot, year, month);
     if (plan.status === 'exists') {
@@ -523,7 +523,7 @@ function createMonthTab(year, month, options) {
       }
       tempSheet.setName(plan.target.name);
       ownsTempSheet = false;
-      return {
+      const created = {
         status: 'created',
         created: true,
         sheetName: plan.target.name,
@@ -532,6 +532,8 @@ function createMonthTab(year, month, options) {
         target: plan.target,
         plan: plan
       };
+      recordMonthCreationProperty(year, month, created, ss);
+      return created;
     } catch (err) {
       if (tempSheet && ownsTempSheet && typeof ss.deleteSheet === 'function') {
         try { ss.deleteSheet(tempSheet); } catch (_) {}
@@ -539,16 +541,26 @@ function createMonthTab(year, month, options) {
       throw err;
     }
   });
+  // The notice is durable before releasing the writer lock. HTTP runs outside it;
+  // a retained caller lock defers delivery to the next dispatch heartbeat.
+  if (result.created) {
+    try { runMonthCreationConfirmations(undefined, ss); }
+    catch (error) { Logger.log('Month creation confirmation pending: ' + error.message); }
+  }
+  return result;
 }
 
-function recordMonthCreationProperty(year, month, result) {
+function recordMonthCreationProperty(year, month, result, optSs) {
+  if (!result || result.created !== true) return;
   if (typeof PropertiesService === 'undefined' || typeof PropertiesService.getScriptProperties !== 'function') return;
   const props = PropertiesService.getScriptProperties();
   if (!props || typeof props.setProperty !== 'function') return;
   const ym = year + '-' + String(month).padStart(2, '0');
   if (result && result.sheetName) {
     props.setProperty('month_created_' + ym, String(result.sheetName));
+    if (optSs) props.setProperty('month_created_workbook_' + ym, optSs.getId());
   }
+  if (optSs) queueMonthCreationConfirmation(optSs, year, month, result.sheetName, result.sheetId);
   const reviewKey = 'month_income_review_' + ym;
   if (result && result.plan && result.plan.salary) {
     if (result.plan.salary.provisional) {
@@ -562,6 +574,85 @@ function recordMonthCreationProperty(year, month, result) {
       props.deleteProperty(reviewKey);
     }
   }
+}
+
+/** Persist a live creation event, scoped to the explicitly opted-in recipients. */
+function queueMonthCreationConfirmation(ss, year, month, sheetName, sheetId) {
+  const config = SHEET_FACTS.monthTemplate;
+  const period = year + '-' + String(month).padStart(2, '0');
+  if (!config.confirmationStartPeriod || period < config.confirmationStartPeriod ||
+      year !== config.workbookYear || ss.getId() === SHEET_FACTS.TEST_SPREADSHEET_ID) return;
+  const users = getActiveTelegramUsers();
+  const chatIds = (config.confirmationUserKeys || []).map(key => SHEET_FACTS.USERS[key])
+    .filter(user => user && users.some(active => active.chat_id === String(user.chat_id)))
+    .map(user => String(user.chat_id));
+  if (!chatIds.length) return;
+  const props = PropertiesService.getScriptProperties();
+  const key = 'month_creation_notice_' + period;
+  if (!props.getProperty(key)) props.setProperty(key, JSON.stringify({
+    year: year, month: month, sheetName: sheetName, sheetId: sheetId,
+    spreadsheetId: ss.getId(), chatIds: chatIds
+  }));
+}
+
+/** Retry accepted-once creation confirmations independently of tab creation. */
+function runMonthCreationConfirmations(optNow, optSs) {
+  const config = SHEET_FACTS.monthTemplate;
+  if (!config || !config.confirmationStartPeriod || !(config.confirmationUserKeys || []).length) return [];
+  // A workbook ID also allows an authorized Apps Script API catch-up run.
+  if (typeof optSs === 'string') optSs = SpreadsheetApp.openById(optSs);
+  if (optSs && optSs.getId() === SHEET_FACTS.TEST_SPREADSHEET_ID) return [];
+  const lock = LockService.getScriptLock();
+  if (typeof lock.hasLock === 'function' && lock.hasLock()) return [];
+  const props = PropertiesService.getScriptProperties();
+  const state = props.getProperties();
+  const now = calendarDateParts(optNow instanceof Date ? optNow : new Date());
+  // Catch up the already-created November tab when this feature is installed.
+  // Historical tabs and mere existence are never treated as creation evidence.
+  const candidates = [monthCreationPeriod(now.year, now.month),
+    monthCreationPeriod(now.year + (now.month === 12 ? 1 : 0), now.month === 12 ? 1 : now.month + 1)];
+  const legacy = candidates.filter(target => {
+    const period = target.year + '-' + String(target.month).padStart(2, '0');
+    return target.year === config.workbookYear && period >= config.confirmationStartPeriod &&
+      state['month_created_' + period] && !state['month_creation_notice_' + period];
+  });
+  const prefix = 'month_creation_notice_';
+  if (!legacy.length && !Object.keys(state).some(key => key.startsWith(prefix))) return [];
+  const ss = optSs || getTargetSpreadsheet(false);
+  if (!ss || ss.getId() === SHEET_FACTS.TEST_SPREADSHEET_ID) return [];
+  legacy.forEach(target => withBudgetWriteLock(() => {
+    const period = target.year + '-' + String(target.month).padStart(2, '0');
+    const recordedWorkbook = state['month_created_workbook_' + period];
+    if (recordedWorkbook && recordedWorkbook !== ss.getId()) return;
+    const resolved = resolveMonthSheet(ss, new Date(Date.UTC(target.year, target.month - 1, 15, 12)));
+    if (resolved.sheet && resolved.tabName === state['month_created_' + period]) {
+      queueMonthCreationConfirmation(ss, target.year, target.month, resolved.tabName, resolved.sheet.getSheetId());
+    }
+  }));
+  const activeIds = getActiveTelegramUsers().map(user => user.chat_id);
+  const optedInIds = (config.confirmationUserKeys || []).map(key => SHEET_FACTS.USERS[key])
+    .filter(Boolean).map(user => String(user.chat_id)).filter(id => activeIds.includes(id));
+  const outcomes = [];
+  const notices = props.getProperties();
+  Object.keys(notices).filter(key => key.startsWith(prefix)).sort().forEach(key => {
+    try {
+      const notice = JSON.parse(notices[key]), period = key.slice(prefix.length);
+      if (notice.spreadsheetId !== ss.getId() || period < config.confirmationStartPeriod) return;
+      const resolved = resolveMonthSheet(ss, new Date(Date.UTC(notice.year, notice.month - 1, 15, 12)));
+      if (!resolved.sheet || resolved.sheet.getSheetId() !== notice.sheetId || resolved.tabName !== notice.sheetName) return;
+      const anchor = monthCreationAnchor(resolved.sheet.getRange('B1').getValue());
+      if (anchor.year !== notice.year || anchor.month !== notice.month || anchor.day !== 1) return;
+      const text = '✅ <b>New budget month created: ' + escapeCoachHtml(notice.sheetName) + ' ' + notice.year + '</b>\n' +
+        '<a href="https://docs.google.com/spreadsheets/d/' + encodeURIComponent(notice.spreadsheetId) +
+        '/edit#gid=' + encodeURIComponent(notice.sheetId) + '">Open month</a>';
+      (notice.chatIds || []).filter(id => optedInIds.includes(id)).forEach(chatId => {
+        const accepted = deliverScheduledMessage('month_creation_' + period + '_' + chatId,
+          { period: period, dueAt: 0, expiresAt: Infinity }, chatId, () => text);
+        outcomes.push({ period: period, chat_id: chatId, accepted: accepted });
+      });
+    } catch (error) { Logger.log('Month creation confirmation pending for ' + key + ': ' + error.message); }
+  });
+  return outcomes;
 }
 
 /**
@@ -595,7 +686,6 @@ function ensureMonthTab(spreadsheet, tabName, optDate) {
     if (existing && existing.sheet) return existing.sheet;
   }
   const res = createMonthTab(targetParts.year, targetParts.month, { spreadsheet: ss, sandbox: false });
-  recordMonthCreationProperty(targetParts.year, targetParts.month, res);
   return ss.getSheetByName(res.sheetName);
 }
 
@@ -623,7 +713,6 @@ function runScheduledMonthCreation(optNow, optSs) {
       : { sheet: ss.getSheetByName(MONTH_CREATION_NAMES[parts.month - 1]) };
     if (!currentResolved.sheet) {
       const res = createMonthTab(parts.year, parts.month, { spreadsheet: ss, sandbox: false });
-      recordMonthCreationProperty(parts.year, parts.month, res);
       actions.push(Object.assign({ trigger: 'current_month_recovery' }, res));
     }
   }
@@ -654,7 +743,6 @@ function runScheduledMonthCreation(optNow, optSs) {
         });
       } else {
         const res = createMonthTab(nextYear, nextMonth, { spreadsheet: ss, sandbox: false });
-        recordMonthCreationProperty(nextYear, nextMonth, res);
         actions.push(Object.assign({ trigger: 'last_day_rollover' }, res));
       }
     }
@@ -668,9 +756,6 @@ function createNextMonthFromMenu() {
     ? SpreadsheetApp.getActiveSpreadsheet()
     : null;
   const res = createMonthTab(undefined, undefined, { spreadsheet: ss, sandbox: false, allowManualLive: true });
-  if (res && res.target) {
-    recordMonthCreationProperty(res.target.year, res.target.month, res);
-  }
   if (ss && res && res.sheetName && typeof ss.getSheetByName === 'function' && typeof ss.setActiveSheet === 'function') {
     const createdSheet = ss.getSheetByName(res.sheetName);
     if (createdSheet) ss.setActiveSheet(createdSheet);

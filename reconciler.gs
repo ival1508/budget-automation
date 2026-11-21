@@ -5062,6 +5062,7 @@ function buildBudgetMenu(ui) {
     .addItem('Preview settlement coverage setup', 'showCashCoveragePreview')
     .addItem('Set up settlement coverage', 'installCashCoverageFromMenu')
     .addItem('Receipt capture status', 'showReceiptCapturePreview')
+    .addItem('Preview Basket Review (read-only)', 'showBasketReviewPreview')
     .addItem('Run morning coach now', 'sendMorningCoach')
     .addItem('Preview monthly coach', 'showMonthlyCoachPreview')
     .addItem('Preview next month (read-only)', 'showMonthCreationPreview')

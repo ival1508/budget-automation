@@ -44,7 +44,9 @@ const SHEET_FACTS = {
   NON_LEDGER_MANDATORY: ['CPF'],
 
   // Stage 6 automatic month creation enabled (creates next month at 00:00 SGT on the last day of the month).
-  monthTemplate: { workbookYear: 2026, version: 1, creationEnabled: true },
+  monthTemplate: { workbookYear: 2026, version: 1, creationEnabled: true,
+    // Val requested Telegram creation confirmations on 31 October 2026.
+    confirmationUserKeys: ['VAL'], confirmationStartPeriod: '2026-11' },
 
   // Shared dispatch heartbeat, SGT. Same-day alerts need explicit opt-in.
   MANDATORY_REMINDERS: {

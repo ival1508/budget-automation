@@ -12,12 +12,15 @@
  * @param {Array<Object>} transactions - Array of enriched transaction objects.
  * @return {string} Formatted HTML message text.
  */
-function formatTransactionConfirmationHtml(transactions) {
+function formatTransactionConfirmationHtml(transactions, showActions = true) {
   if (!Array.isArray(transactions) || transactions.length === 0) {
     return '<i>No transactions remaining in proposal.</i>';
   }
 
-  const lines = ['<b>📝 Proposed Transactions for Review:</b>\n'];
+  const attachmentCount = transactions.filter(proposalNeedsReceiptAttachment).length;
+  const lines = [showActions && attachmentCount === transactions.length
+    ? '<b>🧾 Add line items to a recorded purchase:</b>\n'
+    : '<b>📝 Proposed Transactions for Review:</b>\n'];
 
   for (let i = 0; i < transactions.length; i++) {
     const txn = transactions[i];
@@ -46,6 +49,10 @@ function formatTransactionConfirmationHtml(transactions) {
       lines.push('💱 SGD equivalent: S$' + Number(txn.amount_sgd).toFixed(2));
     }
     if (txn.notes) lines.push('🗒️ ' + escapeProposalCommentHtml(txn.notes));
+    const captureStatus = receiptCaptureProposalStatus(txn);
+    if (captureStatus) lines.push(escapeProposalCommentHtml(captureStatus));
+    const receiptDetails = formatReceiptItemDetailsHtml(txn, 3, Math.floor(1600 / transactions.length));
+    if (receiptDetails) lines.push(receiptDetails);
 
     // Append diagnostic review reasons if flagged
     const reviewWarnings = formatReviewReasons(txn);
@@ -56,7 +63,13 @@ function formatTransactionConfirmationHtml(transactions) {
     lines.push(''); // Blank line spacing between transactions
   }
 
-  lines.push('Tap <b>Approve All</b> to log into Budget 2026, <b>Edit</b> to modify, or <b>Discard</b> to cancel.');
+  if (showActions) {
+    const instruction = attachmentCount
+      ? 'Tap <b>Add line items</b> to review the recorded purchase and attach its receipt items.' +
+        (attachmentCount < transactions.length ? ' Then approve the remaining new transactions.' : '')
+      : 'Tap <b>' + proposalApprovalLabel(transactions) + '</b> to save.';
+    lines.push('Reply to this message with any changes. ' + instruction + ' Tap <b>Discard</b> to cancel.');
+  }
   return lines.join('\n');
 }
 
@@ -97,7 +110,9 @@ function formatReviewReasons(item) {
   if (hasFlags && item.flags.indexOf('force_add') !== -1) {
     reasons.push('✅ <b>Force Add Enabled:</b> Will be logged as a legitimate separate purchase.');
   } else if (hasFlags && item.flags.indexOf('possible_duplicate') !== -1) {
-    reasons.push('🔁 <i>Possible duplicate of an earlier charge today (will confirm on approve)</i>');
+    reasons.push(proposalNeedsReceiptAttachment(item)
+      ? '🧾 <i>A matching payment is already recorded. Review it before adding line items.</i>'
+      : '🔁 <i>Possible duplicate of an earlier charge today (will confirm on approve)</i>');
   }
 
   // 5. Low AI Confidence Check
@@ -121,22 +136,43 @@ function formatReviewReasons(item) {
 
 /**
  * Builds the primary proposal Inline Keyboard (§6.4).
- * Buttons: Approve All, Edit, Discard
+ * One save action: approve new purchases with their items, or attach to recorded purchases.
  * 
  * @param {string} token - Cache token for state tracking.
  * @return {Object} Telegram reply_markup inline_keyboard structure.
  */
-function getMainProposalKeyboard(token) {
-  return {
-    inline_keyboard: [
-      [
-        { text: '✅ Approve All', callback_data: `approve:${token}` },
-        { text: '✏️ Edit', callback_data: `edit_menu:${token}` },
-        { text: '🗑️ Discard', callback_data: `discard:${token}` }
-      ],
-      [{ text: '💬 Comment', callback_data: `comment:${token}` }]
-    ]
-  };
+function getMainProposalKeyboard(token, transactions) {
+  const rows = transactions || [];
+  const receiptButtons = rows.map((txn, index) => proposalNeedsReceiptAttachment(txn)
+    ? [{ text: '🧾 Add line items' + (rows.length > 1 ? ' · item ' + (index + 1) : ''),
+      callback_data: 'receipt_menu:' + token + ':' + index }]
+    : null).filter(Boolean);
+  const discard = { text: '🗑️ Discard', callback_data: `discard:${token}` };
+  // Finish receipt-only attachments before approving a mixed proposal. Each
+  // attachment removes just that item and refreshes the remaining actions.
+  if (receiptButtons.length) return { inline_keyboard: receiptButtons.concat([[discard]]) };
+  const approve = { text: '✅ ' + proposalApprovalLabel(rows), callback_data: `approve:${token}` };
+  return { inline_keyboard: rows.some(proposalHasReceiptItems) ? [[approve], [discard]] : [[approve, discard]] };
+}
+
+function proposalHasReceiptItems(txn) {
+  return Boolean(txn && txn.receipt_capture && Array.isArray(txn.receipt_capture.line_items) &&
+    txn.receipt_capture.line_items.length);
+}
+
+function proposalNeedsReceiptAttachment(txn) {
+  const flags = txn && txn.flags || [];
+  return proposalHasReceiptItems(txn) && flags.includes('possible_duplicate') &&
+    !flags.includes('force_add') && !flags.includes('skipped') &&
+    // Old cached cards lack the explicit ledger/batch distinction. Their
+    // attachment screen still validates every candidate before any write.
+    txn.receipt_existing_purchase !== false;
+}
+
+function proposalApprovalLabel(transactions) {
+  const rows = transactions || [];
+  return (rows.length === 1 ? 'Approve' : 'Approve all') +
+    (rows.some(proposalHasReceiptItems) ? ' and save receipt items' : '');
 }
 
 /**
@@ -154,7 +190,7 @@ function sendConfirmationMessage(chatId, token, transactions, isUpdate = false) 
   }
 
   const messageText = formatTransactionConfirmationHtml(transactions);
-  const inlineKeyboard = getMainProposalKeyboard(token);
+  const inlineKeyboard = getMainProposalKeyboard(token, transactions);
   
   const userProps = PropertiesService.getUserProperties();
   const msgIdKey = `latest_message_id_${chatId}`;
@@ -400,7 +436,7 @@ function refreshProposalCard(chatId, messageId, token, transactions) {
     }
   }
   const newText = formatTransactionConfirmationHtml(transactions);
-  const mainKeyboard = getMainProposalKeyboard(token);
+  const mainKeyboard = getMainProposalKeyboard(token, transactions);
   return editTelegramMessage(chatId, messageId, newText, mainKeyboard);
 }
 
@@ -455,27 +491,7 @@ function editTelegramMessage(chatId, messageId, text, replyMarkup) {
  * @param {string} [textMessage] - Optional custom discard text message.
  */
 function sendDiscardedMessage(chatId, messageId, textMessage) {
-  const token = PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
-  if (!token) return;
-  const url = `https://api.telegram.org/bot${token}/editMessageText`;
-
-  const payload = {
-    chat_id: String(chatId),
-    message_id: Number(messageId),
-    text: textMessage || '🗑️ Discarded by user.',
-    parse_mode: 'HTML',
-    reply_markup: JSON.stringify({ inline_keyboard: [] })
-  };
-
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-
-  const response = UrlFetchApp.fetch(url, options);
-  Logger.log('Discard edit response: ' + response.getContentText());
+  return editTelegramMessage(chatId, messageId, textMessage || '🗑️ Discarded by user.', null);
 }
 
 /**
@@ -548,9 +564,6 @@ function answerCallbackQuery(callbackQueryId, text, showAlert) {
  * @param {number} currentIndex - Index of duplicate transaction being resolved.
  */
 function sendDuplicateWizardMessage(chatId, messageId, token, transactions, currentIndex) {
-  var tokenProp = PropertiesService.getScriptProperties().getProperty("TELEGRAM_BOT_TOKEN");
-  var url = "https://api.telegram.org/bot" + tokenProp + "/editMessageText";
-  
   // Count total duplicates to show progress (e.g., "1 of 3")
   var totalDupes = 0;
   var currentDupeNumber = 0;
@@ -566,10 +579,10 @@ function sendDuplicateWizardMessage(chatId, messageId, token, transactions, curr
   
   var item = transactions[currentIndex];
   var textMessage = "⚠️ <b>Duplicate Intercept (" + currentDupeNumber + " of " + totalDupes + ")</b>\n\n" +
-                    "This purchase appears to already exist in your sheet today:\n" +
-                    "📅 <b>" + item.date + "</b> | 💳 <i>" + item.account + "</i>\n" +
-                    "💸 <b>" + item.where + "</b> — S$" + Number(item.amount).toFixed(2) + "\n" +
-                    "🏷️ Category: " + item.category + "\n\n" +
+                    "This purchase appears to already exist in your sheet:\n" +
+                    "📅 <b>" + escapeProposalCommentHtml(item.date) + "</b> | 💳 <i>" + escapeProposalCommentHtml(item.account) + "</i>\n" +
+                    "💸 <b>" + escapeProposalCommentHtml(item.where) + "</b> — S$" + Number(item.amount).toFixed(2) + "\n" +
+                    "🏷️ Category: " + escapeProposalCommentHtml(item.category) + "\n\n" +
                     "Is this a legitimate separate purchase?";
                     
   var buttons = [
@@ -580,21 +593,59 @@ function sendDuplicateWizardMessage(chatId, messageId, token, transactions, curr
     [{ text: "❌ Skip All Remaining Duplicates", callback_data: "resolve_dup:" + token + ":all:skip_all" }],
     [{ text: "🔙 Back to Review", callback_data: "back_to_main:" + token }]
   ];
+  if (proposalHasReceiptItems(item)) {
+    const canAttach = proposalNeedsReceiptAttachment(item);
+    textMessage += '\n\n🧾 ' + item.receipt_capture.line_items.length +
+      ' receipt items are available. ' + (canAttach
+        ? 'Add them to the existing purchase without adding another payment, or skip this upload.'
+        : 'Approving a new purchase also saves its receipt items. Skipping a duplicate copy skips its items.');
+    const details = formatReceiptItemDetailsHtml(item, 3, 1000);
+    if (details) textMessage += '\n\n' + details;
+    if (canAttach) buttons.unshift([{ text: '🧾 Add line items', callback_data: 'receipt_menu:' + token + ':' + currentIndex }]);
+  } else if (item.receipt_capture_warning) {
+    textMessage += '\n\n⚠️ ' + escapeProposalCommentHtml(item.receipt_capture_warning);
+  }
   
-  var payload = {
-    chat_id: String(chatId),
-    message_id: Number(messageId),
-    text: textMessage,
-    parse_mode: "HTML",
-    reply_markup: JSON.stringify({ inline_keyboard: buttons })
-  };
-  
-  var options = {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-  
-  UrlFetchApp.fetch(url, options);
+  return editTelegramMessage(chatId, messageId, textMessage, { inline_keyboard: buttons });
+}
+
+/** Review real recorded purchases before the explicit receipt-only save. */
+function showReceiptAttachmentOptions(chatId, messageId, token, transactions, index, notice) {
+  const txn = transactions[index];
+  if (!txn || !txn.receipt_capture) throw new Error('No extracted receipt items are available. Upload the detailed receipt again.');
+  let candidates = findReceiptAttachmentCandidates(txn);
+  const lines = [notice || '<b>🧾 Add line items to an existing transaction</b>',
+    txn.receipt_capture.line_items.length + ' receipt item' + (txn.receipt_capture.line_items.length === 1 ? '' : 's') +
+      ' extracted from ' + escapeProposalCommentHtml(txn.receipt_capture.merchant) + '.',
+    'Choose the recorded purchase below. Its amount, category and account will stay unchanged.'];
+  const parentCounts = new Map();
+  candidates.forEach(row => parentCounts.set(row.key, (parentCounts.get(row.key) || 0) + 1));
+  if (candidates.some(row => parentCounts.get(row.key) > 1)) {
+    lines.push('Identical duplicate payments are ambiguous and cannot receive receipt items until they are resolved.');
+    candidates = candidates.filter(row => parentCounts.get(row.key) === 1);
+  }
+  if (candidates.length > 8) {
+    candidates = candidates.filter(row => compactWhere(row.where) === compactWhere(txn.where));
+    if (candidates.length > 8) candidates = [];
+    lines.push('Many purchases match the date, account and amount. Showing matches for the current merchant; reply with a corrected merchant to narrow the choice if needed.');
+  }
+  txn.receipt_attachment_candidates = candidates;
+  txn.receipt_attachment_revision = receiptAttachmentRevision(txn);
+  txn.receipt_attachment_selection = Utilities.getUuid().slice(0, 8);
+  savePendingTransactions(transactions, token);
+  const buttons = candidates.map((row, candidateIndex) => {
+    lines.push('\n' + (candidateIndex + 1) + '. ' + escapeProposalCommentHtml(row.date) + ' · ' +
+      escapeProposalCommentHtml(row.account) + ' · <b>' + escapeProposalCommentHtml(row.where) +
+      '</b> · S$' + row.amount_sgd.toFixed(2) + ' (transaction row ' + row.row + ')');
+    return [{ text: 'Add line items' + (candidates.length > 1 ? ' to purchase ' + (candidateIndex + 1) : ''),
+      callback_data: 'receipt_save:' + token + ':' + index + ':' + candidateIndex + ':' + txn.receipt_attachment_selection }];
+  });
+  if (!candidates.length) lines.push('\nNo unique choice is available. Reply with any corrections to the date, account, merchant or SGD amount, then try again. No items or transactions were saved.');
+  const details = formatReceiptItemDetailsHtml(txn, 8, Math.max(0, 3600 - lines.join('\n').length));
+  if (details) lines.splice(2, 0, details + '\n');
+  if ((txn.flags || []).includes('possible_duplicate')) {
+    buttons.push([{ text: 'Review as a separate purchase', callback_data: 'receipt_new:' + token + ':' + index }]);
+  }
+  buttons.push([{ text: '🔙 Back to review', callback_data: 'back_to_main:' + token }]);
+  return editTelegramMessage(chatId, messageId, lines.join('\n'), { inline_keyboard: buttons });
 }

@@ -3,27 +3,23 @@
 Initial plan and discovery checkpoint: 3 October 2026.
 November readiness review: 25 October 2026 (SGT).
 
-## Current status — 28 October 2026
+## Current status — 21 November 2026
 
-The creator, reader integration and dispatcher are implemented and enabled. All
-33 application files match the editor and existing web-app deployment version 93
-after the cash-coverage follow-up.
-The 25 October work log records Val's successful live November trial and his
-instruction to leave G3:G13 blank. This is a recorded live trial, not independent
-evidence that the original native TEST acceptance matrix was completed.
+The creator, reader integration, Telegram creation confirmation (`v102`), full
+employee + employer CPF salary gross-up (`v103`), and concise `I2:I32` daily
+spending summary (`5c67b7d`) are merged and deployed in **version 109** (all
+**35 application files** match local Git `main`, Apps Script `@HEAD`, and the
+existing web-app deployment `@109`; **330 offline regression tests** pass).
 
-The current live workbook has no November tab. A read-only local plan against
-fresh October values/formulas accepts that template and proposes `Ноябрь` with
-the seven expected edit ranges. That check deliberately omits salary ledger
-evidence and uses template fallbacks; it does not evaluate generated formulas.
-Verify eligible scheduled creation on **31 October from 00:00 SGT**, the final
-native values/formulas, provisional salary notes and an existing-month no-op.
-Current trigger installation/execution was not inspected. Summary!E4's monthly
-reference dependency was resolved by the [28 October cash-coverage implementation](summary-cash-coverage.md):
-native formulas select the current SGT month even when the next month's tab is
-created early, and the daily coach reads its checked value. Verify actual
-scheduled month creation separately; cash-coverage formulas do not create tabs.
-Cross-year creation is intentionally refused; set up the 2027 workbook separately.
+In the live `Budget 2026` workbook, `Ноябрь'26` is active with zero formula errors
+(`B1 = 01.11.2026`, `D1 = 30.11.2026`, `B3`/`B4` employer salary lookups resolved,
+`B6` MTD light income live, `G3:G13` blank per policy, `I38` helper active, and
+`CashCoverage` / `Summary!E4` tracking `Ноябрь'26`). Because `Ноябрь'26` was created
+before `5c67b7d` was pushed to Apps Script, its `I2:I32` cells retain the valid v1
+full-list formula; `Декабрь` (scheduled from **30 November 00:00 SGT**) will write
+the concise largest-purchase plus top-categories summary formula from `v109`.
+Cross-year creation (`2026 → 2027`) remains intentionally refused; set up the
+2027 annual workbook separately before 31 December.
 
 The older implementation table/readiness checklist below mixes pre-creator work
 with later completion entries. This status and the [dated Phase 2 review](phase-2-progress-review-2026-10-28.md)

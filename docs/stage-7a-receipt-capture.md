@@ -34,6 +34,22 @@ PDF MIME types, real-statement evidence, individual bank confirmations, and pend
 proposal preservation. These mocked cases verify routing and persistence rather
 than OCR accuracy on an actual Shell PDF. The existing web-app URL is preserved.
 
+**Versions 98–109 (31 October – 21 November 2026):**
+- Explicit **🧾 Add line items** (`receipt_menu` / `receipt_save`) replaces implicit
+  duplicate-skip capture when attaching an itemized receipt to an already-logged
+  transaction, with chat-scoped capture diagnostics (`/items status`).
+- `LineItems` adds printed unit price metadata (`printed_unit_price`,
+  `printed_price_unit`, backwards-compatible with 29-column sheets) and normalizes
+  printed package weights (`340g`/`555g`) mislabelled as `each`.
+- PDF uploads send an immediate `📄 PDF received` acknowledgement, and transaction
+  intake uses `gemini-4-hydrogen` (`thinkingLevel: LOW`) with `gemini-3.5-flash-lite`
+  fallback.
+- **Stage 7B Basket Review** (`analyzer.gs`) is live via `/items`, `/items details`,
+  `/items YYYY-MM`, **Budget → Preview Basket Review (read-only)**, and month-end
+  scheduled delivery. Version **109** aligns all **35 application files** across
+  Git `main`, `@HEAD`, and the existing `/exec` deployment (**330 offline tests**
+  passing; `LineItems` has 58 live rows across 9 receipts as of 21 November).
+
 ## Everyday use
 
 Send an itemized receipt as a Telegram photo, image document or PDF. Review and

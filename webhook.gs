@@ -124,9 +124,16 @@ function doPost(e) {
           }
           return HtmlService.createHtmlOutput('OK');
         }
-        if (/^\/items(?:@\w+)?\s*$/i.test(textTrimmed)) {
-          const capture = previewReceiptCapture();
-          sendTelegramMessage(capture.message, chatId);
+        const itemsCommand = /^\/items(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(textTrimmed);
+        if (itemsCommand) {
+          const argument = (itemsCommand[1] || '').trim();
+          if (argument.toLowerCase() === 'status') {
+            sendTelegramMessage(previewReceiptCapture(undefined, chatId).message, chatId);
+          } else {
+            const match = /^(?:(details)(?:\s+(\d{4}-(?:0[1-9]|1[0-2])))?|(\d{4}-(?:0[1-9]|1[0-2]))(?:\s+(details))?)?$/i.exec(argument);
+            if (!match) sendTelegramMessage('Use /items for Basket Review, /items details for evidence, /items YYYY-MM for a month, or /items status for capture diagnostics.', chatId);
+            else sendBasketReview(chatId, match[2] || match[3] || undefined, undefined, Boolean(match[1] || match[4]));
+          }
           return HtmlService.createHtmlOutput('OK');
         }
 
@@ -223,6 +230,12 @@ function doPost(e) {
           const filePath = getTelegramFilePath(doc.file_id, botToken);
           inputs.push(fetchTelegramFileAsBase64(filePath, botToken, mimeType));
         } else if (isPdf || isCsv) {
+          if (isPdf) {
+            // PDF classification and receipt extraction can outlast Telegram's
+            // webhook wait. Give feedback before downloading or calling models.
+            try { sendTelegramMessage('📄 PDF received. I’m reading it now; this can take a couple of minutes.', chatId); }
+            catch (_) { Logger.log('[PDF acknowledgement] Progress message could not be delivered.'); }
+          }
           const targetMime = isPdf ? 'application/pdf' : 'text/csv';
           const filePath = getTelegramFilePath(doc.file_id, botToken);
           const docMediaObj = fetchTelegramFileAsBase64(filePath, botToken, targetMime);
@@ -334,6 +347,7 @@ function doPost(e) {
           const tokenToSave = (previousProposal && previousProposal.length > 0) ? activeToken : null;
           const token = savePendingTransactions(finalTransactionsToConfirm, tokenToSave);
           userProperties.setProperty(activeTokenKey, token);
+          rememberReceiptCaptureEvent(chatId, 'upload', enrichedTransactions);
           if (message.media_group_id) {
             Logger.log(`[Album photo] group=${message.media_group_id}; message=${message.message_id}; extracted=${enrichedTransactions.length}; proposal_rows=${finalTransactionsToConfirm.length}`);
           }
@@ -402,8 +416,10 @@ function mergeScreenshotProposals(previous, incoming) {
     const id = key(txn), matches = remaining.get(id) || [];
     if (matches.length) {
       const old = matches.shift();
-      if (txn.receipt_capture && !old.receipt_capture) old.receipt_capture = txn.receipt_capture;
+      if (txn.receipt_capture) old.receipt_capture = old.receipt_capture
+        ? mergeReceiptCaptureEvidence(old.receipt_capture, txn.receipt_capture) : txn.receipt_capture;
       if (txn.receipt_capture_warning && !old.receipt_capture) old.receipt_capture_warning = txn.receipt_capture_warning;
+      if (txn.receipt_capture_status && (!old.receipt_capture || txn.receipt_capture)) old.receipt_capture_status = txn.receipt_capture_status;
     }
     else merged.push(txn);
   });

@@ -30,11 +30,13 @@ function readerFixture(c, epoch = '2026-10-28T00:00:00Z') {
 }
 
 module.exports = test => {
-  test('cash coverage includes all unpaid plans, excludes CPF, respects refunds/date/type and explicit parent tags', c => {
+  test('cash coverage includes all unpaid plans, treats CPF as withheld in payroll, respects refunds/date/type and explicit parent tags', c => {
     const s = snapshot(), result = c.calculateCashCoverage(s);
     assert.equal(result.amount_sgd, 2150);
     assert.deepEqual(Array.from(result.components, x => [x.category, x.unpaid_sgd]),
-      [['НКО', 50], ['Школа & Детский сад', 400], ['Родители', 0], ['Отложения', 500]]);
+      [['НКО', 50], ['Школа & Детский сад', 400], ['Родители', 0], ['Отложения', 500], ['CPF', 0]]);
+    const cpf = result.components.find(x => x.category === 'CPF');
+    assert.equal(cpf.planned_sgd, 4880); assert.equal(cpf.logged_sgd, 4880);
     s.plans.push(['Дом', 300]);
     assert.equal(c.calculateCashCoverage(s).components.find(x => x.category === 'Дом').unpaid_sgd, 300);
   });

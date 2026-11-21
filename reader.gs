@@ -399,8 +399,9 @@ function getDailySaldo(ss) {
 /**
  * STAGE 1: Reads daily pacing metrics directly from the active monthly tab without recomputing the saldo chain.
  * Returns:
- * - K_cumulative_today: monthly tab col K, today's row — the reality check
- * - L_saldo_yesterday: col L, yesterday's row (0 if day 1)
+ * - K_cumulative_today: monthly tab col K, today's row — available at the beginning of the day
+ * - L_saldo_today: col L, today's row — closing position after today's spending (null if unavailable)
+ * - L_saldo_yesterday: col L, yesterday's row (0 if day 1, null if unavailable)
  * - D17_flat_daily: cell D17 — flat pacing
  * - D19_realistic_daily: cell D19 — budget left ÷ days left
  * - days_left: remaining days in the month (including today)
@@ -408,7 +409,7 @@ function getDailySaldo(ss) {
  * 
  * @param {Date} [optDate] - Optional Date instance. Defaults to current SGT date.
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [ss] - Optional Spreadsheet instance.
- * @return {{ K_cumulative_today: number, L_saldo_yesterday: number, D17_flat_daily: number, D19_realistic_daily: number, days_left: number, days_to_positive: number }}
+ * @return {{ K_cumulative_today: number|null, L_saldo_today: number|null, L_saldo_yesterday: number|null, D17_flat_daily: number, D19_realistic_daily: number, days_left: number, days_to_positive: number }}
  */
 function getDailyPacing(optDate, ss) {
   let targetDate = (optDate instanceof Date) ? optDate : null;
@@ -432,6 +433,7 @@ function getDailyPacing(optDate, ss) {
 
   const defaultResult = {
     K_cumulative_today: 0,
+    L_saldo_today: null,
     L_saldo_yesterday: 0,
     D17_flat_daily: 0,
     D19_realistic_daily: 0,
@@ -468,7 +470,8 @@ function getDailyPacing(optDate, ss) {
     const displayValues = trackerRange.getDisplayValues();
 
     let kCumulativeToday = 0;
-    let lSaldoYesterday = 0;
+    let lSaldoToday = null;
+    let lSaldoYesterday = targetDay === 1 ? 0 : null;
     let todayRowFound = false;
     let yesterdayRowFound = false;
 
@@ -503,13 +506,14 @@ function getDailyPacing(optDate, ss) {
 
       // Match Today
       if (rowDay === targetDay && !todayRowFound) {
-        kCumulativeToday = parseAmountNumber(rawValues[r][3], displayValues[r][3]); // Col K
+        kCumulativeToday = readOptionalPacingAmount(rawValues[r][3], displayValues[r][3]); // Col K
+        lSaldoToday = readOptionalPacingAmount(rawValues[r][4], displayValues[r][4]); // Col L, closing position
         todayRowFound = true;
       }
 
       // Match Yesterday
       if (yesterdayDay >= 1 && rowDay === yesterdayDay && !yesterdayRowFound) {
-        lSaldoYesterday = parseAmountNumber(rawValues[r][4], displayValues[r][4]); // Col L
+        lSaldoYesterday = readOptionalPacingAmount(rawValues[r][4], displayValues[r][4]); // Col L
         yesterdayRowFound = true;
       }
     }
@@ -522,6 +526,7 @@ function getDailyPacing(optDate, ss) {
 
     return {
       K_cumulative_today: kCumulativeToday,
+      L_saldo_today: lSaldoToday,
       L_saldo_yesterday: lSaldoYesterday,
       D17_flat_daily: d17FlatDaily,
       D19_realistic_daily: d19RealisticDaily,
@@ -531,6 +536,15 @@ function getDailyPacing(optDate, ss) {
   } catch (e) {
     Logger.log(`Error in getDailyPacing: ${e.message}`);
     return { ...defaultResult, error: 'read_error', message: e.message };
+  }
+}
+
+/** Keep unavailable tracker values distinct from numeric zero without losing other pacing reads. */
+function readOptionalPacingAmount(raw, display) {
+  try {
+    return readMonthlyAmount(raw, display);
+  } catch (e) {
+    return null;
   }
 }
 
@@ -1825,8 +1839,8 @@ function test_getTodaySpend() {
  * Test function: Asserts consistency across all daily budget readers.
  * - Asserts getDailyPacing() is the single source for K, L, D17, D19.
  * - Asserts buildCoachPayload() and Evening Recap use getDailyPacing directly.
- * - Asserts Col K and Cell D19 are labelled differently ("Cumulative position" vs "Spendable per day").
- * - Asserts negative cumulative positions are rendered in plain language using days_to_positive.
+ * - Asserts evening opening allowance (K) and closing position (L) are separate from morning D19.
+ * - Asserts negative closing positions are rendered in plain language.
  * - Asserts all money values are rounded to 2 decimal places with no float tails.
  * - Prints side-by-side what Evening Recap and Morning Coach say today.
  */
@@ -1892,24 +1906,24 @@ function test_dailyBudgetConsistency() {
     passed = false;
   }
 
-  // Assert C: Evening recap uses "Spendable per day" for D19
-  if (eveningRecap.includes('Spendable per day:')) {
-    Logger.log(`✅ PASS: Evening recap correctly labels D19 as "Spendable per day:".`);
+  // Assert C: Evening recap uses K and today's L rather than the remaining daily allowance D19
+  if (eveningRecap.includes('Available Today:') && eveningRecap.includes('Result:') && !eveningRecap.includes('Spendable per day:')) {
+    Logger.log(`✅ PASS: Evening recap shows today's opening allowance and closing result; D19 stays in the morning brief.`);
   } else {
-    Logger.log(`❌ FAIL: Evening recap missing "Spendable per day:" label!`);
+    Logger.log(`❌ FAIL: Evening recap must show opening allowance and closing result, without D19.`);
     passed = false;
   }
 
   // Assert D: Cumulative position uses plain language for negative values
-  if (pacing.K_cumulative_today < 0) {
+  if (pacing.L_saldo_today < 0) {
     if (eveningRecap.includes('behind pace')) {
-      Logger.log(`✅ PASS: Negative cumulative position (K = ${pacing.K_cumulative_today.toFixed(2)}) is described in plain language ("behind pace").`);
+      Logger.log(`✅ PASS: Negative closing position (L = ${pacing.L_saldo_today.toFixed(2)}) is described in plain language ("behind pace").`);
     } else {
       Logger.log(`❌ FAIL: Negative cumulative position not rendered in plain language!`);
       passed = false;
     }
   } else {
-    Logger.log(`ℹ️ Info: Cumulative position is positive or zero (${pacing.K_cumulative_today.toFixed(2)}).`);
+    Logger.log(`ℹ️ Info: Closing position is nonnegative or unavailable (${pacing.L_saldo_today}).`);
   }
 
   // Assert E: No float tails (> 2 decimal places) on money values in Evening Recap or Morning Coach

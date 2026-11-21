@@ -41,10 +41,11 @@ function cacheFixture(c) {
 
 function telegramFixture(c) {
   cacheFixture(c);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'telegramUI.gs'), 'utf8'), c);
   const getLedger = c.getTransactionsSheet, getCategories = c.getCategoryBucketMap;
   c.getTransactionsSheet = selected => getLedger(selected || c.SpreadsheetApp.getActiveSpreadsheet());
   c.getCategoryBucketMap = selected => getCategories(selected || c.SpreadsheetApp.getActiveSpreadsheet());
-  const userProps = new Map(), messages = [], documents = [], cards = [];
+  const userProps = new Map(), messages = [], markups = [], documents = [], cards = [];
   c.PropertiesService.getUserProperties = () => ({ getProperty: key => userProps.get(key) || null,
     setProperty: (key, value) => userProps.set(key, value) });
   c.PropertiesService.getScriptProperties().setProperty('TELEGRAM_BOT_TOKEN', 'offline-key');
@@ -57,7 +58,7 @@ function telegramFixture(c) {
   c.enqueueStatementFile = blob => documents.push(blob);
   c.sendTelegramMessage = text => messages.push(text);
   c.sendConfirmationMessage = (_, token, rows) => cards.push({ token, rows });
-  c.answerCallbackQuery = () => {}; c.editTelegramMessage = (_, __, text) => messages.push(text);
+  c.answerCallbackQuery = () => {}; c.editTelegramMessage = (_, __, text, markup) => { messages.push(text); markups.push(markup); };
   c.sendDiscardedMessage = (_, __, text) => messages.push(text);
   c.updateMerchantLearningStore = () => {}; c.flagExistingDuplicates = rows => rows;
   c.formatTransactionConfirmationHtml = () => 'Transaction summary';
@@ -65,7 +66,7 @@ function telegramFixture(c) {
   const post = message => c.doPost({ parameter: { secret: 'offline-secret' },
     postData: { contents: JSON.stringify({ update_id: ++updateId, message: { chat: { id: 123 }, ...message } }) } });
   const callback = data => c.handleCallbackQuery({ id: 'query', data, message: { chat: { id: 123 }, message_id: 12 } });
-  return { post, callback, messages, cards, documents, userProps };
+  return { post, callback, messages, markups, cards, documents, userProps };
 }
 
 function pdfFixture(c, storage, options = {}) {
@@ -347,14 +348,17 @@ module.exports = (test, storage) => {
     assert.match(c.receiptCaptureSummary(result), /storage needs a retry/);
     assert.equal(f.lock.acquired, f.lock.released);
   });
-  test('skipping a duplicate can attach missing receipt items or repair an interrupted catalog without a second ledger write', c => {
+  test('attaching receipt items to an existing transaction saves items or repairs catalog without a second ledger write', c => {
     const f = storage(c), parent = txn(c);
     c.appendTransactions([parent], f.ss, false);
-    parent.receipt_capture = capture(c); parent.flags = ['possible_duplicate', 'skipped'];
-    const result = c.captureSkippedReceiptItems([parent], {}, f.ss);
+    parent.receipt_capture = capture(c);
+    parent.receipt_attachment_revision = c.receiptAttachmentRevision(parent);
+    const candidates = c.findReceiptAttachmentCandidates(parent, f.ss);
+    assert.equal(candidates.length, 1);
+    const result = c.saveReceiptItemsToExisting(parent, candidates[0], f.ss);
     assert.equal(result.receiptCapture.items, 1); assert.equal(f.ledger.data.length, 3);
     f.ss.getSheetByName('Products').data.length = 1;
-    const replay = c.captureSkippedReceiptItems([parent], {}, f.ss);
+    const replay = c.saveReceiptItemsToExisting(parent, candidates[0], f.ss);
     assert.equal(replay.receiptCapture.already_saved, 1); assert.equal(f.ss.getSheetByName('Products').data.length, 2);
     assert.equal(f.ss.getSheetByName('LineItems').data.length, 2);
     const forced = { ...parent, flags: ['force_add'], receipt_capture: capture(c) };
@@ -397,12 +401,12 @@ module.exports = (test, storage) => {
     const result = c.mergeScreenshotProposals([old], [incoming]);
     assert.equal(result.length, 1); assert.equal(result[0].category, 'Дом'); assert.equal(result[0].receipt_capture.line_items.length, 1);
   });
-  test('capture status is read-only and reports unavailable data rather than inventing Basket Review findings', c => {
+  test('capture status is read-only and points to /items for Basket Review', c => {
     const f = storage(c);
     assert.match(c.previewReceiptCapture(f.ss).message, /No receipt items/); assert.equal(f.ss.getSheetByName('Products'), null);
     c.appendTransactions([txn(c, { receipt_capture: capture(c) })], f.ss, false);
     const status = c.previewReceiptCapture(f.ss);
-    assert.equal(status.items, 1); assert.equal(status.receipts, 1); assert.match(status.message, /not enabled yet/);
+    assert.equal(status.items, 1); assert.equal(status.receipts, 1); assert.match(status.message, /Use \/items for Basket Review/);
   });
   test('Telegram receipt photo approval saves item history, reports capture and leaves the ledger schema intact', c => {
     const f = storage(c), chat = telegramFixture(c);
@@ -418,19 +422,25 @@ module.exports = (test, storage) => {
     chat.callback('approve:' + chat.cards[0].token);
     assert.equal(f.ledger.data.length, 3); assert.equal(f.ss.getSheetByName('LineItems').data.length, 2);
   });
-  test('Telegram duplicate skip attaches a receipt to an existing parent and discard never captures items', c => {
+  test('Telegram Add line items attaches a receipt to an existing parent while duplicate skip and discard never capture items', c => {
     const f = storage(c), chat = telegramFixture(c), parent = txn(c);
     c.appendTransactions([parent], f.ss, false);
-    parent.receipt_capture = capture(c); parent.flags = ['possible_duplicate'];
+    parent.receipt_capture = capture(c); parent.flags = ['possible_duplicate']; parent.receipt_existing_purchase = true;
     c.savePendingTransactions([parent], 'duplicate');
     chat.callback('resolve_dup:duplicate:0:skip');
+    assert.equal(f.ledger.data.length, 3); assert.equal(f.ss.getSheetByName('LineItems'), null);
+    c.savePendingTransactions([parent], 'attach');
+    chat.callback('receipt_menu:attach:0');
+    const saveBtn = chat.markups.at(-1).inline_keyboard.flat().find(btn => /^receipt_save:/.test(btn.callback_data));
+    assert.ok(saveBtn);
+    chat.callback(saveBtn.callback_data);
     assert.equal(f.ledger.data.length, 3); assert.equal(f.ss.getSheetByName('LineItems').data.length, 2);
-    assert.ok(chat.messages.some(message => /no new ledger rows/.test(message) && /receipt items saved/.test(message)));
+    assert.ok(chat.messages.some(message => /Receipt attached to the existing transaction/.test(message)));
     const other = txn(c, { where: 'Other', receipt_capture: capture(c) });
     c.savePendingTransactions([other], 'discard'); chat.callback('discard:discard');
     assert.equal(f.ss.getSheetByName('LineItems').data.length, 2);
   });
-  test('Telegram routes receipt PDFs and image documents to transaction approval and bank PDF/CSV documents to the existing reconciler', c => {
+  test('Telegram routes receipt PDFs with immediate acknowledgement and bank PDF/CSV documents to the existing reconciler', c => {
     storage(c); const chat = telegramFixture(c); let classifications = 0;
     c.classifyPdfDocument = () => { classifications++; return 'receipt'; };
     c.extractTransactions = (_, context) => {
@@ -439,6 +449,7 @@ module.exports = (test, storage) => {
       return [txn(c, { receipt_capture: capture(c) })];
     };
     chat.post({ document: { file_id: 'receipt-pdf', mime_type: 'application/pdf', file_name: 'receipt.pdf' } });
+    assert.ok(chat.messages.some(m => /PDF received/.test(m)));
     assert.equal(chat.cards.length, 1); assert.equal(chat.documents.length, 0); assert.equal(classifications, 1);
     c.classifyPdfDocument = () => 'bank_statement';
     chat.post({ document: { file_id: 'bank-pdf', mime_type: 'application/pdf', file_name: 'bank.pdf' } });
@@ -450,7 +461,7 @@ module.exports = (test, storage) => {
     chat.post({ document: { file_id: 'image', mime_type: 'image/png', file_name: 'receipt.png' } });
     assert.equal(chat.cards.length, 2); assert.equal(chat.documents.length, 2);
   });
-  test('unreadable and unrelated PDFs cannot silently enter the bank importer; /items only reads capture status', c => {
+  test('unreadable and unrelated PDFs cannot silently enter the bank importer; /items runs Basket Review and /items status reads diagnostics', c => {
     const f = storage(c), chat = telegramFixture(c);
     c.classifyPdfDocument = () => 'other';
     chat.post({ document: { file_id: 'other', mime_type: 'application/pdf', file_name: 'other.pdf' } });
@@ -459,9 +470,91 @@ module.exports = (test, storage) => {
     c.fetchWithRetry = (_, options) => { chat.messages.push(JSON.parse(options.payload).text); return {}; };
     chat.post({ document: { file_id: 'broken', mime_type: 'application/pdf', file_name: 'broken.pdf' } });
     assert.equal(chat.documents.length, 0); assert.match(chat.messages.at(-1), /unavailable/);
-    chat.post({ text: '/items@budget_bot' });
+    chat.post({ text: '/items@budget_bot status' });
     assert.match(chat.messages.at(-1), /No receipt items captured/);
     assert.equal(f.ss.getSheetByName('LineItems'), null);
+    chat.post({ text: '/items@budget_bot' });
+    assert.match(chat.messages.at(-1), /Basket Review/);
+    assert.equal(f.ss.getSheetByName('LineItems'), null);
+  });
+  test('package weights counted as each normalize 340g and 555g packs to kg using printed price evidence', c => {
+    const p340 = capture(c, receipt({ receipt_total: 19.90, line_items: [item({
+      raw_text: 'DR OETKER PIZZA 340G', item_name: 'Pizza', product_key: 'pizza',
+      qty: 340, unit: 'each', size: 1, printed_unit_price: 9.95, printed_price_unit: 'each', line_total: 19.90, discount: 0
+    })] })).line_items[0];
+    assert.equal(p340.unit, 'kg'); assert.equal(p340.size, 0.34); assert.equal(p340.qty, 2);
+    assert.equal(p340.printed_unit_price, 9.95); assert.equal(p340.printed_price_unit, 'each');
+    const ambiguous = capture(c, receipt({ receipt_total: 12.50, line_items: [item({
+      raw_text: 'PIZZA 555G', item_name: 'Pizza', product_key: 'pizza',
+      qty: 555, unit: 'each', size: 1, unit_price: null, line_total: 12.50, discount: 0
+    })] })).line_items[0];
+    assert.equal(ambiguous.unit, 'kg'); assert.equal(ambiguous.size, 0.555); assert.equal(ambiguous.qty, null);
+    assert.equal(ambiguous.unit_price, null);
+  });
+  test('evening recap reports opening allowance K, closing saldo L, and daily movement without D19', c => {
+    const lines = c.buildEveningPacingLines({ K_cumulative_today: 120, L_saldo_today: 80, L_saldo_yesterday: 50 });
+    assert.match(lines[0], /Available Today:.*S\$120\.00/);
+    assert.match(lines[1], /Result:.*S\$80\.00 underspent/);
+    assert.match(lines[2], /Improved by S\$30\.00 today/);
+    const over = c.buildEveningPacingLines({ K_cumulative_today: -25, L_saldo_today: -40, L_saldo_yesterday: -10 });
+    assert.match(over[0], /No spending room — S\$25\.00 behind pace/);
+    assert.match(over[1], /S\$40\.00 overspent/);
+    assert.match(over[2], /Worsened by S\$30\.00 today/);
+    assert.match(c.buildEveningPacingLines({ error: 'missing' })[0], /unavailable/);
+  });
+  test('transaction intake uses Gemini 4 Hydrogen with LOW thinking and falls back to 3.5 Flash-Lite', c => {
+    provider(c);
+    const seen = [];
+    c.UrlFetchApp = { fetch: (url, opts) => {
+      seen.push({ url, body: JSON.parse(opts.payload) });
+      if (seen.length === 1) return { getResponseCode: () => 503, getContentText: () => 'unavailable' };
+      return { getResponseCode: () => 200, getContentText: () => modelReply([]).text };
+    } };
+    c.Utilities.sleep = () => {};
+    const res = c.callGeminiForTransactionIntake({ contents: [{ parts: [{ text: 'hi' }] }], generationConfig: { temperature: 0.2 } }, 'k');
+    assert.equal(res.modelUsed, 'gemini-3.5-flash-lite');
+    assert.match(seen[0].url, /gemini-4-hydrogen/);
+    assert.deepEqual(seen[0].body.generationConfig.thinkingConfig, { thinkingLevel: 'LOW' });
+    assert.equal(seen[0].body.generationConfig.temperature, undefined);
+    assert.match(seen[1].url, /gemini-3.5-flash-lite/);
+  });
+  test('Stage 7B Basket Review validates SGD parents, computes merchant price gaps, and excludes unreconciled or foreign rows', c => {
+    const ledger = [
+      ['01.10.2026', 'DBS CC SGD', 'Расходы', 24, 24, '', '', 'Продукты', 'Cold Storage', '', 'Needs'],
+      ['05.10.2026', 'DBS CC SGD', 'Расходы', 24, 24, '', '', 'Продукты', 'Cold Storage', '', 'Needs'],
+      ['10.10.2026', 'DBS CC SGD', 'Расходы', 24, 24, '', '', 'Продукты', 'Cold Storage', '', 'Needs'],
+      ['02.11.2026', 'DBS CC SGD', 'Расходы', 36, 36, '', '', 'Продукты', 'FairPrice', '', 'Needs'],
+      ['09.11.2026', 'DBS CC SGD', 'Расходы', 36, 36, '', '', 'Продукты', 'FairPrice', '', 'Needs'],
+      ['16.11.2026', 'DBS CC SGD', 'Расходы', 36, 36, '', '', 'Продукты', 'FairPrice', '', 'Needs'],
+      ['18.11.2026', 'DBS CC SGD', 'Расходы', 15, 15, '', '', 'Продукты', 'BadShop', '', 'Needs']
+    ];
+    const mkLine = (dt, merch, amt, price, rid, rec = true, curr = 'SGD') => [
+      c.generateDedupeKey(dt, 'DBS CC SGD', amt, merch), dt, merch, 'DBS CC SGD',
+      'MEIJI MILK 2L', 'Fresh milk', 'fresh_milk', 'Meiji', 'mainstream',
+      3, 'l', 2, price, amt, 0, 'dairy', false,
+      rid, 1, 1, curr, amt, 0, 0, rec, 0, 0.95, '2026-11-20T00:00:00Z', rec, amt / 3, 'each'
+    ];
+    const items = [
+      mkLine('01.10.2026', 'Cold Storage', 24, 4, 'r1'),
+      mkLine('05.10.2026', 'Cold Storage', 24, 4, 'r2'),
+      mkLine('10.10.2026', 'Cold Storage', 24, 4, 'r3'),
+      mkLine('02.11.2026', 'FairPrice', 36, 6, 'r4'),
+      mkLine('09.11.2026', 'FairPrice', 36, 6, 'r5'),
+      mkLine('16.11.2026', 'FairPrice', 36, 6, 'r6'),
+      mkLine('18.11.2026', 'BadShop', 15, 2.5, 'r7', false)
+    ];
+    const now = vm.runInContext("new Date('2026-11-21T04:00:00Z')", c);
+    const report = c.analyzeBasketRows(items, ledger, [], '2026-11', { now });
+    assert.equal(report.status, 'ready');
+    assert.equal(report.coverage.analyzedReceipts, 3);
+    assert.equal(report.coverage.excludedReceipts, 1);
+    assert.equal(report.findings.length, 1);
+    assert.equal(report.findings[0].kind, 'merchant_gap');
+    assert.equal(report.findings[0].monthlySaving, 36);
+    const rendered = c.renderBasketReview(report);
+    assert.match(rendered, /Basket Review — 2026-11 to date/);
+    assert.match(rendered, /S\$6\.00\/l at FairPrice versus S\$4\.00\/l at Cold Storage/);
+    assert.match(c.renderBasketReviewDetails(report), /Excluded receipt groups[\s\S]*unreconciled/);
   });
   test('large receipts expand item storage beyond the initial sheet grid and preserve every product row', c => {
     const f = storage(c);
