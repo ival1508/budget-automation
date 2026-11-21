@@ -610,4 +610,51 @@ module.exports = (test, storage) => {
     assert.equal(result.receiptCapture.items, 250); assert.ok(expanded > 0);
     assert.equal(f.ss.getSheetByName('LineItems').data.length, 251); assert.equal(f.ss.getSheetByName('Products').data.length, 251);
   });
+  test('multi-row and non-purchase bank screenshots skip second vision pass while single-row screenshot checks start on 3.6-flash', c => {
+    provider(c);
+    const media = [{ inlineData: { mimeType: 'image/jpeg', data: 'mock-bank' } }];
+    let urls = [];
+    // 1. Multi-row bank unbilled screenshot (Netflix + Apple refund + YouTube) -> 1 Gemini call total
+    c.UrlFetchApp = { fetch: url => {
+      urls.push(url);
+      return { getResponseCode: () => 200, getContentText: () => modelReply([
+        txn(c, { where: 'Netflix', amount: 29.98, source: 'screenshot' }),
+        txn(c, { where: 'Apple.com', amount: 67.92, type: 'Получение денег', source: 'screenshot' }),
+        txn(c, { where: 'YouTube Premium', amount: 31.98, source: 'screenshot' })
+      ]).text };
+    } };
+    const multi = c.extractTransactions(media);
+    assert.equal(urls.length, 1);
+    assert.equal(multi.length, 3);
+    assert.ok(multi.every(row => /bank document; no product lines/.test(row.receipt_capture_status.reason)));
+
+    // 2. Single-row inflow/refund screenshot -> 1 Gemini call total
+    urls = [];
+    c.UrlFetchApp = { fetch: url => {
+      urls.push(url);
+      return { getResponseCode: () => 200, getContentText: () => modelReply([
+        txn(c, { where: 'Apple.com', amount: 67.92, type: 'Получение денег', source: 'screenshot' })
+      ]).text };
+    } };
+    const inflow = c.extractTransactions(media);
+    assert.equal(urls.length, 1);
+    assert.match(inflow[0].receipt_capture_status.reason, /bank document/);
+
+    // 3. Single-row expense labelled screenshot (e.g. MyRepublic or mislabelled receipt) -> 2nd pass starts on gemini-3.6-flash, not 4-hydrogen
+    urls = [];
+    c.UrlFetchApp = { fetch: url => {
+      urls.push(url);
+      if (urls.length === 1) {
+        return { getResponseCode: () => 200, getContentText: () => modelReply([
+          txn(c, { where: 'MyRepublic', amount: 8.71, source: 'screenshot' })
+        ]).text };
+      }
+      return { getResponseCode: () => 200, getContentText: () => modelReply({ document_type: 'bank_screenshot', receipts: [] }).text };
+    } };
+    const single = c.extractTransactions(media);
+    assert.equal(urls.length, 2);
+    assert.match(urls[0], /gemini-4-hydrogen/);
+    assert.match(urls[1], /gemini-3\.6-flash/);
+    assert.match(single[0].receipt_capture_status.reason, /bank document/);
+  });
 };

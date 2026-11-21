@@ -106,7 +106,9 @@ reconcile. Transaction and receipt extraction use a 4-pool distinct fallback cha
 (`gemini-4-hydrogen` → `gemini-3.6-flash` → `gemini-3.5-flash-lite` → `gemini-3.8-flash`
 at `thinkingLevel: LOW` with jittered backoff), while PDF routing and proposal edits
 start on the 10M-TPM `gemini-3.5-flash-lite` pool (`thinkingLevel: MINIMAL`/`LOW`).
-There is no per-product approval; transaction
+Multi-row bank screenshots and non-purchase banking entries skip the second vision
+pass altogether, and single-row `screenshot` fallback checks start on `gemini-3.6-flash`
+first. There is no per-product approval; transaction
 balances and the eleven-column ledger keep their existing contract. Bank
 screenshots and typed/voice inputs produce no item history.
 
@@ -118,8 +120,13 @@ excluded receipt diagnostics, `/items YYYY-MM` reviews a specific month, and
 the month-end heartbeat delivers Basket Review after the closing month's coach is
 accepted. See [capture rules and acceptance](docs/stage-7a-receipt-capture.md).
 
-Receipt PDFs, including summary-only fuel receipts, invoices and card slips,
-send an immediate `📄 PDF received` acknowledgement and follow ordinary transaction
+All inbound uploads (PDF, CSV, photo/image document, album, voice and text) display a
+live multi-step Telegram progress bar (`[█████░░░░░] %` with `✅` completed, `🔄` active
+and `⬜` upcoming stages) that updates in place as download, classification, extraction,
+line-item checking and duplicate checks complete, removes itself once the proposal or
+inbox confirmation is delivered, and marks the failing step with `❌` if an error stops
+processing. Receipt PDFs, including summary-only fuel receipts, invoices and card slips,
+start with `📄 PDF received — processing` and follow ordinary transaction
 approval. PDF routing reads the document's contents
 independently of product extraction. A bank statement requires a bank, customer
 account, statement period/date and account transaction history; printed card or
@@ -428,12 +435,17 @@ ticks and edits. This action never imports transactions and can be safely repeat
 
 ### Screenshot proposal latency
 
-Plain Telegram photos now extract independently, without holding the statement scanner's
-script lock or sending the entire previous proposal back to the model. The new results
-merge into the latest pending proposal under a separate user lock, preserving reviewed
-fields and duplicate occurrence counts. Text and captioned corrections keep the original
-rolling context. Image resolution, the configured model, enrichment and ledger duplicate
-checks remain in place. Merchant/reference reads now fetch only the columns they use.
+Plain Telegram photos, `image/*` file documents, and screenshots with OS/client
+auto-generated filename captions (such as `Screenshot (22 Nov 2026 4:30:42 am)`)
+extract independently outside all locks without sending the previous proposal back to
+the model. All model extraction calls (`extractTransactions`) run outside
+`LockService.getUserLock()`: text, voice and intentionally captioned rolling inputs
+take a brief lock-protected snapshot beforehand, extract lock-free, and reconcile
+concurrent edits or approvals under a sub-second commit lock. Button taps during brief
+proposal-lock contention answer via `answerCallbackQuery` with a retry prompt rather
+than emitting a `Lock timeout` bot error. Image resolution, the configured model,
+enrichment and ledger duplicate checks remain in place. Merchant/reference reads fetch
+only the columns they use.
 
 After syncing, update the **existing** Apps Script web-app deployment to a new version
 for Telegram to use this code. Logs prefixed `[Proposal timing]` show photo download,

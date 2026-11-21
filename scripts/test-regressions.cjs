@@ -921,10 +921,10 @@ test('plain screenshot extracts outside locks without resending old rows, then m
   assert.equal(f.held(), false);
   assert.ok(c.logs.some(line => line.includes('proposal_total')));
 });
-test('caption corrections retain previous proposal context and serial processing', c => {
+test('caption corrections retain previous proposal context without holding proposal lock during extraction', c => {
   const f = photoWebhookFixture(c);
   c.extractTransactions = (_, context) => {
-    assert.equal(f.held(), true);
+    assert.equal(f.held(), false);
     assert.equal(context.previous_proposal[0], f.previous);
     return [{ ...f.previous, amount: 15 }];
   };
@@ -939,11 +939,11 @@ test('screenshot finishing after approval does not resurrect the processed propo
   assert.equal(f.stored().length, 1);
   assert.equal(f.stored()[0].where, 'New Shop');
 });
-test('captioned album photo retains correction context without collecting other images', c => {
+test('captioned album photo retains correction context without collecting other images or holding lock during extraction', c => {
   const f = photoWebhookFixture(c);
   c.Utilities.sleep = () => { throw new Error('Albums must not wait for more photos'); };
   c.extractTransactions = (inputs, context) => {
-    assert.equal(f.held(), true);
+    assert.equal(f.held(), false);
     assert.equal(context.previous_proposal[0], f.previous);
     assert.ok(inputs.some(input => input.text));
     return [f.incoming];
@@ -955,7 +955,8 @@ test('all three album photos process even when delivered sequentially and larger
   const f = photoWebhookFixture(c);
   const cache = c.CacheService.getScriptCache();
   c.CacheService.getScriptCache = () => ({ ...cache, put: (key, value) => {
-    assert.ok(!key.startsWith('album_'));
+    assert.ok(!key.startsWith('album_progress_') || Buffer.byteLength(value) <= 10);
+    assert.ok(key === 'album_progress_three-photos' || !key.startsWith('album_'));
     assert.ok(Buffer.byteLength(value) <= 100000);
     cache.put(key, value);
   } });
@@ -993,6 +994,271 @@ test('overlapping album screenshots merge shared rows and keep every distinct pu
   for (const id of [300, 301, 302]) f.run({ media_group_id: 'overlap', message_id: id }, id);
   assert.equal(f.stored().length, 5); // Previous + shared row + three distinct rows.
   assert.equal(f.stored().filter(row => row.where === 'New Shop').length, 1);
+});
+test('auto-generated screenshot captions and image documents extract independently without resending old rows or holding locks', c => {
+  for (const caption of [
+    'Screenshot (22 Nov 2026 4:30:42 am)',
+    'Screenshot (22 Nov 2026 4:31:00 am)',
+    'Screenshot 2026-11-22 at 4.34.36 AM',
+    'Screen Shot 2026-11-22 at 16.34.36.png',
+    'Screenshot_20261122-043042_com.dbs.sit.dbsmbanking.jpg',
+    'Снимок экрана (22 нояб. 2026 г., 04:30:42)',
+    'IMG_20261122_043042.JPG'
+  ]) {
+    assert.equal(c.isBoilerplateMediaCaption(caption), true, caption);
+  }
+  for (const realCaption of [
+    'Screenshot of lunch 12.50',
+    'Screenshot (papa 15.50)',
+    'Correct the previous amount to 15',
+    'Fuel purchase'
+  ]) {
+    assert.equal(c.isBoilerplateMediaCaption(realCaption), false, realCaption);
+  }
+
+  const f = photoWebhookFixture(c);
+  let callCount = 0;
+  c.extractTransactions = (inputs, context) => {
+    callCount++;
+    assert.equal(f.held(), false);
+    assert.equal(context.previous_proposal, undefined);
+    assert.equal(inputs.some(inp => inp && inp.text), false);
+    return [{ ...f.incoming, where: 'Screenshot Shop ' + callCount }];
+  };
+  assert.equal(f.run({ caption: 'Screenshot (22 Nov 2026 4:30:42 am)' }, 501), 'OK');
+  assert.equal(f.run({ photo: undefined, document: { file_id: 'img-doc', mime_type: 'image/png', file_name: 'Screenshot.png' }, caption: 'Screenshot (22 Nov 2026 4:31:00 am)' }, 502), 'OK');
+  assert.equal(callCount, 2);
+  assert.deepEqual(Array.from(f.stored(), r => r.where), ['Old Shop', 'Screenshot Shop 1', 'Screenshot Shop 2']);
+});
+test('concurrent comment edit succeeds without lock timeout while slow captioned screenshot is extracting', c => {
+  vm.runInContext(fs.readFileSync(path.join(root, 'telegramUI.gs'), 'utf8'), c);
+  const scriptProps = c.PropertiesService.getScriptProperties();
+  scriptProps.setProperty('WEBHOOK_SECRET', 'offline-webhook-secret');
+  scriptProps.setProperty('AUTHORIZED_CHAT_IDS', '42');
+  scriptProps.setProperty('TELEGRAM_BOT_TOKEN', 'offline-token');
+  vm.runInContext('SHEET_FACTS.USERS = { OFFLINE: { chat_id: "42", active: true } }', c);
+  const cache = new Map(), userProps = new Map();
+  let held = false;
+  c.CacheService = { getScriptCache: () => ({ get: k => cache.get(k) || null, put: (k, v) => cache.set(k, v), remove: k => cache.delete(k) }) };
+  c.PropertiesService.getUserProperties = () => ({ getProperty: k => userProps.get(k) || null, setProperty: (k, v) => userProps.set(k, v) });
+  c.LockService = { getUserLock: () => ({
+    waitLock: () => { if (held) throw new Error('Lock timeout: another process was holding the lock for too long.'); held = true; },
+    releaseLock: () => { held = false; }
+  }) };
+  c.HtmlService = { createHtmlOutput: text => text };
+  c.getTelegramFilePath = () => 'photo.jpg';
+  c.fetchTelegramFileAsBase64 = () => ({ inlineData: { mimeType: 'image/jpeg', data: 'fake-photo' } });
+  c.getCategoryBucketMap = () => ({ 'Подписки': 'Wants', 'Счётчики': 'Needs', 'Другое': 'Wants' });
+  c.flagExistingDuplicates = rows => rows;
+  const messages = [];
+  c.sendTelegramMessage = text => { messages.push(text); return [{ chat_id: '42', message_id: 900 }]; };
+  c.editTelegramMessage = () => ({ ok: true });
+  c.sendConfirmationMessage = (_, token) => { userProps.set('latest_message_id_42', '55'); userProps.set('latest_token_42', token); return { ok: true }; };
+  c.UrlFetchApp = { fetch: () => ({ getResponseCode: () => 200, getContentText: () => '{"ok":true}' }) };
+
+  const initialRows = [
+    c.enrichTransaction({ date: '22.11.2026', account: 'DBS CC SGD', type: 'Расходы', amount: 29.98, currency: 'SGD', where: 'Netflix', category: 'Подписки' }),
+    c.enrichTransaction({ date: '20.11.2026', account: 'DBS CC SGD', type: 'Получение денег', amount: 67.92, currency: 'SGD', where: 'Apple.com', category: 'Подписки' }),
+    c.enrichTransaction({ date: '18.11.2026', account: 'DBS CC SGD', type: 'Расходы', amount: 31.98, currency: 'SGD', where: 'YouTube Premium', category: 'Подписки' })
+  ];
+  c.savePendingTransactions(initialRows, 'tok1');
+  userProps.set('latest_token_42', 'tok1');
+  userProps.set('latest_message_id_42', '55');
+
+  c.generateProposalEditPlan = comment => {
+    assert.equal(held, false);
+    assert.match(comment, /Лёгкие деньги/);
+    return { clarification: '', operations: [{ item: 2, action: 'update', changes: { type: 'Доходы - лёгкие деньги' } }] };
+  };
+
+  c.extractTransactions = () => {
+    // While Screenshot 2 (MyRepublic) is mid-extraction, user sends the comment edit!
+    assert.equal(held, false, 'Screenshot extraction must never hold UserLock');
+    const commentRes = c.doPost({
+      parameter: { secret: 'offline-webhook-secret' },
+      postData: { contents: JSON.stringify({
+        update_id: 602,
+        message: { chat: { id: 42 }, text: 'item 2 make it Лёгкие деньги', reply_to_message: { message_id: 55 } }
+      }) }
+    });
+    assert.equal(commentRes, 'OK');
+    return [c.enrichTransaction({ date: '15.11.2026', account: 'DBS CC SGD', type: 'Расходы', amount: 8.71, currency: 'SGD', where: 'MyRepublic', category: 'Счётчики' })];
+  };
+
+  const photoRes = c.doPost({
+    parameter: { secret: 'offline-webhook-secret' },
+    postData: { contents: JSON.stringify({
+      update_id: 601,
+      message: { chat: { id: 42 }, photo: [{ file_id: 'myrep' }], caption: 'Screenshot (22 Nov 2026 4:31:00 am)' }
+    }) }
+  });
+  assert.equal(photoRes, 'OK');
+  assert.equal(messages.some(m => /Lock timeout/i.test(m)), false);
+  const finalRows = c.getPendingTransactions('tok1');
+  assert.equal(finalRows.length, 4);
+  assert.equal(finalRows[1].where, 'Apple.com');
+  assert.equal(finalRows[1].type, 'Доходы - лёгкие деньги');
+  assert.equal(finalRows[3].where, 'MyRepublic');
+});
+test('rolling extraction reconciles concurrent approval or modification and callback lock timeout answers query cleanly', c => {
+  const f = photoWebhookFixture(c);
+  const messages = [], toasts = [];
+  c.sendTelegramMessage = text => { messages.push(text); };
+  c.answerCallbackQuery = (id, text, alert) => toasts.push({ id, text, alert });
+  const errors = [];
+  c.fetchWithRetry = (_, opts) => { errors.push(JSON.parse(opts.payload).text); return {}; };
+
+  // 1. New spend arriving in rolling mode while previous proposal was approved keeps only the new spend.
+  const coffee = { date: '22.11.2026', account: 'DBS CC SGD', amount: 5.5, currency: 'SGD', where: 'Coffee Shop' };
+  c.extractTransactions = (_, ctx) => {
+    assert.equal(ctx.previous_proposal.length, 1);
+    c.getPendingTransactions = token => token === 'active' ? 'PROCESSED' : null;
+    return [f.previous, coffee];
+  };
+  assert.equal(f.run({ photo: undefined, text: 'coffee 5.50' }, 701), 'OK');
+  assert.equal(f.stored().length, 1);
+  assert.equal(f.stored()[0].where, 'Coffee Shop');
+
+  // 2. Pure rolling echo of an already-approved proposal does not resurrect it.
+  c.getPendingTransactions = () => [f.previous];
+  c.extractTransactions = () => {
+    c.getPendingTransactions = () => 'PROCESSED';
+    return [f.previous];
+  };
+  assert.equal(f.run({ photo: undefined, text: 'noop' }, 702), 'OK');
+  assert.ok(messages.some(m => /already completed while processing/.test(m)));
+
+  // 3. Callback lock timeout dismisses button spinner with toast instead of spamming Bot Error.
+  c.LockService.getUserLock = () => ({
+    waitLock: () => { throw new Error('Lock timeout: another process was holding the lock for too long.'); },
+    releaseLock: () => {}
+  });
+  const cbRes = c.doPost({
+    parameter: { secret: 'offline-webhook-secret' },
+    postData: { contents: JSON.stringify({
+      update_id: 703,
+      callback_query: { id: 'cb-busy', data: 'approve:active', message: { chat: { id: 42 }, message_id: 10 } }
+    }) }
+  });
+  assert.equal(cbRes, 'OK');
+  assert.equal(toasts.length, 1);
+  assert.equal(toasts[0].id, 'cb-busy');
+  assert.equal(toasts[0].alert, true);
+  assert.match(toasts[0].text, /Still updating/);
+  assert.equal(errors.length, 0);
+});
+test('upload progress bar tracks completed, active, upcoming, and failed steps across PDF, photo, voice, text, and CSV', c => {
+  const scriptProps = c.PropertiesService.getScriptProperties();
+  scriptProps.setProperty('WEBHOOK_SECRET', 'offline-webhook-secret');
+  scriptProps.setProperty('AUTHORIZED_CHAT_IDS', '42');
+  scriptProps.setProperty('TELEGRAM_BOT_TOKEN', 'offline-token');
+  vm.runInContext('SHEET_FACTS.USERS = { OFFLINE: { chat_id: "42", active: true } }', c);
+  const cache = new Map(), userProps = new Map();
+  c.CacheService = { getScriptCache: () => ({ get: k => cache.get(k) || null, put: (k, v) => cache.set(k, v), remove: k => cache.delete(k) }) };
+  c.PropertiesService.getUserProperties = () => ({ getProperty: k => userProps.get(k) || null, setProperty: (k, v) => userProps.set(k, v) });
+  c.LockService = { getUserLock: () => ({ waitLock: () => {}, releaseLock: () => {} }) };
+  c.HtmlService = { createHtmlOutput: text => text };
+  c.getTelegramFilePath = () => 'file.dat';
+  c.fetchTelegramFileAsBase64 = (_, __, mime) => ({ inlineData: { mimeType: mime || 'image/jpeg', data: 'mock' } });
+  c.Utilities.base64Decode = v => v;
+  c.Utilities.newBlob = (...args) => args;
+  c.enqueueStatementFile = () => {};
+  c.sendConfirmationMessage = () => ({ ok: true });
+
+  let nextMsgId = 800, allowDelete = true;
+  const sent = [], edits = [], deletes = [], botErrors = [];
+  c.sendTelegramMessage = text => {
+    const id = ++nextMsgId;
+    sent.push({ id, text });
+    return [{ chat_id: '42', message_id: id }];
+  };
+  c.UrlFetchApp = { fetch: (url, opts) => {
+    const body = JSON.parse(opts.payload);
+    if (url.endsWith('/editMessageText')) {
+      edits.push({ id: body.message_id, text: body.text });
+      return { getResponseCode: () => 200, getContentText: () => '{"ok":true}' };
+    }
+    if (url.endsWith('/deleteMessage')) {
+      deletes.push(body.message_id);
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ ok: allowDelete }) };
+    }
+    return { getResponseCode: () => 200, getContentText: () => '{"ok":true}' };
+  } };
+  c.fetchWithRetry = (_, opts) => { botErrors.push(JSON.parse(opts.payload).text); return {}; };
+
+  let updateSeq = 800;
+  const post = message => c.doPost({
+    parameter: { secret: 'offline-webhook-secret' },
+    postData: { contents: JSON.stringify({ update_id: ++updateSeq, message: { chat: { id: 42 }, ...message } }) }
+  });
+  const sampleRow = { date: '22.11.2026', account: 'DBS CC SGD', amount: 12.5, currency: 'SGD', where: 'Cafe', type: 'Расходы' };
+
+  // 1. Receipt PDF: 5-step progress bar (15% -> 35% -> 60% -> 80% -> 95% -> delete cleanup)
+  c.classifyPdfDocument = () => 'receipt';
+  c.extractTransactions = (_, ctx) => {
+    ctx.onProgress('extract_transactions_start');
+    ctx.onProgress('extract_transactions_done', { count: 1 });
+    ctx.onProgress('receipt_items_start');
+    ctx.onProgress('receipt_items_done', { itemCount: 4 });
+    ctx.onProgress('duplicates_start');
+    return [sampleRow];
+  };
+  post({ document: { file_id: 'pdf1', mime_type: 'application/pdf', file_name: 'receipt.pdf' } });
+  const pdfProgressId = sent[0].id;
+  assert.match(sent[0].text, /PDF received — processing[\s\S]*Step 1 of 5[\s\S]*15%[\s\S]*🔄 <b>1\. Downloading PDF[\s\S]*⬜ 2\. Classify PDF[\s\S]*⬜ 5\. Check duplicates/);
+  const pdfEdits = edits.filter(e => e.id === pdfProgressId).map(e => e.text);
+  assert.equal(pdfEdits.length, 4);
+  assert.match(pdfEdits[0], /Step 2 of 5[\s\S]*35%[\s\S]*✅ 1\. Downloaded PDF[\s\S]*🔄 <b>2\. Classifying PDF/);
+  assert.match(pdfEdits[1], /Step 3 of 5[\s\S]*60%[\s\S]*✅ 2\. Classified as merchant receipt[\s\S]*🔄 <b>3\. Extracting transactions/);
+  assert.match(pdfEdits[2], /Step 4 of 5[\s\S]*80%[\s\S]*✅ 3\. Extracted 1 transaction[\s\S]*🔄 <b>4\. Extracting receipt line items/);
+  assert.match(pdfEdits[3], /Step 5 of 5[\s\S]*95%[\s\S]*✅ 4\. Captured 4 receipt items[\s\S]*🔄 <b>5\. Checking duplicates/);
+  assert.ok(deletes.includes(pdfProgressId));
+
+  // 2. Bank statement PDF: dynamically switches to 3-step queue path + 100% fallback when deleteMessage returns ok:false
+  sent.length = 0; edits.length = 0; deletes.length = 0;
+  allowDelete = false;
+  c.classifyPdfDocument = () => 'bank_statement';
+  post({ document: { file_id: 'pdf2', mime_type: 'application/pdf', file_name: 'stmt.pdf' } });
+  const stmtProgressId = sent[0].id;
+  const stmtEdits = edits.filter(e => e.id === stmtProgressId).map(e => e.text);
+  assert.match(stmtEdits[1], /Step 3 of 3[\s\S]*85%[\s\S]*✅ 2\. Classified as bank statement[\s\S]*🔄 <b>3\. Queueing statement/);
+  assert.match(stmtEdits.at(-1), /✅ <b>PDF received — processing<\/b> · Complete[\s\S]*\[██████████\] 100%/);
+  allowDelete = true;
+
+  // 3. Voice & Text uploads track their dedicated pipelines, and album photos suppress duplicate bars
+  sent.length = 0; edits.length = 0; deletes.length = 0;
+  c.extractTransactions = (_, ctx) => {
+    ctx.onProgress('extract_transactions_start');
+    ctx.onProgress('extract_transactions_done', { count: 2 });
+    ctx.onProgress('duplicates_start');
+    return [sampleRow];
+  };
+  post({ voice: { file_id: 'v1' } });
+  assert.match(sent[0].text, /🎙️ <b>Processing voice note<\/b> · Step 1 of 3[\s\S]*20%/);
+  assert.ok(edits.some(e => /60%[\s\S]*Transcribing &amp; extracting/.test(e.text)));
+  assert.ok(edits.some(e => /90%[\s\S]*✅ 2\. Extracted 2 transactions/.test(e.text)));
+
+  sent.length = 0; edits.length = 0;
+  post({ text: 'lunch 12.50' });
+  assert.match(sent[0].text, /✍️ <b>Processing transaction text<\/b> · Step 1 of 2[\s\S]*50%/);
+  assert.ok(edits.some(e => /90%[\s\S]*✅ 1\. Extracted 2 transactions/.test(e.text)));
+
+  sent.length = 0;
+  post({ photo: [{ file_id: 'a1' }], media_group_id: 'alb-1' });
+  post({ photo: [{ file_id: 'a2' }], media_group_id: 'alb-1' });
+  assert.equal(sent.length, 1, 'Sibling album photos share a single progress bar');
+  assert.match(sent[0].text, /Processing album photos/);
+
+  // 4. Failure marks completed steps ✅, failing step ❌, and keeps upcoming steps ⬜
+  sent.length = 0; edits.length = 0;
+  c.extractTransactions = (_, ctx) => {
+    ctx.onProgress('extract_transactions_start');
+    throw new Error('Gemini 503 capacity exhausted');
+  };
+  post({ photo: [{ file_id: 'fail-photo' }] });
+  const failEdits = edits.filter(e => e.id === sent[0].id).map(e => e.text);
+  assert.match(failEdits.at(-1), /⚠️ <b>Processing image — stopped<\/b> · Step 2 of 4[\s\S]*✅ 1\. Downloaded image[\s\S]*❌ <b>2\. Extract transactions with AI — failed<\/b>[\s\S]*⬜ 3\. Check receipt line items/);
+  assert.match(botErrors.at(-1), /Gemini 503 capacity exhausted/);
 });
 test('Telegram proposal rejection is surfaced while an unchanged overlap is harmless', c => {
   vm.runInContext(fs.readFileSync(path.join(root, 'telegramUI.gs'), 'utf8'), c);

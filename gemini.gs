@@ -310,6 +310,7 @@ function extractTransactions(inputs, context) {
   };
 
   // 4. Invoke Gemini API with automatic retry & model fallback
+  if (typeof ctx.onProgress === 'function') ctx.onProgress('extract_transactions_start');
   const apiResult = callGeminiForTransactionIntake(payload, apiKey);
   const responseText = typeof apiResult === 'object' ? apiResult.text : apiResult;
   const modelUsed = typeof apiResult === 'object' ? apiResult.modelUsed : TRANSACTION_MODEL_ID;
@@ -349,6 +350,9 @@ function extractTransactions(inputs, context) {
       txn.source = ctx.pdf_document_type === 'receipt' ? 'receipt' : 'screenshot';
     });
   }
+  if (typeof ctx.onProgress === 'function') {
+    ctx.onProgress('extract_transactions_done', { count: enrichedTransactions.length });
+  }
   // The transaction model cannot supply item history. Only the separate visual
   // receipt pass may attach it, and only after an unambiguous parent match.
   enrichedTransactions.forEach(txn => {
@@ -369,20 +373,41 @@ function extractTransactions(inputs, context) {
     const media = input && (input.inlineData || input.inline_data);
     return media && /^(image\/|application\/pdf$)/i.test(media.mimeType || media.mime_type || '');
   });
-  // Independently inspect image contents: a coarse transaction-source label can
-  // mistake a real itemized receipt for a bank screenshot. Explicit bank PDFs skip this pass.
-  if (hasVisualInput && ctx.pdf_document_type !== 'bank_transaction') {
+  // Independently inspect image contents when a single expense could be a receipt,
+  // while skipping redundant vision calls on multi-row bank lists, transfers/inflows, and explicit bank PDFs.
+  if (hasVisualInput && ctx.pdf_document_type === 'bank_transaction') {
+    if (typeof ctx.onProgress === 'function') {
+      ctx.onProgress('receipt_items_skipped', { reason: 'Bank confirmation — skipped product scan' });
+    }
+  } else if (hasVisualInput && shouldSkipBankScreenshotReceiptPass(enrichedTransactions, ctx)) {
+    applyReceiptCaptureOutcome(enrichedTransactions, { document_type: 'bank_screenshot', receipts: [] }, true);
+    if (typeof ctx.onProgress === 'function') {
+      ctx.onProgress('receipt_items_skipped', {
+        reason: enrichedTransactions.length ? 'Bank screenshot — skipped product scan' : 'No transactions to scan for items'
+      });
+    }
+  } else if (hasVisualInput) {
+    if (typeof ctx.onProgress === 'function') ctx.onProgress('receipt_items_start');
     try {
       applyReceiptCaptureOutcome(enrichedTransactions,
         ctx.receipt_extraction || extractReceiptItems(rawInputs, undefined, enrichedTransactions), true);
+      if (typeof ctx.onProgress === 'function') {
+        const itemCount = enrichedTransactions.reduce((sum, txn) =>
+          sum + (txn.receipt_capture && Array.isArray(txn.receipt_capture.line_items) ? txn.receipt_capture.line_items.length : 0), 0);
+        ctx.onProgress('receipt_items_done', { itemCount: itemCount });
+      }
     } catch (error) {
       Logger.log('Receipt item extraction unavailable: ' + error.message);
       enrichedTransactions.filter(txn => !txn.receipt_capture).forEach(txn => {
         txn.receipt_capture_status = receiptCaptureFailureStatus(error);
         txn.receipt_capture_warning = txn.receipt_capture_status.reason;
       });
+      if (typeof ctx.onProgress === 'function') {
+        ctx.onProgress('receipt_items_done', { itemCount: 0, warning: true });
+      }
     }
   }
+  if (typeof ctx.onProgress === 'function') ctx.onProgress('duplicates_start');
   if (typeof flagExistingDuplicates === 'function') {
     enrichedTransactions = flagExistingDuplicates(enrichedTransactions);
   }
@@ -390,6 +415,19 @@ function extractTransactions(inputs, context) {
   Logger.log(`[Proposal timing] enrichment_and_duplicate_check: ${Date.now() - enrichmentStarted}ms; extraction_total=${Date.now() - extractionStarted}ms; rows=${enrichedTransactions.length}`);
 
   return enrichedTransactions;
+}
+
+/** Skip a second multimodal pass when Pass 1 extracted a multi-row bank feed or non-purchase banking entries. */
+function shouldSkipBankScreenshotReceiptPass(enrichedTransactions, ctx) {
+  if (!Array.isArray(enrichedTransactions) || enrichedTransactions.length === 0) return true;
+  if (ctx && (ctx.receipt_extraction || ctx.pdf_document_type === 'receipt')) return false;
+  if (!enrichedTransactions.every(txn => txn && txn.source === 'screenshot')) return false;
+  if (enrichedTransactions.length > 1) return true;
+  const purchaseTypes = [TRANSACTION_TYPES.EXPENSE, TRANSACTION_TYPES.FIXED_EXPENSE,
+    String(TRANSACTION_TYPES.FIXED_EXPENSE || '').trim()];
+  return enrichedTransactions.some(txn =>
+    (typeof isDbsCreditCardPayment === 'function' && isDbsCreditCardPayment(txn)) ||
+    !purchaseTypes.includes(txn.type));
 }
 
 /** Interpret a comment as a structured edit plan; no ledger writes or enrichment here. */

@@ -125,9 +125,14 @@ receipt_total is final amount due, not cash tendered. confidence is 0 to 1. Mark
 Candidate parent transactions: ${JSON.stringify(parents)}
 Catalog: ${JSON.stringify(catalog)}`;
   const parts = media.map(input => ({ inlineData: { mimeType: input.mimeType || input.mime_type, data: input.data } }));
-  const response = callGeminiForTransactionIntake({ systemInstruction: { parts: [{ text: prompt }] },
+  const requestPayload = { systemInstruction: { parts: [{ text: prompt }] },
     contents: [{ parts: parts }], generationConfig: { responseMimeType: 'application/json',
-      responseSchema: RECEIPT_ITEMS_RESPONSE_SCHEMA, temperature: 0.1 } }, apiKey);
+      responseSchema: RECEIPT_ITEMS_RESPONSE_SCHEMA, temperature: 0.1 } };
+  const screenshotVerificationOnly = Array.isArray(optTransactions) && optTransactions.length > 0 &&
+    optTransactions.every(txn => txn && txn.source === 'screenshot');
+  const response = screenshotVerificationOnly
+    ? callGeminiApiWithRetry(requestPayload, apiKey, BACKUP_MODEL_1, [GEMINI_MODEL_ID, TRANSACTION_MODEL_ID, BACKUP_MODEL_2])
+    : callGeminiForTransactionIntake(requestPayload, apiKey);
   const envelope = JSON.parse(typeof response === 'object' ? response.text : response);
   const candidate = envelope.candidates && envelope.candidates[0];
   if (!candidate || candidate.finishReason && candidate.finishReason !== 'STOP') throw new Error('Receipt extraction was incomplete.');
