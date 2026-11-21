@@ -31,6 +31,7 @@ function getSystemPrompt(context) {
     todayStr = `${day}.${month}.${year}`;
   }
 
+  const currentYear = (/^\d{2}\.\d{2}\.(\d{4})$/.exec(String(todayStr || '')) || [])[1] || String(new Date().getFullYear());
   const defaultAccount = ctx.defaultAccount || DEFAULT_ACCOUNT;
   const accountsList = (ctx.accounts || ACCOUNTS).join(', ');
   const typesList = (ctx.types || ALL_TYPES).join(', ');
@@ -93,9 +94,9 @@ ${previousProposalText}
 ### EXTRACTION & NORMALIZATION RULES:
 
 1. DATE:
-   - Format: DD.MM.YYYY (e.g., 17.07.2026).
+   - Format: DD.MM.YYYY (e.g., 17.07.${currentYear}).
    - Default to TODAY's date (${todayStr}) if no date is explicitly stated.
-   - If year is omitted in input (e.g. "17 Jul"), assume current year 2026.
+   - If year is omitted in input (e.g. "17 Jul"), assume current year ${currentYear}.
 
 2. CURRENCY & AMOUNT:
    - For DBS deposit-account screenshots, SGD minus is an outflow ("Расходы") and SGD plus is an inflow ("Получение денег"). Return positive amounts; preserve direction in type. Words such as PAYMENTS or QR PAYMENT do not indicate an inflow.

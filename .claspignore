@@ -1,4 +1,6 @@
-# Ignore everything by default, then whitelist only Apps Script source files and manifest.
+# Ignore everything by default, then whitelist production Apps Script files and manifest.
 **/**
 !appsscript.json
 !*.gs
+test*.gs
+verify.gs

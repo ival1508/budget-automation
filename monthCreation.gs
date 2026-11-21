@@ -544,6 +544,8 @@ function createMonthTab(year, month, options) {
   // The notice is durable before releasing the writer lock. HTTP runs outside it;
   // a retained caller lock defers delivery to the next dispatch heartbeat.
   if (result.created) {
+    try { hideOlderMonthTabs(ss, result.target.year, result.target.month); }
+    catch (error) { Logger.log('Auto-hiding older month tabs skipped: ' + error.message); }
     try { runMonthCreationConfirmations(undefined, ss); }
     catch (error) { Logger.log('Month creation confirmation pending: ' + error.message); }
     if (typeof syncPapaRatesForCreatedMonth === 'function') {
@@ -552,6 +554,34 @@ function createMonthTab(year, month, options) {
     }
   }
   return result;
+}
+
+/**
+ * Hides monthly tabs strictly older than the month immediately preceding (targetYear, targetMonth),
+ * keeping at most the newly created month and prior month visible in the tab bar.
+ */
+function hideOlderMonthTabs(ss, targetYear, targetMonth) {
+  if (!ss || typeof ss.getSheets !== 'function') return [];
+  const defaultYear = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.monthTemplate &&
+    Number.isInteger(SHEET_FACTS.monthTemplate.workbookYear))
+    ? SHEET_FACTS.monthTemplate.workbookYear
+    : targetYear;
+  const targetOrdinal = targetYear * 12 + (targetMonth - 1);
+  const hidden = [];
+  ss.getSheets().forEach(sheet => {
+    if (!sheet || typeof sheet.getName !== 'function' || typeof sheet.hideSheet !== 'function') return;
+    const id = monthCreationIdentity(sheet.getName());
+    if (!id) return;
+    const tabYear = id.year || defaultYear;
+    const ordinal = tabYear * 12 + (id.month - 1);
+    if (ordinal < targetOrdinal - 1) {
+      if (typeof sheet.isSheetHidden !== 'function' || !sheet.isSheetHidden()) {
+        sheet.hideSheet();
+        hidden.push(sheet.getName());
+      }
+    }
+  });
+  return hidden;
 }
 
 function recordMonthCreationProperty(year, month, result, optSs) {

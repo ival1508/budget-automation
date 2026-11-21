@@ -224,10 +224,15 @@ function doPost(e) {
           contentType: 'application/json',
           payload: JSON.stringify({
             chat_id: chatId,
-            text: "⚠️ Unsupported file format. Please send a receipt image/PDF or a PDF/CSV bank statement."
+            text: "⚠️ Unsupported file format. Please send a receipt image or PDF."
           }),
           muteHttpExceptions: true
         });
+        return HtmlService.createHtmlOutput('OK');
+      }
+
+      if (isCsvDoc) {
+        sendTelegramMessage('ℹ️ Bank statement reconciliation via the sheet inbox has been retired. Upload CSV statements directly in your AI chat to reconcile.', chatId);
         return HtmlService.createHtmlOutput('OK');
       }
 
@@ -243,9 +248,8 @@ function doPost(e) {
         inputs.push({ text: effectiveCaption });
       }
 
-      // Start live step-by-step progress bar for the user's upload (PDF, CSV, photo/image, voice, or text).
+      // Start live step-by-step progress bar for the user's upload (PDF, photo/image, voice, or text).
       const progressKind = isPdfDoc ? 'pdf'
-        : isCsvDoc ? 'csv'
         : hasPhotoMedia ? 'photo'
         : message.voice ? 'voice'
         : (message.text && message.text.trim()) ? 'text'
@@ -275,7 +279,7 @@ function doPost(e) {
         if (uploadProgress) uploadProgress.completeStep('download', 'Downloaded voice note');
       }
 
-      // Case D: PDF receipts / statements, CSV statements and image documents.
+      // Case D: PDF receipts / payment confirmations and image documents.
       if (doc) {
         if (isImageDoc) {
           const downloadStarted = Date.now();
@@ -283,28 +287,19 @@ function doPost(e) {
           inputs.push(fetchTelegramFileAsBase64(filePath, botToken, docMime));
           logProposalTiming('photo_download', downloadStarted);
           if (uploadProgress) uploadProgress.completeStep('download', 'Downloaded image from Telegram');
-        } else if (isPdfDoc || isCsvDoc) {
-          const targetMime = isPdfDoc ? 'application/pdf' : 'text/csv';
+        } else if (isPdfDoc) {
           const filePath = getTelegramFilePath(doc.file_id, botToken);
-          const docMediaObj = fetchTelegramFileAsBase64(filePath, botToken, targetMime);
+          const docMediaObj = fetchTelegramFileAsBase64(filePath, botToken, 'application/pdf');
           if (uploadProgress) {
-            uploadProgress.completeStep('download', isPdfDoc ? 'Downloaded PDF from Telegram' : 'Downloaded CSV from Telegram');
+            uploadProgress.completeStep('download', 'Downloaded PDF from Telegram');
           }
-          if (isPdfDoc) {
-            if (uploadProgress) uploadProgress.startStep('classify');
-            const classificationStarted = Date.now();
-            pdfDocumentType = classifyPdfDocument(docMediaObj);
-            logProposalTiming('pdf_classification', classificationStarted);
-          }
-          if (isCsvDoc || pdfDocumentType === 'bank_statement') {
-            if (uploadProgress) {
-              if (isPdfDoc) uploadProgress.switchToBankStatementQueue();
-              else uploadProgress.startStep('queue');
-            }
-            const blob = Utilities.newBlob(Utilities.base64Decode(docMediaObj.inlineData.data), targetMime, doc.file_name || (isPdfDoc ? 'statement.pdf' : 'statement.csv'));
-            enqueueStatementFile(blob, doc.file_unique_id || doc.file_id);
-            sendTelegramMessage('📥 Statement queued in the Drive inbox. Use 💰 Budget → Reconcile statements from Drive, or wait for the automatic scan; review the results in _Reconcile.', chatId);
-            if (uploadProgress) uploadProgress.complete('Statement queued in Drive inbox');
+          if (uploadProgress) uploadProgress.startStep('classify');
+          const classificationStarted = Date.now();
+          pdfDocumentType = classifyPdfDocument(docMediaObj);
+          logProposalTiming('pdf_classification', classificationStarted);
+          if (pdfDocumentType === 'bank_statement') {
+            sendTelegramMessage('ℹ️ Bank statement reconciliation via the sheet inbox has been retired. Upload bank statements directly in your AI chat to reconcile, or send individual receipts or payment confirmations here.', chatId);
+            if (uploadProgress) uploadProgress.complete('Bank statement — reconcile in AI chat');
             return HtmlService.createHtmlOutput('OK');
           } else if (pdfDocumentType === 'receipt' || pdfDocumentType === 'bank_transaction') {
             if (uploadProgress) {
@@ -314,7 +309,7 @@ function doPost(e) {
             }
             inputs.push(docMediaObj);
           } else {
-            sendTelegramMessage('This PDF could not be identified as a receipt, payment confirmation or bank statement. Please send a clearer copy.', chatId);
+            sendTelegramMessage('This PDF could not be identified as a receipt or payment confirmation. Please send a clearer copy.', chatId);
             if (uploadProgress) uploadProgress.complete('Unidentified PDF');
             return HtmlService.createHtmlOutput('OK');
           }
@@ -672,16 +667,6 @@ function getUploadProgressProfile(kind, optOptions) {
       ]
     };
   }
-  if (kind === 'csv') {
-    return {
-      icon: '📊',
-      title: 'CSV statement received — processing',
-      steps: [
-        { id: 'download', percent: 40, pendingLabel: 'Download CSV from Telegram', activeLabel: 'Downloading CSV from Telegram…', doneLabel: 'Downloaded CSV from Telegram' },
-        { id: 'queue', percent: 85, pendingLabel: 'Queue statement in Drive inbox', activeLabel: 'Queueing statement in Drive inbox…', doneLabel: 'Statement queued in Drive inbox' }
-      ]
-    };
-  }
   if (kind === 'photo') {
     return {
       icon: '🖼️',
@@ -841,16 +826,6 @@ function startTelegramUploadProgress(chatId, kind, optOptions) {
         state.percent = target.percent;
         flushEdit();
       }
-    },
-    switchToBankStatementQueue: () => {
-      if (state.finished) return;
-      state.steps = [
-        { ...state.steps[0], status: 'done', detail: state.steps[0].detail || state.steps[0].doneLabel },
-        { ...state.steps[1], status: 'done', detail: 'Classified as bank statement' },
-        { id: 'queue', percent: 85, pendingLabel: 'Queue statement in Drive inbox', activeLabel: 'Queueing statement in Drive inbox…', doneLabel: 'Statement queued in Drive inbox', status: 'active', detail: '' }
-      ];
-      state.percent = 85;
-      flushEdit();
     },
     complete: doneDetail => {
       if (state.finished) return;

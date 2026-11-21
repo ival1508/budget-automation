@@ -106,17 +106,6 @@ module.exports = (test, storage) => {
     assert.equal(forced.writtenCount, 2);
     assert.equal(ledger.data.length, 7);
   });
-  test('reviewed staging repayment imports both legs and marks its single source row imported', c => {
-    const { ledger, staging, ss } = fixture(c, storage);
-    staging.data.push([true, '28.10.2026', 'DBS CC SGD', 'Val', 'Получение денег',
-      1234.56, 'BILL PAYMENT - DBS INTERNET/WIRELESS', 'Кредитка', '-', 1, 'Statement row', 'proposed']);
-    const result = c.commitStaged(false, false, ss);
-    assert.equal(result.committedCount, 2);
-    assert.equal(ledger.data.length, 4);
-    assert.equal(staging.data[1][11], 'imported');
-    assert.deepEqual(plain(result.rowOutcomes.map(row => [row.stagingRow, row.status])), [[2, 'imported']]);
-    assert.equal(c.commitStaged(false, false, ss).committedCount, 0);
-  });
   test('repayment credits respect a subtract-only workbook balance formula', c => {
     const { ledger, ss } = fixture(c, storage, false);
     c.appendTransactions([payment()], ss, false);

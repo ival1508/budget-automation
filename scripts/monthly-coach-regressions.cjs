@@ -217,14 +217,14 @@ module.exports = test => {
     c.callGeminiApiWithRetry = () => { throw new Error('Offline model failure'); };
     assert.equal(c.generateMonthlyCoachBrief(payload), good);
   });
-  test('month-end dispatcher sends reminder then closing-month coach once to both users before scanning', c => {
+  test('month-end dispatcher sends reminder then closing-month coach once to both users without statement scanning', c => {
     const f = scheduler(c); c.dispatch(); c.dispatch();
     assert.equal(f.sends.length, 4);
     assert.deepEqual(f.sends.map(row => row.chat), ['96069960', '96069960', '402188776', '402188776']);
     assert.match(f.sends[0].text, /upload the bank statements/); assert.match(f.sends[1].text, /Расходы finished/);
     assert.match(f.sends[2].text, /upload the bank statements/); assert.match(f.sends[3].text, /Расходы finished/);
     assert.ok(f.sends.every(row => row.text.includes("Сентябрь'26")));
-    assert.deepEqual(f.scans, [4, 4]);
+    assert.deepEqual(f.scans, []);
   });
   test('month-end scheduling runs on leap February and December but not first-day morning or earlier days', c => {
     const f = scheduler(c);

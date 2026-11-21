@@ -520,9 +520,15 @@ function initializeReceiptItemStore(ss) {
       if (sheet.getMaxColumns() < spec[1].length) sheet.insertColumnsAfter(sheet.getMaxColumns(), spec[1].length - sheet.getMaxColumns());
       sheet.getRange(1, 1, 1, spec[1].length).setValues([Array.from(spec[1])]).setFontWeight('bold');
       sheet.setFrozenRows(1);
-    } else if (spec[0] === 'LineItems' && assertReceiptItemHeaders(sheet, spec[1]) < spec[1].length) {
-      if (sheet.getMaxColumns() < spec[1].length) sheet.insertColumnsAfter(sheet.getMaxColumns(), spec[1].length - sheet.getMaxColumns());
-      sheet.getRange(1, 30, 1, spec[1].length - 29).setValues([spec[1].slice(29)]).setFontWeight('bold');
+      if (typeof sheet.hideSheet === 'function') sheet.hideSheet();
+    } else {
+      if (spec[0] === 'LineItems' && assertReceiptItemHeaders(sheet, spec[1]) < spec[1].length) {
+        if (sheet.getMaxColumns() < spec[1].length) sheet.insertColumnsAfter(sheet.getMaxColumns(), spec[1].length - sheet.getMaxColumns());
+        sheet.getRange(1, 30, 1, spec[1].length - 29).setValues([spec[1].slice(29)]).setFontWeight('bold');
+      }
+      if (typeof sheet.hideSheet === 'function' && (typeof sheet.isSheetHidden !== 'function' || !sheet.isSheetHidden())) {
+        sheet.hideSheet();
+      }
     }
     sheets[spec[0]] = sheet;
   });

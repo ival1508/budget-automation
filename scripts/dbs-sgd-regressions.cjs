@@ -38,16 +38,6 @@ module.exports = test => {
       assert.equal(JSON.stringify(input), before);
     }
   });
-  test('DBS SGD: statement normalization resolves the same nine rows and preserves the credit sign', c => {
-    for (const item of cases) {
-      const input = row(item);
-      const result = c.normalizeRows([{ ...input, merchant: input.raw_snippet }])[0];
-      assert.equal(result.merchant, item[3]);
-      assert.equal(result.raw_merchant, item[2]);
-      assert.equal(result.type, item[5]);
-      assert.equal(result.amount, item[5] === 'Получение денег' ? -item[1] : item[1]);
-    }
-  });
   test('DBS SGD: opaque references, generic gateways, other accounts, currency and manual edits remain scoped', c => {
     for (const changes of [
       { account: 'DBS CC SGD' }, { currency: 'USD' }, { manual_merchant_category: true },
@@ -73,17 +63,5 @@ module.exports = test => {
     assert.equal(result.flags[0], 'check_amount');
     assert.equal(result.confidence.amount, 0.3);
     assert.equal(result.confidence.date, 0.4);
-  });
-  test('statement Gemini fallbacks do not turn STRIPE PAYMENTS and QR PAYMENT debits into credits', c => {
-    const txns = [cases[0], cases[6]].map(item => ({ ...row(item), merchant: item[2] }));
-    c.callGeminiApiWithRetry = () => JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ account: 'DBS SGD', transactions: txns }) }] } }] });
-    c.PropertiesService.getScriptProperties().setProperty('GEMINI_API_KEY', 'offline');
-    for (const result of [c.parseCsvWithGeminiFallback('offline CSV', 'offline.csv'),
-      c.parsePdfStatement({ bytes: Array.from(Buffer.from('%PDF-1.4 offline')), text: '%PDF-1.4 offline' })]) {
-      assert.equal(result.rows.length, 2);
-      assert.equal(result.rows[0].amount, 20);
-      assert.equal(result.rows[1].amount, 9.50);
-      assert.ok(result.rows.every(item => item.type === 'Расходы'));
-    }
   });
 };

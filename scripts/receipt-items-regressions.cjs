@@ -165,13 +165,13 @@ module.exports = (test, storage) => {
       assert.equal(f.ledger.data[2][8], merchant);
     });
   }
-  test('a genuine bank statement PDF queues directly without transaction or product extraction', c => {
+  test('a genuine bank statement PDF declines retired inbox queueing without transaction or product extraction', c => {
     const f = pdfFixture(c, storage, { classification: bankClassification() });
     f.upload({ document: { file_id: 'bank', mime_type: 'application/pdf', file_name: 'Shell.pdf' } });
     assert.deepEqual(f.calls, ['classification']);
-    assert.equal(f.cards.length, 0); assert.equal(f.documents.length, 1);
+    assert.equal(f.cards.length, 0); assert.equal(f.documents.length, 0);
     assert.equal(f.ledger.data.length, 2);
-    assert.match(f.messages.at(-1), /Statement queued/);
+    assert.match(f.messages.at(-1), /retired.*AI chat/i);
   });
   test('a PDF filename takes precedence over generic text/Excel MIME types and still proposes its receipt', c => {
     const f = pdfFixture(c, storage);
@@ -440,7 +440,7 @@ module.exports = (test, storage) => {
     c.savePendingTransactions([other], 'discard'); chat.callback('discard:discard');
     assert.equal(f.ss.getSheetByName('LineItems').data.length, 2);
   });
-  test('Telegram routes receipt PDFs with immediate acknowledgement and bank PDF/CSV documents to the existing reconciler', c => {
+  test('Telegram routes receipt PDFs with immediate acknowledgement and declines retired bank PDF/CSV inbox uploads', c => {
     storage(c); const chat = telegramFixture(c); let classifications = 0;
     c.classifyPdfDocument = () => { classifications++; return 'receipt'; };
     c.extractTransactions = (_, context) => {
@@ -453,13 +453,15 @@ module.exports = (test, storage) => {
     assert.equal(chat.cards.length, 1); assert.equal(chat.documents.length, 0); assert.equal(classifications, 1);
     c.classifyPdfDocument = () => 'bank_statement';
     chat.post({ document: { file_id: 'bank-pdf', mime_type: 'application/pdf', file_name: 'bank.pdf' } });
-    assert.equal(chat.documents.length, 1);
+    assert.equal(chat.documents.length, 0);
+    assert.match(chat.messages.at(-1), /retired.*AI chat/i);
     c.classifyPdfDocument = () => { throw new Error('CSV/image must not use the PDF classification path'); };
     chat.post({ document: { file_id: 'csv', mime_type: 'text/csv', file_name: 'bank.csv' } });
-    assert.equal(chat.documents.length, 2);
+    assert.equal(chat.documents.length, 0);
+    assert.match(chat.messages.at(-1), /retired.*AI chat/i);
     c.extractTransactions = () => [txn(c)];
     chat.post({ document: { file_id: 'image', mime_type: 'image/png', file_name: 'receipt.png' } });
-    assert.equal(chat.cards.length, 2); assert.equal(chat.documents.length, 2);
+    assert.equal(chat.cards.length, 2); assert.equal(chat.documents.length, 0);
   });
   test('unreadable and unrelated PDFs cannot silently enter the bank importer; /items runs Basket Review and /items status reads diagnostics', c => {
     const f = storage(c), chat = telegramFixture(c);

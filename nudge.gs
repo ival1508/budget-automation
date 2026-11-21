@@ -247,8 +247,8 @@ function generateDailyTransactionsRecap(optSs, optDate) {
     : `✨ <i>No spending logged today. Rest up!</i>`;
 
   const activeSpendSignoff = isLastDay
-    ? `\n✨ <i>Logged & tracked in Budget 2026 for month-end close. Rest up!</i>`
-    : `\n✨ <i>Logged & tracked in Budget 2026. Rest up!</i>`;
+    ? `\n✨ <i>Logged & tracked in Budget ${parts.year} for month-end close. Rest up!</i>`
+    : `\n✨ <i>Logged & tracked in Budget ${parts.year}. Rest up!</i>`;
 
   if (todaysTxns.length === 0) {
     return [
@@ -362,12 +362,10 @@ function runMonthEndJobs(reportDate, optSs, optSlot) {
       const prefix = 'month_end_' + reportMonth + '_' + user.chat_id;
       if (props.getProperty(prefix + '_coach') === 'sent') continue;
       const reminded = deliverScheduledMessage(prefix + '_reminder', slot, user.chat_id, () => {
-        const inboxId = props.getProperty('STATEMENT_INBOX_ID');
-        const destination = inboxId ? 'the configured statement inbox in Drive' : 'your statement inbox (set it up from the Budget menu)';
         const monthTabLabel = (optSs && typeof resolveMonthSheet === 'function')
           ? resolveMonthSheet(optSs, reportDate).tabName
           : getCurrentMonthTabName(reportDate);
-        return `Please upload the bank statements for <b>${escapeCoachHtml(monthTabLabel)}</b> to ${destination}, then review and import the reconciliation proposals.`;
+        return `Please upload the bank statements for <b>${escapeCoachHtml(monthTabLabel)}</b> in your AI chat to reconcile any missing transactions.`;
       }, prefix + '_reminder');
       if (!reminded) continue;
       deliverScheduledMessage(prefix + '_coach', slot, user.chat_id, () => {
@@ -384,7 +382,7 @@ function runMonthEndJobs(reportDate, optSs, optSlot) {
 }
 
 /**
- * Master dispatcher for all scheduled events in Budget 2026.
+ * Master dispatcher for all scheduled events.
  * Executed every 15 minutes by a single project trigger.
  * Fast early-exit prevents unnecessary quota and execution usage.
  */
@@ -428,12 +426,6 @@ function dispatch() {
     catch (error) { Logger.log('Month-end jobs failed: ' + error.message); }
     try { runScheduledBasketReview(monthEndSlot.reportDate, undefined, monthEndSlot); }
     catch (error) { Logger.log('Monthly Basket Review failed: ' + error.message); }
-  }
-
-  // Drive statements share this heartbeat; no additional scheduler is needed.
-  if (typeof scanConfiguredStatementInbox === 'function') {
-    try { scanConfiguredStatementInbox(Math.max(0, 240000 - (Date.now() - now.getTime()))); }
-    catch (error) { Logger.log('Statement inbox scan failed: ' + error.message); }
   }
 
   // Monthly money-market benchmark refresh for the "Папа" debt tab (once per SGT month).
