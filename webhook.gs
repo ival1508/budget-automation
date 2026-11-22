@@ -490,10 +490,12 @@ function doPost(e) {
       }
     }
   } catch (err) {
-    Logger.log(`Error processing webhook update: ${err.message}\nStack: ${err.stack}`);
+    const safeErrMessage = redactSecretsFromText(err && err.message ? err.message : String(err));
+    const safeErrStack = redactSecretsFromText(err && err.stack ? err.stack : '');
+    Logger.log(`Error processing webhook update: ${safeErrMessage}\nStack: ${safeErrStack}`);
     // Authentication/config/parse failures must never notify a body-supplied chat.
     if (!authorizedChatId) return HtmlService.createHtmlOutput('Unauthorized');
-    if (uploadProgress) uploadProgress.fail(err.message);
+    if (uploadProgress) uploadProgress.fail(safeErrMessage);
     // Processing errors can notify only the identity that already passed both gates.
     try {
       const botToken = PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
@@ -504,13 +506,13 @@ function doPost(e) {
           contentType: 'application/json',
           payload: JSON.stringify({
             chat_id: authorizedChatId,
-            text: `⚠️ Bot Error: ${err.message}`
+            text: `⚠️ Bot Error: ${safeErrMessage}`
           }),
           muteHttpExceptions: true
         });
       }
     } catch (notifyErr) {
-      Logger.log('Failed to send error notification to Telegram: ' + notifyErr.message);
+      Logger.log('Failed to send error notification to Telegram: ' + redactSecretsFromText(notifyErr && notifyErr.message));
     }
   }
 
@@ -720,6 +722,29 @@ function getUploadProgressProfile(kind, optOptions) {
   };
 }
 
+function redactSecretsFromText(value) {
+  return String(value || '')
+    .replace(/(https?:\/\/api\.telegram\.org\/(?:file\/)?bot)[^/\s"']+/gi, '$1[REDACTED]')
+    .replace(/\b\d{7,12}:[A-Za-z0-9_-]{30,}\b/g, '[REDACTED_BOT_TOKEN]')
+    .replace(/([?&](?:key|secret)=)[^&\s"']+/gi, '$1[REDACTED]');
+}
+
+function fetchTelegramProgressApi(url, options, maxRetries = 3) {
+  let lastError = null;
+  const attempts = Math.max(1, Number(maxRetries) || 1);
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return UrlFetchApp.fetch(url, options);
+    } catch (err) {
+      lastError = err;
+      if (attempt < attempts && typeof Utilities !== 'undefined' && Utilities && typeof Utilities.sleep === 'function') {
+        Utilities.sleep(attempt * 400);
+      }
+    }
+  }
+  throw new Error(redactSecretsFromText(lastError && lastError.message));
+}
+
 function editTelegramProgressMessage(chatId, messageId, htmlText) {
   if (!chatId || !messageId || typeof UrlFetchApp === 'undefined' || !UrlFetchApp || typeof UrlFetchApp.fetch !== 'function') {
     return false;
@@ -727,12 +752,12 @@ function editTelegramProgressMessage(chatId, messageId, htmlText) {
   const botToken = PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
   if (!botToken) return false;
   try {
-    const response = UrlFetchApp.fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
+    const response = fetchTelegramProgressApi(`https://api.telegram.org/bot${botToken}/editMessageText`, {
       method: 'post',
       contentType: 'application/json',
       payload: JSON.stringify({ chat_id: chatId, message_id: Number(messageId) || messageId, text: htmlText, parse_mode: 'HTML' }),
       muteHttpExceptions: true
-    });
+    }, 3);
     const parsed = JSON.parse(response.getContentText());
     return Boolean(parsed && parsed.ok) ||
       Boolean(parsed && parsed.error_code === 400 && /message is not modified/i.test(String(parsed.description || '')));
@@ -748,13 +773,16 @@ function deleteTelegramProgressMessage(chatId, messageId) {
   const botToken = PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
   if (!botToken) return false;
   try {
-    const response = UrlFetchApp.fetch(`https://api.telegram.org/bot${botToken}/deleteMessage`, {
+    const response = fetchTelegramProgressApi(`https://api.telegram.org/bot${botToken}/deleteMessage`, {
       method: 'post',
       contentType: 'application/json',
       payload: JSON.stringify({ chat_id: chatId, message_id: Number(messageId) || messageId }),
       muteHttpExceptions: true
-    });
+    }, 3);
     const parsed = JSON.parse(response.getContentText());
+    const deleted = Boolean(parsed && parsed.ok) ||
+      Boolean(parsed && parsed.error_code === 400 && /message to delete not found/i.test(String(parsed.description || '')));
+    if (deleted) untrackActiveProgressCardId(chatId, messageId);
     return Boolean(parsed && parsed.ok);
   } catch (_) {
     return false;
@@ -778,10 +806,10 @@ function getTelegramPendingUpdateCount(optBotToken) {
   const botToken = optBotToken || PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
   if (!botToken) return null;
   try {
-    const response = UrlFetchApp.fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
+    const response = fetchTelegramProgressApi(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
       method: 'get',
       muteHttpExceptions: true
-    });
+    }, 2);
     if (!response || typeof response.getContentText !== 'function') return null;
     const parsed = JSON.parse(response.getContentText());
     const count = parsed && parsed.ok && parsed.result && parsed.result.pending_update_count;
@@ -791,8 +819,20 @@ function getTelegramPendingUpdateCount(optBotToken) {
   }
 }
 
-const PHOTO_BATCH_TTL_SECONDS = 120;
+// 15-minute batch TTL comfortably exceeds Apps Script's 6-minute maximum runtime so slow concurrent
+// extractions never lose the shared progress card messageId while sibling photos finish ahead of them.
+const PHOTO_BATCH_TTL_SECONDS = 900;
 const PHOTO_BATCH_STALE_MS = 45000;
+const PHOTO_SLOT_MAX_RUNTIME_MS = 370000;
+const PROGRESS_CARD_TRACK_TTL_SECONDS = 21600;
+
+function isPhotoBatchSlotActive(slot) {
+  if (!slot || slot.status !== 'active') return false;
+  if (slot.startedAt && (Date.now() - Number(slot.startedAt)) > PHOTO_SLOT_MAX_RUNTIME_MS) {
+    return false;
+  }
+  return true;
+}
 
 function getProgressCacheSafe() {
   if (typeof CacheService === 'undefined' || !CacheService || typeof CacheService.getScriptCache !== 'function') {
@@ -834,6 +874,85 @@ function photoGroupHistKey(mediaGroupId) {
   return 'upload_group_hist_' + String(mediaGroupId);
 }
 
+function progressTrackedCardsKey(chatId) {
+  return 'upload_progress_cards_' + String(chatId);
+}
+
+function getProgressUserPropsSafe() {
+  if (typeof PropertiesService === 'undefined' || !PropertiesService || typeof PropertiesService.getUserProperties !== 'function') {
+    return null;
+  }
+  try {
+    const up = PropertiesService.getUserProperties();
+    return (up && typeof up.getProperty === 'function' && typeof up.setProperty === 'function') ? up : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function readTrackedProgressCardIds(chatId) {
+  if (!chatId) return [];
+  const key = progressTrackedCardsKey(chatId);
+  const cache = getProgressCacheSafe();
+  const fromCache = readProgressCacheJson(cache, key);
+  if (Array.isArray(fromCache) && fromCache.length > 0) return fromCache;
+  const userProps = getProgressUserPropsSafe();
+  if (!userProps) return [];
+  try {
+    const raw = userProps.getProperty(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function writeTrackedProgressCardIds(chatId, ids) {
+  if (!chatId) return;
+  const key = progressTrackedCardsKey(chatId);
+  const clean = Array.from(new Set((ids || []).filter(Boolean).map(id => Number(id) || id))).slice(-10);
+  const cache = getProgressCacheSafe();
+  if (cache) {
+    if (clean.length > 0) writeProgressCacheJson(cache, key, clean, PROGRESS_CARD_TRACK_TTL_SECONDS);
+    else { try { cache.remove(key); } catch (_) {} }
+  }
+  const userProps = getProgressUserPropsSafe();
+  if (userProps) {
+    try {
+      userProps.setProperty(key, clean.length > 0 ? JSON.stringify(clean) : '');
+    } catch (_) {}
+  }
+}
+
+function trackActiveProgressCardId(chatId, messageId) {
+  if (!chatId || !messageId) return;
+  const existing = readTrackedProgressCardIds(chatId);
+  existing.push(Number(messageId) || messageId);
+  writeTrackedProgressCardIds(chatId, existing);
+}
+
+function untrackActiveProgressCardId(chatId, messageId) {
+  if (!chatId || !messageId) return;
+  const target = String(messageId);
+  const remaining = readTrackedProgressCardIds(chatId).filter(id => String(id) !== target);
+  writeTrackedProgressCardIds(chatId, remaining);
+}
+
+function sweepTrackedProgressCards(chatId, optKeepMessageId) {
+  if (!chatId) return;
+  const keep = optKeepMessageId ? String(optKeepMessageId) : null;
+  const ids = readTrackedProgressCardIds(chatId);
+  if (!ids.length) return;
+  const remaining = [];
+  ids.forEach(id => {
+    if (keep && String(id) === keep) return;
+    if (!deleteTelegramProgressMessage(chatId, id)) {
+      // Drop unrecoverable IDs after one sweep attempt so stale IDs do not accumulate forever.
+    }
+  });
+  writeTrackedProgressCardIds(chatId, remaining);
+}
+
 function readPhotoBatchItems(cache, batchId, maxIndex) {
   const items = [];
   const count = Math.max(0, Number(maxIndex) || 0);
@@ -844,35 +963,42 @@ function readPhotoBatchItems(cache, batchId, maxIndex) {
 }
 
 /**
- * Dismisses any waiting (non-active) photo-batch progress card if the next queued update in the chat
- * turns out to be a text edit, command, callback, voice note, or PDF rather than another photo.
+ * Dismisses any waiting or orphaned photo-batch progress card when a non-photo update (callback,
+ * Discard/Approve, text edit, command, voice note, or PDF) arrives for the chat.
  */
 function dismissIdlePhotoBatchProgress(chatId) {
   if (!chatId) return;
   const cache = getProgressCacheSafe();
-  if (!cache) return;
   const metaKey = photoBatchMetaKey(chatId);
   const meta = readProgressCacheJson(cache, metaKey);
-  if (!meta || !meta.batchId) return;
-  const items = readPhotoBatchItems(cache, meta.batchId, meta.nextIndex || meta.total || 0);
-  if (items.some(item => item && item.status === 'active')) return;
-  try { cache.remove(metaKey); } catch (_) {}
-  const settledItems = items.filter(Boolean);
-  if (settledItems.some(item => item.status === 'failed')) {
-    if (meta.messageId) {
-      const html = formatTelegramPhotoBatchHtml({
-        total: Math.max(1, settledItems.length),
-        finished: 'failed',
-        isAlbum: Boolean(meta.mediaGroupId),
-        items: settledItems
-      });
-      editTelegramProgressMessage(chatId, meta.messageId, html);
+  if (meta && meta.batchId) {
+    const items = readPhotoBatchItems(cache, meta.batchId, meta.nextIndex || meta.total || 0);
+    if (items.some(isPhotoBatchSlotActive)) return;
+    if (cache) { try { cache.remove(metaKey); } catch (_) {} }
+    const settledItems = items.map(item => {
+      if (item && item.status === 'active') {
+        return { ...item, status: 'failed', summary: 'Timed out before completion' };
+      }
+      return item;
+    }).filter(Boolean);
+    if (settledItems.some(item => item.status === 'failed')) {
+      if (meta.messageId) {
+        const html = formatTelegramPhotoBatchHtml({
+          total: Math.max(1, settledItems.length),
+          finished: 'failed',
+          isAlbum: Boolean(meta.mediaGroupId),
+          items: settledItems
+        });
+        editTelegramProgressMessage(chatId, meta.messageId, html);
+        sweepTrackedProgressCards(chatId, meta.messageId);
+      }
+      return;
     }
-    return;
+    if (meta.messageId) {
+      deleteTelegramProgressMessage(chatId, meta.messageId);
+    }
   }
-  if (meta.messageId) {
-    deleteTelegramProgressMessage(chatId, meta.messageId);
-  }
+  sweepTrackedProgressCards(chatId);
 }
 
 /**
@@ -908,7 +1034,7 @@ function formatTelegramPhotoBatchHtml(batchView) {
     } else if (slot && slot.status === 'failed') {
       failedCount++;
       pointsSum += 100;
-    } else if (slot && slot.status === 'active') {
+    } else if (isPhotoBatchSlotActive(slot)) {
       activeIndices.push(i);
       pointsSum += Math.max(5, Math.min(99, Number(slot.percent) || 15));
     } else if (firstQueuedIndex === null) {
@@ -941,7 +1067,7 @@ function formatTelegramPhotoBatchHtml(batchView) {
       lines.push(`✅ Image ${imgNum}/${total} — ${escapeUploadProgressHtml(slot.summary || 'Processed')}`);
     } else if (slot && slot.status === 'failed') {
       lines.push(`❌ <b>Image ${imgNum}/${total} — ${escapeUploadProgressHtml(slot.summary || 'Failed')}</b>`);
-    } else if (slot && slot.status === 'active') {
+    } else if (isPhotoBatchSlotActive(slot)) {
       const steps = slot.steps || [];
       const activeStep = steps.find(step => step.status === 'active');
       const stageText = activeStep ? (activeStep.detail || activeStep.activeLabel || activeStep.pendingLabel) : 'Processing…';
@@ -968,13 +1094,15 @@ function formatTelegramPhotoBatchHtml(batchView) {
   return header + '\n\n' + lines.join('\n');
 }
 
-function sendTelegramProgressCard(htmlText, chatId, silent) {
+function sendTelegramProgressCard(htmlText, chatId, silent, trackForSweep) {
   if (typeof sendTelegramMessage !== 'function') return null;
   try {
     const opts = silent ? { disable_notification: true } : undefined;
     const receipts = opts ? sendTelegramMessage(htmlText, chatId, opts) : sendTelegramMessage(htmlText, chatId);
     if (Array.isArray(receipts) && receipts[0] && receipts[0].message_id) {
-      return receipts[0].message_id;
+      const msgId = receipts[0].message_id;
+      if (trackForSweep) trackActiveProgressCardId(chatId, msgId);
+      return msgId;
     }
   } catch (_) {
     Logger.log('[Upload progress] Progress message could not be delivered.');
@@ -992,12 +1120,15 @@ function startTelegramPhotoBatchProgress(chatId, optOptions) {
   let meta = readProgressCacheJson(cache, metaKey);
   if (meta && meta.batchId) {
     const existingItems = readPhotoBatchItems(cache, meta.batchId, meta.nextIndex || meta.total || 0);
-    const hasActive = existingItems.some(item => item && item.status === 'active');
+    const hasActive = existingItems.some(isPhotoBatchSlotActive);
     if (!hasActive && Date.now() - (meta.updatedAt || 0) > PHOTO_BATCH_STALE_MS) {
       if (meta.messageId) deleteTelegramProgressMessage(chatId, meta.messageId);
-      try { cache.remove(metaKey); } catch (_) {}
+      sweepTrackedProgressCards(chatId);
+      if (cache) { try { cache.remove(metaKey); } catch (_) {} }
       meta = null;
     }
+  } else {
+    sweepTrackedProgressCards(chatId);
   }
 
   // Restore completed sibling album history if a sequential album photo arrives after the prior one closed.
@@ -1048,6 +1179,7 @@ function startTelegramPhotoBatchProgress(chatId, optOptions) {
   const mySlot = {
     index: myIndex,
     status: 'active',
+    startedAt: Date.now(),
     percent: profile.steps[0].percent,
     summary: '',
     steps: profile.steps.map((step, index) => ({
@@ -1078,7 +1210,7 @@ function startTelegramPhotoBatchProgress(chatId, optOptions) {
     writeProgressCacheJson(cache, metaKey, meta, PHOTO_BATCH_TTL_SECONDS);
     editTelegramProgressMessage(chatId, meta.messageId, lastRenderedHtml);
   } else {
-    meta.messageId = sendTelegramProgressCard(lastRenderedHtml, chatId, false);
+    meta.messageId = sendTelegramProgressCard(lastRenderedHtml, chatId, false, true);
     writeProgressCacheJson(cache, metaKey, meta, PHOTO_BATCH_TTL_SECONDS);
   }
 
@@ -1109,7 +1241,7 @@ function startTelegramPhotoBatchProgress(chatId, optOptions) {
     const knownSlots = cache ? readPhotoBatchItems(cache, activeMeta.batchId, maxSlot) : [mySlot];
     if (!knownSlots[myIndex - 1]) knownSlots[myIndex - 1] = mySlot;
 
-    const activeOthers = knownSlots.filter(item => item && item.index !== myIndex && item.status === 'active').length;
+    const activeOthers = knownSlots.filter(item => item && item.index !== myIndex && isPhotoBatchSlotActive(item)).length;
     const settledCount = knownSlots.filter(item => item && (item.status === 'done' || item.status === 'failed')).length;
     const hasFailed = knownSlots.some(item => item && item.status === 'failed');
 
@@ -1124,9 +1256,10 @@ function startTelegramPhotoBatchProgress(chatId, optOptions) {
       activeMeta.updatedAt = Date.now();
       const html = buildCurrentHtml(activeMeta, null);
       lastRenderedHtml = html;
-      if (optCompleteOptions && optCompleteOptions.newProposalPosted && activeMeta.messageId &&
+      // Only re-anchor below a newly posted Proposal Card when no sibling execution is concurrently mid-flight.
+      if (activeOthers === 0 && optCompleteOptions && optCompleteOptions.newProposalPosted && activeMeta.messageId &&
           deleteTelegramProgressMessage(chatId, activeMeta.messageId)) {
-        activeMeta.messageId = sendTelegramProgressCard(html, chatId, true);
+        activeMeta.messageId = sendTelegramProgressCard(html, chatId, true, true);
       } else if (activeMeta.messageId) {
         editTelegramProgressMessage(chatId, activeMeta.messageId, html);
       }
@@ -1149,7 +1282,10 @@ function startTelegramPhotoBatchProgress(chatId, optOptions) {
     if (hasFailed || finalStatus === 'failed') {
       const html = buildCurrentHtml(activeMeta, 'failed');
       lastRenderedHtml = html;
-      if (activeMeta.messageId) editTelegramProgressMessage(chatId, activeMeta.messageId, html);
+      if (activeMeta.messageId) {
+        editTelegramProgressMessage(chatId, activeMeta.messageId, html);
+        sweepTrackedProgressCards(chatId, activeMeta.messageId);
+      }
       return;
     }
 
@@ -1158,8 +1294,10 @@ function startTelegramPhotoBatchProgress(chatId, optOptions) {
         const html = buildCurrentHtml(activeMeta, 'done');
         lastRenderedHtml = html;
         editTelegramProgressMessage(chatId, activeMeta.messageId, html);
+        untrackActiveProgressCardId(chatId, activeMeta.messageId);
       }
     }
+    sweepTrackedProgressCards(chatId);
   };
 
   let finished = false;
@@ -1353,9 +1491,10 @@ function fetchWithRetry(url, options, maxRetries = 3) {
       const response = UrlFetchApp.fetch(url, options);
       return response;
     } catch (err) {
-      lastError = err;
-      Logger.log(`Fetch attempt ${attempt}/${maxRetries} failed: ${err.message}`);
-      if (attempt < maxRetries) {
+      const safeMsg = redactSecretsFromText(err && err.message);
+      lastError = new Error(safeMsg || 'HTTP request failed');
+      Logger.log(`Fetch attempt ${attempt}/${maxRetries} failed: ${safeMsg}`);
+      if (attempt < maxRetries && typeof Utilities !== 'undefined' && Utilities && typeof Utilities.sleep === 'function') {
         Utilities.sleep(attempt * 600); // 600ms, 1200ms backoff
       }
     }

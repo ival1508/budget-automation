@@ -910,6 +910,162 @@ test('Telegram proposal rejection is surfaced while an unchanged overlap is harm
   description = 'Bad Request: message is not modified';
   assert.doesNotThrow(() => c.sendConfirmationMessage(42, 'token', [], true));
 });
+test('slow Image 1/3 finishing after Images 2/3 & 3/3 cleans up 82% card, Discard sweeps orphans, and Address unavailable never leaks tokens', c => {
+  for (const file of ['telegramUI.gs', 'gemini.gs']) {
+    vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), c);
+  }
+  const secretToken = '1111111111:AAFakeTestTokenForRedactionCheckOnly000';
+  const secretGeminiKey = 'AIzaSyFakeRedactionUnitTestKey00000000';
+  const scriptProps = c.PropertiesService.getScriptProperties();
+  scriptProps.setProperty('WEBHOOK_SECRET', 'offline-webhook-secret');
+  scriptProps.setProperty('AUTHORIZED_CHAT_IDS', '42');
+  scriptProps.setProperty('TELEGRAM_BOT_TOKEN', secretToken);
+  scriptProps.setProperty('GEMINI_API_KEY', secretGeminiKey);
+  vm.runInContext('SHEET_FACTS.USERS = { OFFLINE: { chat_id: "42", active: true } }', c);
+
+  const cache = new Map(), ttls = new Map(), userProps = new Map();
+  c.CacheService = { getScriptCache: () => ({
+    get: k => cache.get(k) || null,
+    put: (k, v, ttl) => { cache.set(k, v); ttls.set(k, ttl); },
+    remove: k => cache.delete(k)
+  }) };
+  c.PropertiesService.getUserProperties = () => ({
+    getProperty: k => userProps.get(k) || null,
+    setProperty: (k, v) => userProps.set(k, v)
+  });
+  c.LockService = { getUserLock: () => ({ waitLock: () => {}, releaseLock: () => {} }) };
+  c.HtmlService = { createHtmlOutput: text => text };
+  c.Utilities.sleep = () => {};
+  c.getTelegramFilePath = () => 'photo.jpg';
+  c.fetchTelegramFileAsBase64 = () => ({ inlineData: { mimeType: 'image/jpeg', data: 'mock' } });
+  c.flagExistingDuplicates = rows => rows;
+
+  let nextMsgId = 900, mockPending = null, failAnswerCb = 0, failEditMsg = 0;
+  const sent = [], edits = [], deletes = [], botErrors = [];
+  c.sendTelegramMessage = (text, _, opts) => {
+    const id = ++nextMsgId;
+    sent.push({ id, text, silent: Boolean(opts && opts.disable_notification) });
+    return [{ chat_id: '42', message_id: id }];
+  };
+  c.UrlFetchApp = { fetch: (url, opts) => {
+    if (url.endsWith('/getWebhookInfo')) {
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(
+        mockPending === null ? { ok: true } : { ok: true, result: { pending_update_count: mockPending } }) };
+    }
+    if (url.endsWith('/answerCallbackQuery')) {
+      if (failAnswerCb > 0) {
+        failAnswerCb--;
+        throw new Error(`Address unavailable: ${url}`);
+      }
+      return { getResponseCode: () => 200, getContentText: () => '{"ok":true}' };
+    }
+    const body = opts && opts.payload ? JSON.parse(opts.payload) : {};
+    if (url.endsWith('/editMessageText')) {
+      if (failEditMsg > 0) {
+        failEditMsg--;
+        throw new Error(`Address unavailable: ${url}`);
+      }
+      edits.push({ id: body.message_id, text: body.text });
+      return { getResponseCode: () => 200, getContentText: () => '{"ok":true}' };
+    }
+    if (url.endsWith('/sendMessage')) {
+      const id = ++nextMsgId;
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ ok: true, result: { message_id: id } }) };
+    }
+    if (url.endsWith('/deleteMessage')) {
+      deletes.push(body.message_id);
+      return { getResponseCode: () => 200, getContentText: () => '{"ok":true}' };
+    }
+    if (url.includes('generativelanguage.googleapis.com')) {
+      throw new Error(`Address unavailable: ${url}`);
+    }
+    return { getResponseCode: () => 200, getContentText: () => '{"ok":true}' };
+  } };
+  c.fetchWithRetry = (url, opts) => {
+    if (opts && opts.payload) botErrors.push(JSON.parse(opts.payload).text);
+    return { getResponseCode: () => 200, getContentText: () => '{"ok":true, "result": {"file_path": "photo.jpg"}}' };
+  };
+
+  let seq = 1000;
+  const postPhoto = id => c.doPost({
+    parameter: { secret: 'offline-webhook-secret' },
+    postData: { contents: JSON.stringify({ update_id: ++seq, message: { chat: { id: 42 }, photo: [{ file_id: id }], media_group_id: 'g82' } }) }
+  });
+
+  // 1. Reproduce 82% scenario: Image 1 stalls at Step 2 (45%) while Images 2 & 3 finish ahead, then Image 1 finishes >2m later
+  let callNum = 0;
+  const row = (w, a) => ({ date: '22.11.2026', account: 'DBS CC SGD', amount: a, currency: 'SGD', where: w, type: 'Расходы' });
+  c.extractTransactions = (_, ctx) => {
+    const mine = ++callNum;
+    ctx.onProgress('extract_transactions_start');
+    if (mine === 1) {
+      // While Image 1 is stuck at 45%, Telegram delivers Images 2 and 3!
+      mockPending = 2;
+      postPhoto('img2');
+      mockPending = 1;
+      postPhoto('img3');
+      // Verify 82% intermediate state was rendered on the SAME card (no mid-batch re-anchor while Image 1 is active)
+      assert.equal(sent.length, 1, 'No mid-flight re-anchor while sibling Image 1 is concurrently active');
+      assert.ok(ttls.get('upload_batch_meta_42') >= 900, 'Batch TTL is at least 15 minutes (> 6m Apps Script ceiling)');
+      assert.ok(edits.some(e => e.id === sent[0].id && /82%[\s\S]*Image 1\/3 — Extracting[\s\S]*✅ Image 2\/3[\s\S]*✅ Image 3\/3/.test(e.text)));
+      mockPending = 0;
+      ctx.onProgress('extract_transactions_done', { count: 4 });
+      ctx.onProgress('duplicates_start');
+      return [row('Netflix', 29.98), row('Apple', 67.92), row('YouTube', 31.98), row('NETS', 50)];
+    }
+    if (mine === 2) {
+      ctx.onProgress('extract_transactions_done', { count: 1 });
+      ctx.onProgress('duplicates_start');
+      return [row('MyRepublic', 8.71)];
+    }
+    ctx.onProgress('extract_transactions_done', { count: 4 });
+    ctx.onProgress('duplicates_start');
+    return [row('Amazon1', 15), row('Amazon2', 47), row('Amazon3', 52), row('Amazon4', 24)];
+  };
+  mockPending = 3;
+  postPhoto('img1');
+  assert.ok(deletes.includes(sent[0].id), 'Slow Image 1 deletes the 82% progress card upon completing');
+
+  // 2. Orphaned card from a hard-killed VM (CacheService completely wiped!) is still swept via UserProperties on Discard,
+  //    AND transient/persistent Address unavailable on answerCallbackQuery never triggers Bot Error or leaks token!
+  sent.length = 0; edits.length = 0; deletes.length = 0; botErrors.length = 0;
+  c.startTelegramPhotoBatchProgress('42', { mediaGroupId: 'crashed' });
+  const crashedCardId = sent[0].id;
+  cache.clear(); // Simulate hours passing -> CacheService completely expired!
+  const activeToken = c.savePendingTransactions([row('Test', 10)]);
+  failEditMsg = 1;   // Transient socket error on sendDiscardedMessage -> retried and succeeds!
+  failAnswerCb = 10; // Persistent socket error on answerCallbackQuery -> fails open cleanly!
+  c.doPost({
+    parameter: { secret: 'offline-webhook-secret' },
+    postData: { contents: JSON.stringify({
+      update_id: ++seq,
+      callback_query: { id: 'cb-discard', data: 'discard:' + activeToken, message: { chat: { id: 42 }, message_id: 555 } }
+    }) }
+  });
+  assert.ok(deletes.includes(crashedCardId), 'Discard sweeps orphaned progress card via UserProperties even after CacheService expiry');
+  assert.ok(edits.some(e => e.id === 555 && /Discarded by user/.test(e.text)), 'sendDiscardedMessage recovered from transient socket error');
+  assert.equal(botErrors.length, 0, 'answerCallbackQuery failure never sends a false Bot Error');
+
+  // 3. Fatal transport errors in both Telegram UI and Gemini redact tokens and API keys from logs and chat errors
+  failEditMsg = 10;
+  c.doPost({
+    parameter: { secret: 'offline-webhook-secret' },
+    postData: { contents: JSON.stringify({
+      update_id: ++seq,
+      callback_query: { id: 'cb-fatal', data: 'discard:' + activeToken, message: { chat: { id: 42 }, message_id: 556 } }
+    }) }
+  });
+  assert.equal(botErrors.length, 1);
+  assert.doesNotMatch(botErrors[0], new RegExp(secretToken.slice(0, 12)));
+  assert.match(botErrors[0], /bot\[REDACTED\]/);
+
+  assert.throws(() => c.callGeminiForTransactionIntake({ contents: [] }, secretGeminiKey), err => {
+    assert.doesNotMatch(err.message, new RegExp(secretGeminiKey));
+    assert.match(err.message, /key=\[REDACTED\]/);
+    return true;
+  });
+  assert.ok(c.logs.every(line => !line.includes(secretToken) && !line.includes(secretGeminiKey)));
+});
 require('./dbs-sgd-regressions.cjs')(test);
 require('./cc-payment-regressions.cjs')(test, storage);
 require('./proposal-comment-regressions.cjs')(test);

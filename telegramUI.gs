@@ -220,7 +220,7 @@ function sendConfirmationMessage(chatId, token, transactions, isUpdate = false) 
     muteHttpExceptions: true
   };
 
-  const response = UrlFetchApp.fetch(url, options);
+  const response = fetchTelegramUiApi(url, options, 3);
   const respJson = JSON.parse(response.getContentText());
 
   // Overlapping screenshots can leave the proposal unchanged. Other delivery
@@ -474,7 +474,7 @@ function editTelegramMessage(chatId, messageId, text, replyMarkup) {
     muteHttpExceptions: true
   };
 
-  const response = UrlFetchApp.fetch(url, options);
+  const response = fetchTelegramUiApi(url, options, 3);
   const result = JSON.parse(response.getContentText());
   const unchanged = result.error_code === 400 && /message is not modified/i.test(String(result.description || ''));
   if (!result.ok && !unchanged) {
@@ -520,12 +520,39 @@ function editTelegramMessageReplyMarkup(chatId, messageId, replyMarkup) {
     muteHttpExceptions: true
   };
 
-  const response = UrlFetchApp.fetch(url, options);
+  const response = fetchTelegramUiApi(url, options, 3);
   return JSON.parse(response.getContentText());
+}
+
+function redactTelegramUiSecrets(value) {
+  return String(value || '')
+    .replace(/(https?:\/\/api\.telegram\.org\/(?:file\/)?bot)[^/\s"']+/gi, '$1[REDACTED]')
+    .replace(/\b\d{7,12}:[A-Za-z0-9_-]{30,}\b/g, '[REDACTED_BOT_TOKEN]')
+    .replace(/([?&](?:key|secret)=)[^&\s"']+/gi, '$1[REDACTED]');
+}
+
+function fetchTelegramUiApi(url, options, maxRetries = 3) {
+  let lastError = null;
+  const attempts = Math.max(1, Number(maxRetries) || 1);
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return UrlFetchApp.fetch(url, options);
+    } catch (err) {
+      const safeMsg = redactTelegramUiSecrets(err && err.message);
+      lastError = new Error(safeMsg || 'Telegram API network request failed.');
+      Logger.log(`Telegram UI fetch attempt ${attempt}/${attempts} failed: ${safeMsg}`);
+      if (attempt < attempts && typeof Utilities !== 'undefined' && Utilities && typeof Utilities.sleep === 'function') {
+        Utilities.sleep(attempt * 450);
+      }
+    }
+  }
+  throw lastError;
 }
 
 /**
  * Acknowledges a Telegram Callback Query to dismiss the button loading spinner.
+ * Retries transient socket blips and fails open so spinner dismissal never surfaces a Bot Error
+ * after an Approve, Discard, or Edit action has already completed.
  * 
  * @param {string} callbackQueryId - Telegram callback_query_id.
  * @param {string} [text] - Optional toast notification text.
@@ -549,7 +576,11 @@ function answerCallbackQuery(callbackQueryId, text, showAlert) {
     muteHttpExceptions: true
   };
 
-  UrlFetchApp.fetch(url, options);
+  try {
+    fetchTelegramUiApi(url, options, 2);
+  } catch (err) {
+    Logger.log('Non-fatal answerCallbackQuery error: ' + redactTelegramUiSecrets(err && err.message));
+  }
 }
 
 /**

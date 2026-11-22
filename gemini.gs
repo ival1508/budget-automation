@@ -72,6 +72,13 @@ function sleepGeminiBackoff(stepIndex) {
   return waitMs;
 }
 
+function redactGeminiSecrets(value) {
+  return String(value || '')
+    .replace(/(https?:\/\/api\.telegram\.org\/(?:file\/)?bot)[^/\s"']+/gi, '$1[REDACTED]')
+    .replace(/\b\d{7,12}:[A-Za-z0-9_-]{30,}\b/g, '[REDACTED_BOT_TOKEN]')
+    .replace(/([?&](?:key|secret)=)[^&\s"']+/gi, '$1[REDACTED]');
+}
+
 /**
  * Invokes the Gemini API with distinct-pool fallback and jittered backoff for HTTP 503 / 429 spikes.
  * Non-transient client errors (400/401/403/404) fail fast instead of burning backup quota.
@@ -149,9 +156,10 @@ function callGeminiApiWithRetry(payload, apiKey, preferredModel, customFallbackL
       }
     } catch (fetchErr) {
       const elapsedMs = Date.now() - startTime;
+      const safeFetchMsg = redactGeminiSecrets(fetchErr && fetchErr.message);
       Logger.log(`[Proposal timing] model_request ${modelId}: ${Date.now() - attemptStarted}ms; status=NETWORK_ERROR; total=${elapsedMs}ms`);
-      Logger.log(`Gemini API (${modelId}) transport error: ${fetchErr.message}`);
-      lastError = new Error(`Gemini API transport error on ${modelId}: ${fetchErr.message}`);
+      Logger.log(`Gemini API (${modelId}) transport error: ${safeFetchMsg}`);
+      lastError = new Error(`Gemini API transport error on ${modelId}: ${safeFetchMsg}`);
       lastFailedStatus = 'NETWORK_ERROR';
       continue;
     }
