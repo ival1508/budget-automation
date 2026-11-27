@@ -447,7 +447,7 @@ function buildBasketReview(optSs, optMonth, optNow) {
   try {
     const period = basketPeriod(optMonth, optNow);
     const snapshot = withBudgetWriteLock(() => {
-      const ss = optSs || SpreadsheetApp.getActiveSpreadsheet(), ledger = ss.getSheetByName('Transactions'), items = ss.getSheetByName('LineItems');
+      const ss = getActiveBudgetSpreadsheet(optSs), ledger = ss.getSheetByName('Transactions'), items = ss.getSheetByName('LineItems');
       if (!ledger) throw new Error('Transactions is unavailable.');
       const ledgerRows = ledger.getLastRow() > 1 ? ledger.getRange(2, 1, ledger.getLastRow() - 1, 11).getValues() : [];
       let products = [], catalogWarning = null;

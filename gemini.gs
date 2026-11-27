@@ -536,7 +536,7 @@ function fetchTelegramFileAsBase64(filePath, botToken, overrideMimeType) {
  */
 function getLearnedMerchantsContext() {
   try {
-    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet();
     const sheet = spreadsheet ? spreadsheet.getSheetByName("Merchants") : null;
     const aliases = typeof getMerchantAliases === 'function' ? getMerchantAliases() : {};
 

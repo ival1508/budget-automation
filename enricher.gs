@@ -588,7 +588,7 @@ function enrichTransaction(parsedRow, categoryBucketMap) {
 function getExistingDedupeKeysFromSheet(ss) {
   const existingSet = new Set();
   try {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(ss);
     if (!spreadsheet) return existingSet;
 
     const sheet = spreadsheet.getSheetByName('Transactions');

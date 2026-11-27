@@ -63,7 +63,7 @@ function getTransactionBalanceTemplates(sheet) {
 /** Fill only missing F/G cells on existing transaction rows; retain all balances and seeds. */
 function repairMissingTransactionBalances(ss) {
   return withBudgetWriteLock(() => {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(ss);
     const sheet = getTransactionsSheet(spreadsheet);
     const headers = sheet.getRange(1, 1, 1, 7).getDisplayValues()[0]
       .map(value => String(value || '').trim().toLowerCase().replace(/ё/g, 'е'));
@@ -119,7 +119,7 @@ function repairMissingTransactionBalances(ss) {
  */
 function repairTransactionDerivedFormulas(ss) {
   return withBudgetWriteLock(() => {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(ss);
     if (!spreadsheet) throw new Error('No active spreadsheet found.');
 
     const sheet = getTransactionsSheet(spreadsheet);
@@ -381,7 +381,7 @@ function flagExistingDuplicates(transactions) {
   }
 
   try {
-    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet();
     if (!spreadsheet) return transactions;
     const sheet = spreadsheet.getSheetByName('Transactions');
     if (!sheet) return transactions;

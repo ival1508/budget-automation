@@ -11,7 +11,9 @@ function monthCreationPeriod(year, month) {
   if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
     throw new Error('Target requires an integer year and month (1–12).');
   }
-  return { year: year, month: month, name: MONTH_CREATION_NAMES[month - 1],
+  const stem = MONTH_CREATION_NAMES[month - 1];
+  const name = year >= 2027 ? (stem + "'" + String(year).slice(-2)) : stem;
+  return { year: year, month: month, name: name,
     days: new Date(Date.UTC(year, month, 0)).getUTCDate() };
 }
 
@@ -332,8 +334,7 @@ function buildMonthCreationPlan(snapshot, year, month) {
 
 /** Explicit read adapter; never calls active-month readers that may acquire creation hooks. */
 function readMonthCreationSnapshot(ss) {
-  const config = SHEET_FACTS.monthTemplate;
-  if (!config || !Number.isInteger(config.workbookYear)) throw new Error('Month template workbook year is not configured.');
+  const workbookYear = getConfiguredWorkbookYear(ss);
   const ledger = ss.getSheetByName('Transactions');
   if (!ledger || ledger.getMaxRows() < 2) throw new Error('Transactions ledger is missing.');
   const headers = ledger.getRange('A1:I1').getValues()[0] || [];
@@ -349,7 +350,7 @@ function readMonthCreationSnapshot(ss) {
     const values = grid.getValues();
     return { id: sheet.getSheetId(), name: sheet.getName(), anchor: values[0][1], values: values, formulas: grid.getFormulas() };
   });
-  return { year: config.workbookYear, sheets: sheets, transactions: transactions, asOf: new Date() };
+  return { year: workbookYear, sheets: sheets, transactions: transactions, asOf: new Date() };
 }
 
 /** Default previews next month; explicit (year, month, ss) supports current-month inspection. */
@@ -359,7 +360,7 @@ function previewMonthCreation(year, month, ss) {
     year = now.year + (now.month === 12 ? 1 : 0);
     month = now.month === 12 ? 1 : now.month + 1;
   }
-  const plan = buildMonthCreationPlan(readMonthCreationSnapshot(ss || SpreadsheetApp.getActiveSpreadsheet()), year, month);
+  const plan = buildMonthCreationPlan(readMonthCreationSnapshot(getActiveBudgetSpreadsheet(ss)), year, month);
   Logger.log(JSON.stringify(plan, null, 2));
   return plan;
 }
@@ -562,10 +563,15 @@ function createMonthTab(year, month, options) {
  */
 function hideOlderMonthTabs(ss, targetYear, targetMonth) {
   if (!ss || typeof ss.getSheets !== 'function') return [];
-  const defaultYear = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.monthTemplate &&
-    Number.isInteger(SHEET_FACTS.monthTemplate.workbookYear))
-    ? SHEET_FACTS.monthTemplate.workbookYear
-    : targetYear;
+  let defaultYear = targetYear;
+  try {
+    defaultYear = getConfiguredWorkbookYear(ss);
+  } catch (_) {
+    if (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.monthTemplate &&
+        Number.isInteger(SHEET_FACTS.monthTemplate.workbookYear)) {
+      defaultYear = SHEET_FACTS.monthTemplate.workbookYear;
+    }
+  }
   const targetOrdinal = targetYear * 12 + (targetMonth - 1);
   const hidden = [];
   ss.getSheets().forEach(sheet => {
@@ -613,9 +619,11 @@ function recordMonthCreationProperty(year, month, result, optSs) {
 /** Persist a live creation event, scoped to the explicitly opted-in recipients. */
 function queueMonthCreationConfirmation(ss, year, month, sheetName, sheetId) {
   const config = SHEET_FACTS.monthTemplate;
+  let workbookYear = config.workbookYear;
+  try { workbookYear = getConfiguredWorkbookYear(ss); } catch (_) {}
   const period = year + '-' + String(month).padStart(2, '0');
   if (!config.confirmationStartPeriod || period < config.confirmationStartPeriod ||
-      year !== config.workbookYear || ss.getId() === SHEET_FACTS.TEST_SPREADSHEET_ID) return;
+      year !== workbookYear || ss.getId() === SHEET_FACTS.TEST_SPREADSHEET_ID) return;
   const users = getActiveTelegramUsers();
   const chatIds = (config.confirmationUserKeys || []).map(key => SHEET_FACTS.USERS[key])
     .filter(user => user && users.some(active => active.chat_id === String(user.chat_id)))
@@ -641,13 +649,15 @@ function runMonthCreationConfirmations(optNow, optSs) {
   const props = PropertiesService.getScriptProperties();
   const state = props.getProperties();
   const now = calendarDateParts(optNow instanceof Date ? optNow : new Date());
+  let workbookYear = config.workbookYear;
+  try { workbookYear = getConfiguredWorkbookYear(optSs); } catch (_) {}
   // Catch up the already-created November tab when this feature is installed.
   // Historical tabs and mere existence are never treated as creation evidence.
   const candidates = [monthCreationPeriod(now.year, now.month),
     monthCreationPeriod(now.year + (now.month === 12 ? 1 : 0), now.month === 12 ? 1 : now.month + 1)];
   const legacy = candidates.filter(target => {
     const period = target.year + '-' + String(target.month).padStart(2, '0');
-    return target.year === config.workbookYear && period >= config.confirmationStartPeriod &&
+    return target.year === workbookYear && period >= config.confirmationStartPeriod &&
       state['month_created_' + period] && !state['month_creation_notice_' + period];
   });
   const prefix = 'month_creation_notice_';
@@ -704,9 +714,6 @@ function ensureMonthTab(spreadsheet, tabName, optDate) {
   if (targetParts.year !== nowParts.year || targetParts.month !== nowParts.month) {
     return null;
   }
-  if (targetParts.year !== SHEET_FACTS.monthTemplate.workbookYear) {
-    return null;
-  }
   if (typeof tabName === 'string' && tabName.trim()) {
     const id = monthCreationIdentity(tabName);
     if (!id || id.month !== targetParts.month || (id.year && id.year !== targetParts.year)) {
@@ -715,6 +722,11 @@ function ensureMonthTab(spreadsheet, tabName, optDate) {
   }
   const ss = spreadsheet || getTargetSpreadsheet(false);
   if (!ss) return null;
+  let workbookYear = SHEET_FACTS.monthTemplate.workbookYear;
+  try { workbookYear = getConfiguredWorkbookYear(ss); } catch (_) {}
+  if (targetParts.year !== workbookYear) {
+    return null;
+  }
   if (typeof resolveMonthSheet === 'function') {
     const existing = resolveMonthSheet(ss, targetDate);
     if (existing && existing.sheet) return existing.sheet;
@@ -735,16 +747,17 @@ function runScheduledMonthCreation(optNow, optSs) {
   }
   const now = optNow instanceof Date ? optNow : new Date();
   const parts = calendarDateParts(now);
-  const workbookYear = SHEET_FACTS.monthTemplate.workbookYear;
   const ss = optSs || getTargetSpreadsheet(false);
   if (!ss) return { status: 'no_spreadsheet', actions: [] };
+  let workbookYear = SHEET_FACTS.monthTemplate.workbookYear;
+  try { workbookYear = getConfiguredWorkbookYear(ss); } catch (_) {}
   const actions = [];
 
   if (parts.year === workbookYear) {
     const currentAnchorDate = new Date(Date.UTC(parts.year, parts.month - 1, 15, 12));
     const currentResolved = typeof resolveMonthSheet === 'function'
       ? resolveMonthSheet(ss, currentAnchorDate)
-      : { sheet: ss.getSheetByName(MONTH_CREATION_NAMES[parts.month - 1]) };
+      : { sheet: ss.getSheetByName(monthCreationPeriod(parts.year, parts.month).name) };
     if (!currentResolved.sheet) {
       const res = createMonthTab(parts.year, parts.month, { spreadsheet: ss, sandbox: false });
       actions.push(Object.assign({ trigger: 'current_month_recovery' }, res));
@@ -766,7 +779,7 @@ function runScheduledMonthCreation(optNow, optSs) {
       const nextAnchorDate = new Date(Date.UTC(nextYear, nextMonth - 1, 15, 12));
       const nextResolved = typeof resolveMonthSheet === 'function'
         ? resolveMonthSheet(ss, nextAnchorDate)
-        : { sheet: ss.getSheetByName(MONTH_CREATION_NAMES[nextMonth - 1]) };
+        : { sheet: ss.getSheetByName(monthCreationPeriod(nextYear, nextMonth).name) };
       if (nextResolved.sheet) {
         actions.push({
           trigger: 'last_day_rollover',

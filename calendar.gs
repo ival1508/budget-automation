@@ -4,7 +4,7 @@ const CALENDAR_HEADERS = ['item', 'category', 'expected_day_of_month', 'typical_
 /** Create the visible config tab once. Never replace an existing calendar. */
 function initializeCalendar(ss) {
   return withBudgetWriteLock(() => {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(ss);
     let sheet = spreadsheet.getSheetByName(SHEET_FACTS.CORE_TABS.CALENDAR);
     if (!sheet) {
       sheet = spreadsheet.insertSheet(SHEET_FACTS.CORE_TABS.CALENDAR);
@@ -130,7 +130,7 @@ function proposeCalendarFromHistory(rows, asOf, options) {
 
 /** Read-only proposal runner: inspect execution logs before seeding if desired. */
 function previewCalendarSeed(ss, asOf, options) {
-  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+  const spreadsheet = getActiveBudgetSpreadsheet(ss);
   const sheet = getTransactionsSheet(spreadsheet);
   const start = SHEET_FACTS.TRANSACTIONS_TAB_STRUCTURE.DATA_START_ROW;
   const rows = sheet.getLastRow() < start ? [] : sheet.getRange(start, 1, sheet.getLastRow() - start + 1, 11).getValues();
@@ -146,7 +146,7 @@ function previewCalendarSeed(ss, asOf, options) {
  */
 function seedCalendar(ss, asOf, options) {
   return withBudgetWriteLock(() => {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(ss);
     const proposal = previewCalendarSeed(spreadsheet, asOf, options);
     const sheet = initializeCalendar(spreadsheet);
     const existing = sheet.getLastRow() < 2 ? [] : sheet.getRange(2, 1, sheet.getLastRow() - 1, 6).getValues();

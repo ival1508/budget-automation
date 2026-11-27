@@ -135,7 +135,7 @@ function resolveMonthSheet(ss, optDate) {
  * @return {Object} { tabName, sheet, exists, status, message }
  */
 function getActiveMonthTab(ss, optDate, optOptions) {
-  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+  const spreadsheet = getActiveBudgetSpreadsheet(ss);
   if (!spreadsheet) return { exists: false, status: 'NO_SPREADSHEET', error: 'No active spreadsheet found.' };
 
   const resolved = resolveMonthSheet(spreadsheet, optDate);
@@ -251,7 +251,7 @@ function getExpectedMandatoryExpenses(ss, optDate) {
  */
 function getLoggedMandatoryThisMonth(ss, optDate, optStrict) {
   try {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(ss);
     if (!spreadsheet) {
       if (optStrict) throw new Error('Mandatory spreadsheet is unavailable.');
       return [];
@@ -595,7 +595,7 @@ function get503020Status(ss, optDebug, optDate, optStrict) {
   };
 
   try {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(ss);
     if (!spreadsheet) return { ...defaultPacing, error: 'no_spreadsheet' };
 
     const sheet = spreadsheet.getSheetByName('50/30/20');
@@ -872,7 +872,7 @@ function get503020Status(ss, optDebug, optDate, optStrict) {
  */
 function getTodaysTransactions(ss, optTargetDate) {
   try {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(ss);
     if (!spreadsheet) return [];
 
     const sheet = spreadsheet.getSheetByName('Transactions');
@@ -968,7 +968,7 @@ function getTodaysTransactions(ss, optTargetDate) {
  */
 function getTodaySpend(optDate, optSs) {
   try {
-    const spreadsheet = optSs || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(optSs);
     if (!spreadsheet) return 0;
 
     const sheet = spreadsheet.getSheetByName('Transactions');
@@ -1047,7 +1047,7 @@ function getRecentDailyTrends(ss, optDate) {
   const defaultResult = { days_analyzed: 0, days_exceeded_budget: 0, trends: [] };
 
   try {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(ss);
     if (!spreadsheet) return defaultResult;
 
     const resolved = resolveMonthSheet(spreadsheet, optDate);
@@ -1149,7 +1149,7 @@ function getRecentDailyTrends(ss, optDate) {
  * @return {Object} Master context JSON object.
  */
 function getBudgetCoachContext(ss, optDate) {
-  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+  const spreadsheet = getActiveBudgetSpreadsheet(ss);
   const now = optDate || new Date();
 
   const currentDateStr = Utilities.formatDate(now, 'Asia/Singapore', 'dd.MM.yyyy');
@@ -1232,7 +1232,7 @@ function getCategoryVelocity(ss, optDate, optStrict) {
   };
 
   try {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(ss);
     if (!spreadsheet) return velocity;
 
     const transTabName = (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.CORE_TABS) ? SHEET_FACTS.CORE_TABS.TRANSACTIONS : 'Transactions';
@@ -1315,7 +1315,7 @@ function showVelocity() {
  */
 function getCategoryBucketMap(ss) {
   try {
-    const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheet = getActiveBudgetSpreadsheet(ss);
     if (!spreadsheet) {
       Logger.log('⚠️ [WARNING] No spreadsheet found. Falling back to static CATEGORY_TO_BUCKET from constants.gs.');
       return Object.assign({}, typeof CATEGORY_TO_BUCKET !== 'undefined' ? CATEGORY_TO_BUCKET : {});
@@ -1669,7 +1669,7 @@ function test_get503020Status() {
  */
 function getMonthlyTabDaySpend(optDate, optSs) {
   try {
-    const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+    const ss = getActiveBudgetSpreadsheet(optSs);
     if (!ss) return null;
 
     const tz = ss.getSpreadsheetTimeZone() || 'Asia/Singapore';

@@ -73,7 +73,7 @@ function receiptItemDate(value) {
 
 /** No tab creation in extraction or preview paths. */
 function readReceiptProducts(optSs) {
-  const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+  const ss = getActiveBudgetSpreadsheet(optSs);
   const sheet = ss.getSheetByName('Products');
   if (!sheet) return [];
   assertReceiptItemHeaders(sheet, RECEIPT_PRODUCT_HEADERS);
@@ -440,7 +440,7 @@ function findReceiptAttachmentCandidates(txn, optSs) {
   if (!txn || !txn.receipt_capture) return [];
   const amount = Number(txn.currency === 'SGD' ? txn.amount : txn.amount_sgd);
   if (!Number.isFinite(amount) || amount <= 0) return [];
-  const sheet = (optSs || SpreadsheetApp.getActiveSpreadsheet()).getSheetByName('Transactions');
+  const sheet = (getActiveBudgetSpreadsheet(optSs)).getSheetByName('Transactions');
   if (!sheet) throw new Error('The Transactions sheet is unavailable.');
   if (sheet.getLastRow() < 2) return [];
   return sheet.getRange(2, 1, sheet.getLastRow() - 1, 9).getValues().map((row, index) => ({
@@ -455,7 +455,7 @@ function findReceiptAttachmentCandidates(txn, optSs) {
 /** This path only appends analysis history. Never call the financial writer. */
 function saveReceiptItemsToExisting(txn, candidate, optSs) {
   return withBudgetWriteLock(() => {
-    const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+    const ss = getActiveBudgetSpreadsheet(optSs);
     if (!txn.receipt_capture || txn.receipt_attachment_revision !== receiptAttachmentRevision(txn)) {
       throw new Error('The proposal changed. Open Add line items again to review the current match.');
     }
@@ -641,7 +641,7 @@ function captureReceiptItemsAfterWrite(transactions, result, optSs) {
   if (result.dryRun || !transactions.some(txn => txn.receipt_capture || txn.receipt_capture_warning)) return result;
   const imported = new Set((result.rowOutcomes || []).filter(outcome => outcome.status === 'imported').map(outcome => outcome.inputIndex));
   try {
-    const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+    const ss = getActiveBudgetSpreadsheet(optSs);
     result.receiptCapture = persistApprovedReceiptItems(transactions.filter((txn, index) => imported.has(index)), ss);
     transactions.filter(txn => txn.receipt_capture_warning).forEach(txn => result.receiptCapture.warnings.push(txn.receipt_capture_warning));
     if (transactions.some((txn, index) => txn.receipt_capture && !imported.has(index))) {
@@ -666,7 +666,7 @@ function receiptCaptureSummary(result) {
 
 /** Read-only capture status and diagnostics; /items runs the separate Basket Review. */
 function previewReceiptCapture(optSs, chatId) {
-  const ss = optSs || SpreadsheetApp.getActiveSpreadsheet(), sheet = ss.getSheetByName('LineItems');
+  const ss = getActiveBudgetSpreadsheet(optSs), sheet = ss.getSheetByName('LineItems');
   const diagnostics = receiptCaptureDiagnostics(chatId);
   if (!sheet) return { receipts: 0, items: 0, flagged: 0,
     message: 'No receipt items captured yet. Send an itemized receipt photo or PDF, then approve its transaction or save the items to an existing transaction.' + diagnostics };

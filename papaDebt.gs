@@ -184,7 +184,7 @@ function computePapaMonthStep(prev, rates, fx, flows) {
  * manual overrides or already-stamped closed months.
  */
 function updatePapaMonthlyRates(optSs, optNow, optFetch, optTargetMonthKey) {
-  const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+  const ss = getActiveBudgetSpreadsheet(optSs);
   if (!ss) throw new Error('No active spreadsheet found.');
   const sheet = ss.getSheetByName(PAPA_DEBT_CONFIG.SHEET_NAME);
   if (!sheet) throw new Error(`Tab "${PAPA_DEBT_CONFIG.SHEET_NAME}" not found.`);
@@ -282,7 +282,7 @@ function updatePapaMonthlyRates(optSs, optNow, optFetch, optTargetMonthKey) {
  * money-market rates and marks the month synced so dispatch() does not duplicate work.
  */
 function syncPapaRatesForCreatedMonth(year, month, optSs, optFetch, optNow) {
-  const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+  const ss = getActiveBudgetSpreadsheet(optSs);
   if (!ss || typeof ss.getSheetByName !== 'function') return { skipped: true, reason: 'no_spreadsheet' };
   if (typeof SHEET_FACTS !== 'undefined' && ss.getId && ss.getId() === SHEET_FACTS.TEST_SPREADSHEET_ID) {
     return { skipped: true, reason: 'sandbox' };
@@ -317,8 +317,8 @@ function runScheduledPapaRateSync(optNow, optSs, optFetch) {
   const propKey = 'papa_rates_synced_' + monthKey;
   if (props.getProperty(propKey) === 'done') return { skipped: true, monthKey: monthKey };
 
-  const ss = optSs || (typeof SpreadsheetApp !== 'undefined' && typeof SpreadsheetApp.getActiveSpreadsheet === 'function'
-    ? SpreadsheetApp.getActiveSpreadsheet() : null);
+  let ss = null;
+  try { ss = getActiveBudgetSpreadsheet(optSs); } catch (_) { ss = null; }
   if (!ss || !ss.getSheetByName(PAPA_DEBT_CONFIG.SHEET_NAME)) {
     return { skipped: true, reason: 'tab_missing', monthKey: monthKey };
   }

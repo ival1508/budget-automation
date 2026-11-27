@@ -16,7 +16,7 @@
  * @return {Object} Structured JSON payload for Gemini coach model.
  */
 function buildCoachPayload(period, optSs, optReportDate) {
-  const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+  const ss = getActiveBudgetSpreadsheet(optSs);
   const p = period || 'daily';
   if (p === 'monthly') return buildMonthlyCoachPayload(ss, optReportDate || getMonthlyReportDate());
   const reportDate = optReportDate || new Date();

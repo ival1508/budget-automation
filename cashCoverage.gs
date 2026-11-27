@@ -1,6 +1,7 @@
 /** Settlement cash coverage: checked Sheet calculation and deterministic daily output. */
 const CASH_COVERAGE_SHEET = 'CashCoverage';
 const CASH_COVERAGE_VERSION = 'cash_coverage_v2';
+const CASH_COVERAGE_VERSION_V3 = 'cash_coverage_v3';
 const CASH_COVERAGE_FIRST_RULE = 14;
 const CASH_COVERAGE_LAST_RULE = 24;
 
@@ -42,11 +43,33 @@ function buildCashCoverageMonthFormula() {
     'IF(oldexists+newexists<>1;NA();IF(INDIRECT(' + ref('source') + ')=first;source;NA())))';
 }
 
+/** V3 month selection supports uniform Full'YY (Январь'27…Декабрь'27), yearless, and legacy Я'26 tabs. */
+function buildCashCoverageMonthFormulaV3() {
+  const quote = value => '"' + value.replace(/"/g, '""') + '"';
+  const fullNames = MONTH_CREATION_NAMES.map(quote).join(';');
+  const legacyNames = MONTH_CREATION_NAMES.map((name, i) => quote(i < 4 ? ['Я', 'Ф', 'М', 'А'][i] : name)).join(';');
+  const ref = name => '"\'"&SUBSTITUTE(' + name + ';"\'";"\'\'")&"\'!B1"';
+  return '=LET(first;$B$3;fullyy;CHOOSE(MONTH(first);' + fullNames + ')&"\'"&TEXT(first;"yy");' +
+    'modern;CHOOSE(MONTH(first);' + fullNames + ');' +
+    'legacy;CHOOSE(MONTH(first);' + legacyNames + ')&"\'"&TEXT(first;"yy");' +
+    'fullexists;IFERROR(ISREF(INDIRECT(' + ref('fullyy') + '));FALSE);' +
+    'modexists;IFERROR(ISREF(INDIRECT(' + ref('modern') + '));FALSE);' +
+    'legexists;IFERROR(IF(fullyy=legacy;FALSE;ISREF(INDIRECT(' + ref('legacy') + ')));FALSE);' +
+    'source;IF(fullexists;fullyy;IF(modexists;modern;legacy));' +
+    'IF(fullexists+modexists+legexists<>1;NA();IF(INDIRECT(' + ref('source') + ')=first;source;NA())))';
+}
+
 function buildCashCoverageFormula() {
   const config = cashCoverageSheetRef(CASH_COVERAGE_SHEET);
   return '=LET(' + CASH_COVERAGE_VERSION + ';1;values;' + config + '!B4:B7;' +
     'IF(AND(' + config + '!B10="' + CASH_COVERAGE_VERSION + '";COUNT(values)=4;' + config + '!B6>=0);' +
     'ROUND(' + config + '!B7-' + config + '!B6;2);NA()))';
+}
+
+function buildCashCoverageB12FormulaV3() {
+  return '=LET(' + CASH_COVERAGE_VERSION_V3 + ';1;values;B4:B7;' +
+    'IF(AND(B10="' + CASH_COVERAGE_VERSION_V3 + '";COUNT(values)=4;B6>=0);' +
+    'ROUND(B7-B6;2);NA()))';
 }
 
 function cashCoverageRuleFormulas(row) {
@@ -127,6 +150,30 @@ function buildCashCoverageRows(previousFormula) {
   return rows;
 }
 
+/** V3 rows for promoted Summary layout (Summary!A11:A13 = DBS SGD / DBS CC SGD / Citibank CC, Summary!C5 = CashCoverage!B12). */
+function buildCashCoverageRowsV3() {
+  const row = (key, value, note) => [key, value, note || '', '', '', ''];
+  const rows = [row('Settlement coverage', 'Value', 'What it covers'),
+    row('Budget month', buildCashCoverageMonthFormulaV3(), 'Uses the current Singapore calendar month, even when next month is prepared early.'),
+    row('Month begins', '=MAX(DATE(2027;1;1);DATE(YEAR(TODAY());MONTH(TODAY());1))', 'Singapore calendar date (clamped to Jan 2027 during pre-rollover staging).'),
+    row('Pending mandatory costs', '=IF(COUNT(E14:E24)=11;SUM(E14:E24);NA())', 'Current-month mandatory plans less net payments. Full CPF is deducted in the monthly budget and treated as already withheld from payroll; no second cash payment is reserved.'),
+    row('Remaining Расходы budget', '=LET(value;INDIRECT("\'"&SUBSTITUTE(B2;"\'";"\'\'")&"\'!L33");IF(ISNUMBER(value);MAX(0;value);NA()))', 'Remaining ordinary spending reserve. Overspend is already reflected in bank/card balances; it cannot create available cash.'),
+    row('Total cash required / reserved', '=IF(COUNT(B4:B5;B25)=3;SUM(B4:B5;B25);NA())', 'Pending current-month costs plus salary already assigned to next month.'),
+    row('Recorded cash after cards', '=IF(AND(Summary!A11="DBS SGD";Summary!A12="DBS CC SGD";Summary!A13="Citibank CC";COUNT(Summary!C11:C13)=3);SUM(Summary!C11:C13);NA())', 'Latest DBS cash plus signed card balances. Received payroll reserved below is not free current-month funding.'),
+    row('As of', '=TODAY()', 'Recalculates when recorded balances, plans and payments change.'),
+    row('Coverage period', 'Current month; next-month funding protected', 'Regular payroll received this month funds next month, matching the monthly salary policy. Unreceived income is excluded.'),
+    row('contract', CASH_COVERAGE_VERSION_V3, 'Managed formula contract.'),
+    row('previous_e4', JSON.stringify({ layout: 'promoted_summary_v3' }), 'Promoted Summary layout contract.'),
+    row('Coverage after commitments', buildCashCoverageB12FormulaV3(), 'Positive: buffer after commitments. Negative: funding or a transfer is needed.'),
+    ['Обязательные расходы', 'Payment basis', 'Planned SGD', 'Logged SGD', 'Unpaid SGD', 'Notes']];
+  for (let r = CASH_COVERAGE_FIRST_RULE; r <= CASH_COVERAGE_LAST_RULE; r++) {
+    rows.push(cashCoverageRuleFormulas(r));
+  }
+  rows.push(row('Salary reserved for next month', buildCashCoverageNextMonthIncomeFormula(),
+    'Actual regular Google/Kaspersky payroll credited to DBS this month, through today. Becomes available at next month rollover. No employer CPF or forecast income.'));
+  return rows;
+}
+
 /** Recognize only the audited legacy shape; never infer reserves from arbitrary owner formulas. */
 function inspectLegacyCashCoverageFormula(formula, monthTab) {
   const ref = cashCoverageSheetRef(monthTab) + '!';
@@ -179,7 +226,7 @@ function calculateCashCoverage(snapshot) {
 }
 
 function previewCashCoverageSetup(optSs, optAsOf) {
-  const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+  const ss = getActiveBudgetSpreadsheet(optSs);
   const now = optAsOf instanceof Date ? optAsOf : new Date();
   if (!ss || !['Asia/Singapore', 'Asia/Kuala_Lumpur'].includes(ss.getSpreadsheetTimeZone())) throw new Error('Cash coverage requires an SGT-equivalent workbook timezone.');
   const month = resolveMonthSheet(ss, now);
@@ -212,7 +259,7 @@ function previewCashCoverageSetup(optSs, optAsOf) {
 /** Explicit installation only; daily and historical reads never write. */
 function installCashCoverage(optSs) {
   return withBudgetWriteLock(() => {
-    const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+    const ss = getActiveBudgetSpreadsheet(optSs);
     const plan = previewCashCoverageSetup(ss);
     if (plan.status === 'installed') return plan;
     const summary = ss.getSheetByName('Summary');
@@ -277,7 +324,7 @@ function readCashCoverage(optSs, optAsOf) {
   const result = { amount_sgd: null, as_of: asOf.toISOString(), month_tab: null,
     source: 'Summary!E4', status: 'unavailable', reserved_next_month_income_sgd: null };
   try {
-    const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+    const ss = getActiveBudgetSpreadsheet(optSs);
     if (!ss) throw new Error('No spreadsheet is available.');
     const month = resolveMonthSheet(ss, asOf);
     if (!month.sheet) throw new Error('The current month tab is missing.');
@@ -291,33 +338,72 @@ function readCashCoverage(optSs, optAsOf) {
     const config = ss.getSheetByName(CASH_COVERAGE_SHEET);
     if (!summary || !config) throw new Error('Cash coverage has not been configured.');
     if (!['Asia/Singapore', 'Asia/Kuala_Lumpur'].includes(ss.getSpreadsheetTimeZone())) throw new Error('Cash coverage timezone is not SGT-equivalent.');
-    const expectedRows = buildCashCoverageRows('');
+    let contractVersion = CASH_COVERAGE_VERSION;
+    try {
+      const rawContract = config.getRange('B10').getValue();
+      if (rawContract === CASH_COVERAGE_VERSION_V3) contractVersion = CASH_COVERAGE_VERSION_V3;
+    } catch (_) {}
+    const isV3 = contractVersion === CASH_COVERAGE_VERSION_V3;
+    const expectedRows = isV3 ? buildCashCoverageRowsV3() : buildCashCoverageRows('');
     const actualFormulas = config.getRange('A1:F25').getFormulas();
     expectedRows.forEach((row, r) => row.forEach((value, col) => {
       if (typeof value === 'string' && value[0] === '=' && cashCoverageFormulaIdentity((actualFormulas[r] || [])[col]) !== cashCoverageFormulaIdentity(value)) {
         throw new Error('A managed cash-coverage formula changed; review the calculation.');
       }
     }));
-    const formula = summary.getRange('E4').getFormula();
-    if (cashCoverageFormulaIdentity(formula) !== cashCoverageFormulaIdentity(buildCashCoverageFormula())) throw new Error('Summary!E4 does not use the verified coverage formula.');
+    if (isV3) {
+      result.source = 'CashCoverage!B12';
+      const c5Formula = summary.getRange('C5').getFormula();
+      if (cashCoverageFormulaIdentity(c5Formula) !== cashCoverageFormulaIdentity('=CashCoverage!B12')) {
+        throw new Error('Summary!C5 does not link to CashCoverage!B12.');
+      }
+    } else {
+      const formula = summary.getRange('E4').getFormula();
+      if (cashCoverageFormulaIdentity(formula) !== cashCoverageFormulaIdentity(buildCashCoverageFormula())) {
+        throw new Error('Summary!E4 does not use the verified coverage formula.');
+      }
+    }
     const selected = config.getRange('B2').getValue();
     if (selected !== month.tabName) throw new Error('Cash coverage is not using the current month.');
     const readDay = monthCreationAnchor(config.getRange('B8').getValue());
     const currentDay = calendarDateParts(asOf);
     if (readDay.year !== currentDay.year || readDay.month !== currentDay.month || readDay.day !== currentDay.day) throw new Error('Cash coverage has not recalculated for today.');
-    const value = summary.getRange('E4').getValue();
+    const value = isV3 ? config.getRange('B12').getValue() : summary.getRange('E4').getValue();
     const reserved = config.getRange('B25').getValue();
     if (typeof reserved !== 'number' || !Number.isFinite(reserved) || reserved < 0) throw new Error('Next-month income reserve is unavailable.');
     if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isSafeInteger(Math.round(value * 100))) {
-      throw new Error('Summary!E4 is blank or contains an unreadable amount.');
+      throw new Error((isV3 ? 'CashCoverage!B12' : 'Summary!E4') + ' is blank or contains an unreadable amount.');
     }
     result.amount_sgd = Number(value.toFixed(2));
     result.reserved_next_month_income_sgd = Number(reserved.toFixed(2));
+    try {
+      if (config.getRange('A23').getValue() === 'Отложения') {
+        const unpaidSav = config.getRange('E23').getValue();
+        if (typeof unpaidSav === 'number' && Number.isFinite(unpaidSav) && unpaidSav >= 0) {
+          result.unpaid_savings_plan_sgd = Number(unpaidSav.toFixed(2));
+        }
+      }
+      if (isV3 && String(summary.getRange('B21').getValue() || '').indexOf('SAYE') === 0) {
+        const sayeVal = summary.getRange('C21').getValue();
+        if (typeof sayeVal === 'number' && Number.isFinite(sayeVal) && sayeVal >= 0) {
+          result.saye_balance_sgd = Number(sayeVal.toFixed(2));
+        }
+      } else if (!isV3 && summary.getRange('A5').getValue() === 'SAYE') {
+        const sayeVal = summary.getRange('D5').getValue();
+        if (typeof sayeVal === 'number' && Number.isFinite(sayeVal) && sayeVal >= 0) {
+          result.saye_balance_sgd = Number(sayeVal.toFixed(2));
+        }
+      }
+    } catch (_) {}
     result.status = 'available';
   } catch (error) {
     result.reason = error.message;
   }
   return result;
+}
+
+function formatCashCoverageMoney(amount) {
+  return 'S$' + Math.abs(amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 /** Coverage is rendered in code; the language model never assigns it to a spending allowance. */
@@ -327,18 +413,42 @@ function appendDailyCashCoverage(brief, payload) {
   const available = coverage && coverage.status === 'available' &&
     typeof coverage.amount_sgd === 'number' && Number.isFinite(coverage.amount_sgd);
   const amount = available ? coverage.amount_sgd : null;
-  const money = available ? 'S$' + Math.abs(amount).toLocaleString('en-US', {
-    minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '';
+  const money = available ? formatCashCoverageMoney(amount) : '';
+  const levers = [];
+  if (available && amount < 0) {
+    const gap = Number(Math.abs(amount).toFixed(2));
+    const unpaidSav = typeof coverage.unpaid_savings_plan_sgd === 'number' && Number.isFinite(coverage.unpaid_savings_plan_sgd)
+      ? coverage.unpaid_savings_plan_sgd : null;
+    const sayeBal = typeof coverage.saye_balance_sgd === 'number' && Number.isFinite(coverage.saye_balance_sgd)
+      ? coverage.saye_balance_sgd : null;
+    if (unpaidSav !== null && unpaidSav > 0) {
+      if (unpaidSav >= gap) {
+        const trimmed = Number((unpaidSav - gap).toFixed(2));
+        levers.push('trim pending Отложения from <b>' + formatCashCoverageMoney(unpaidSav) + '</b> to <b>' + formatCashCoverageMoney(trimmed) + '</b>');
+      } else {
+        const rem = Number((gap - unpaidSav).toFixed(2));
+        levers.push('pause pending Отложения (<b>' + formatCashCoverageMoney(unpaidSav) + '</b>) + fund <b>' + formatCashCoverageMoney(rem) + '</b>');
+      }
+    }
+    if (sayeBal !== null && sayeBal >= gap) {
+      levers.push('transfer <b>' + money + '</b> from SAYE (<b>' + formatCashCoverageMoney(sayeBal) + '</b> available)');
+    }
+  }
+  const leverSuffix = levers.length ? ' Options: ' + levers.join(', or ') + '.' : '';
   const line = !available ? '• <b>Settlement:</b> Coverage unavailable; check Summary.' : amount < 0
     ? '• <b>Settlement:</b> <b>' + money + '</b> shortfall; ' +
-      (coverage.reserved_next_month_income_sgd > 0 ? "next month's salary remains reserved." : 'funding or a transfer is needed.')
+      (coverage.reserved_next_month_income_sgd > 0 ? "next month's salary remains reserved." : 'funding or a transfer is needed.') + leverSuffix
     : amount === 0 ? '• <b>Settlement:</b> Fully allocated, with <b>S$0.00</b> coverage buffer.'
       : '• <b>Settlement:</b> <b>' + money + '</b> available after reserved commitments.';
   const lines = String(brief || '').split('\n');
   const action = lines.findIndex(value => /^• <b>Action:<\/b>/.test(value));
   if (action < 0) lines.push(line);
   else {
-    if (available && amount < 0) lines[action] = '• <b>Action:</b> Arrange funding or a transfer to cover the settlement shortfall.';
+    if (available && amount < 0) {
+      const plainLevers = levers.map(item => item.replace(/<\/?b>/g, '')).join(' or ');
+      lines[action] = '• <b>Action:</b> Arrange funding or a transfer to cover the settlement shortfall' +
+        (plainLevers ? ' (' + plainLevers + ').' : '.');
+    }
     lines.splice(action, 0, line);
   }
   return lines.filter(Boolean).join('\n');

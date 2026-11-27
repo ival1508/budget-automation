@@ -120,7 +120,7 @@ function evaluateMandatoryCalendar(calendar, payments, plans, asOf) {
 
 /** Strict workbook adapter. Missing source data never means all clear. */
 function getMandatoryCalendarStatus(ss, asOf) {
-  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+  const spreadsheet = getActiveBudgetSpreadsheet(ss);
   const now = asOf || new Date();
   const calendar = readMandatoryCalendar(spreadsheet);
   const plans = getMandatoryExpenses(spreadsheet, now, true);

@@ -132,21 +132,30 @@ const SHEET_FACTS = {
 
   /**
    * Returns the correct month tab name by month number (1-12) or SGT Date object.
+   * From 2027 onward, all 12 months use full Russian names + 'YY (Январь'27 … Декабрь'27).
    * @param {Date|number} [input] - Optional month number (1-12) or Date instance. Defaults to now in SGT.
    * @return {string} Russian month tab name according to naming rules.
    */
   getMonthTabName: function(input) {
+    const fullNames = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+      'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
     let monthNum;
-    let yearSuffix = '';
+    let yearNum = null;
     if (typeof input === 'number') {
       monthNum = input;
+      try { yearNum = getConfiguredWorkbookYear(); } catch (_) { yearNum = 2026; }
     } else {
       const date = (input instanceof Date) ? input : new Date();
       const monthStr = Utilities.formatDate(date, 'Asia/Singapore', 'M');
       monthNum = parseInt(monthStr, 10);
-      yearSuffix = Utilities.formatDate(date, 'Asia/Singapore', 'yy');
+      yearNum = parseInt(Utilities.formatDate(date, 'Asia/Singapore', 'yyyy'), 10);
+    }
+    if (!monthNum || monthNum < 1 || monthNum > 12) return '';
+    if (yearNum !== null && yearNum >= 2027) {
+      return fullNames[monthNum - 1] + "'" + String(yearNum).slice(-2);
     }
     const name = this.MONTH_TAB_NAMES[monthNum] || '';
+    const yearSuffix = yearNum !== null ? String(yearNum).slice(-2) : '';
     return yearSuffix ? name.replace(/'\d{2}$/, "'" + yearSuffix) : name;
   }
 };
@@ -327,6 +336,72 @@ function showReferenceTab() {
 }
 
 /**
+ * Resolves the active operational budget spreadsheet.
+ * Uses ACTIVE_SPREADSHEET_ID from Script Properties when set (allowing zero-webhook-churn
+ * annual rollover across Budget 2026 -> Budget 2027+), falling back to getActiveSpreadsheet().
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSpreadsheet]
+ * @return {GoogleAppsScript.Spreadsheet.Spreadsheet|null}
+ */
+function getActiveBudgetSpreadsheet(optSpreadsheet) {
+  if (optSpreadsheet) return optSpreadsheet;
+  if (typeof PropertiesService !== 'undefined' && typeof PropertiesService.getScriptProperties === 'function') {
+    const props = PropertiesService.getScriptProperties();
+    const configuredId = props && typeof props.getProperty === 'function'
+      ? String(props.getProperty('ACTIVE_SPREADSHEET_ID') || '').trim()
+      : '';
+    if (configuredId) {
+      if (typeof SpreadsheetApp === 'undefined' || typeof SpreadsheetApp.openById !== 'function') {
+        throw new Error('Cannot open ACTIVE_SPREADSHEET_ID: SpreadsheetApp.openById is unavailable.');
+      }
+      const opened = SpreadsheetApp.openById(configuredId);
+      if (!opened || (typeof opened.getId === 'function' && opened.getId() !== configuredId)) {
+        throw new Error('Active spreadsheet identity does not match ACTIVE_SPREADSHEET_ID.');
+      }
+      return opened;
+    }
+  }
+  return (typeof SpreadsheetApp !== 'undefined' && typeof SpreadsheetApp.getActiveSpreadsheet === 'function')
+    ? SpreadsheetApp.getActiveSpreadsheet()
+    : null;
+}
+
+/**
+ * Resolves the configured annual workbook year from BUDGET_WORKBOOK_YEAR Script Property,
+ * spreadsheet title ("Budget 20XX" when ACTIVE_SPREADSHEET_ID is set), or SHEET_FACTS.monthTemplate.workbookYear.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} [optSpreadsheet]
+ * @return {number}
+ */
+function getConfiguredWorkbookYear(optSpreadsheet) {
+  if (typeof PropertiesService !== 'undefined' && typeof PropertiesService.getScriptProperties === 'function') {
+    const props = PropertiesService.getScriptProperties();
+    const rawYear = props && typeof props.getProperty === 'function'
+      ? String(props.getProperty('BUDGET_WORKBOOK_YEAR') || '').trim()
+      : '';
+    if (rawYear) {
+      const parsed = Number(rawYear);
+      if (!Number.isInteger(parsed) || parsed < 2014 || parsed > 2100) {
+        throw new Error('Invalid BUDGET_WORKBOOK_YEAR script property: ' + rawYear);
+      }
+      return parsed;
+    }
+    const configuredId = props && typeof props.getProperty === 'function'
+      ? String(props.getProperty('ACTIVE_SPREADSHEET_ID') || '').trim()
+      : '';
+    if (configuredId && optSpreadsheet && typeof optSpreadsheet.getName === 'function') {
+      const match = /\b(20\d{2})\b/.exec(String(optSpreadsheet.getName() || ''));
+      if (match) return Number(match[1]);
+    }
+  }
+  if (typeof SHEET_FACTS !== 'undefined' && SHEET_FACTS.monthTemplate &&
+      Number.isInteger(SHEET_FACTS.monthTemplate.workbookYear)) {
+    return SHEET_FACTS.monthTemplate.workbookYear;
+  }
+  throw new Error('Month template workbook year is not configured.');
+}
+
+/**
  * Returns the target Google Spreadsheet instance.
  * When useTest is true, opens and returns the sandbox spreadsheet defined by
  * SHEET_FACTS.TEST_SPREADSHEET_ID. Missing, inaccessible or mismatched sandbox
@@ -360,5 +435,5 @@ function getTargetSpreadsheet(useTest, optSpreadsheet) {
     }
     return sandbox;
   }
-  return optSpreadsheet || SpreadsheetApp.getActiveSpreadsheet();
+  return getActiveBudgetSpreadsheet(optSpreadsheet);
 }

@@ -15,7 +15,7 @@ const TRANSACTIONS_TAB_NAME = 'Transactions';
  * @return {GoogleAppsScript.Spreadsheet.Sheet} The Merchants sheet instance.
  */
 function initializeLearningStore(ss) {
-  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+  const spreadsheet = getActiveBudgetSpreadsheet(ss);
   let merchantsSheet = spreadsheet.getSheetByName(MERCHANTS_TAB_NAME);
 
   if (!merchantsSheet) {
@@ -45,7 +45,7 @@ function initializeLearningStore(ss) {
  * @return {GoogleAppsScript.Spreadsheet.Sheet} The Transactions sheet instance.
  */
 function getTransactionsSheet(ss) {
-  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
+  const spreadsheet = getActiveBudgetSpreadsheet(ss);
   const sheet = spreadsheet.getSheetByName(TRANSACTIONS_TAB_NAME);
   if (!sheet) {
     throw new Error(`Sheet "${TRANSACTIONS_TAB_NAME}" not found in active spreadsheet.`);

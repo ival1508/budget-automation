@@ -221,7 +221,7 @@ function sendDailyNudge(targetChatId) {
  * @return {string} Formatted Telegram HTML daily recap message.
  */
 function generateDailyTransactionsRecap(optSs, optDate) {
-  const ss = optSs || SpreadsheetApp.getActiveSpreadsheet();
+  const ss = getActiveBudgetSpreadsheet(optSs);
   const tz = (ss && typeof ss.getSpreadsheetTimeZone === 'function') ? ss.getSpreadsheetTimeZone() : 'Asia/Singapore';
   let reportDate = optDate || new Date();
   if (typeof reportDate === 'string') {

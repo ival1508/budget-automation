@@ -56,7 +56,7 @@ function fixture(c) {
     budget[r][30] = target;
   }
   sheet('50/30/20', budget);
-  for (const [name, period] of [["Сентябрь'26", '09.2026'], ["Октябрь'26", '10.2026'], ["Я'27", '01.2027'], ["Декабрь'26", '12.2026'], ["Ф'28", '02.2028']]) {
+  for (const [name, period] of [["Сентябрь'26", '09.2026'], ["Октябрь'26", '10.2026'], ["Январь'27", '01.2027'], ["Декабрь'26", '12.2026'], ["Февраль'28", '02.2028']]) {
     const rows = Array.from({ length: 32 }, () => Array(12).fill(''));
     const planned = [['Кредит', 250, false], ['Помощница', 100, true], ['Коммунальные', 100, false], ['Интернет', 75, false], ['Родители', 0, false], ['CPF', 900, false]];
     planned.forEach(([label, amount, checked], i) => {
@@ -123,12 +123,14 @@ module.exports = test => {
   });
   test('monthly period handles last-day boundary, leap years and December rollover in SGT', c => {
     for (const [iso, month, tab] of [
+      ['2026-04-30T15:30:00Z', '2026-04', "А'26"],
       ['2026-09-30T15:29:00Z', '2026-08', "Август'26"],
       ['2026-09-30T15:30:00Z', '2026-09', "Сентябрь'26"],
       ['2026-10-01T00:00:00Z', '2026-09', "Сентябрь'26"],
       ['2027-01-01T00:00:00Z', '2026-12', "Декабрь'26"],
-      ['2028-02-29T15:30:00Z', '2028-02', "Ф'28"],
-      ['2028-03-01T00:00:00Z', '2028-02', "Ф'28"]
+      ['2027-04-30T15:30:00Z', '2027-04', "Апрель'27"],
+      ['2028-02-29T15:30:00Z', '2028-02', "Февраль'28"],
+      ['2028-03-01T00:00:00Z', '2028-02', "Февраль'28"]
     ]) {
       const report = c.getMonthlyReportDate(date(c, iso));
       assert.equal(c.Utilities.formatDate(report, 'Asia/Singapore', 'yyyy-MM'), month);
@@ -153,7 +155,7 @@ module.exports = test => {
     f.matrices['50/30/20'][0][6] = '11/2027'; f.matrices['50/30/20'][0][8] = '1/2027';
     f.matrices['50/30/20'][2][6] = 9999; f.matrices['50/30/20'][2][8] = 1234;
     const payload = c.buildCoachPayload('monthly', f.ss, date(c, '2027-01-31T12:00:00Z'));
-    assert.equal(payload.error, undefined); assert.equal(payload.month_tab, "Я'27");
+    assert.equal(payload.error, undefined); assert.equal(payload.month_tab, "Январь'27");
     assert.equal(payload.buckets.needs.actual, 1234);
   });
   test('missing completed month stays unavailable despite a present new month and never creates a tab', c => {
@@ -233,7 +235,7 @@ module.exports = test => {
       // The first-day morning can now catch up the daily coach, but never the old 09:00 retrospective.
       assert.ok(f.sends.every(row => !row.text.includes("Сентябрь'26")));
     }
-    for (const [iso, tab] of [['2026-12-31T15:31:00Z', "Декабрь'26"], ['2028-02-29T15:31:00Z', "Ф'28"]]) {
+    for (const [iso, tab] of [['2026-12-31T15:31:00Z', "Декабрь'26"], ['2028-02-29T15:31:00Z', "Февраль'28"]]) {
       clock(c, iso); const before = f.sends.length; c.dispatch();
       assert.equal(f.sends.length, before + 4);
       assert.ok(f.sends.slice(before).every(row => row.text.includes(tab)));

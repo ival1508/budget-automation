@@ -39,25 +39,105 @@ function readMonthlyReviewTransactions(ss, reportDate) {
   }, []);
 }
 
-/** Historical totals use each month's own sheet column, compared with today's target basis. */
+/** Read frozen multi-year benchmarks (2018-2026+) for cross-year lookback and YoY context. */
+function readHistoricalBenchmarkRows(ss) {
+  const byMonth = new Map();
+  try {
+    if (!ss || typeof ss.getSheetByName !== 'function') return byMonth;
+    const sheet = ss.getSheetByName('Historical_Benchmarks');
+    if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 5) return byMonth;
+    const values = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
+    const headers = (values[0] || []).map(h => calendarText(h));
+    const monthCol = headers.findIndex(h => h.toLowerCase() === 'month');
+    const ordCol = headers.findIndex(h => h.toLowerCase() === 'ordinary_spend_sgd');
+    const needsCol = headers.findIndex(h => h.toLowerCase() === 'needs_total_sgd');
+    const wantsCol = headers.findIndex(h => h.toLowerCase() === 'wants_total_sgd');
+    const commCol = headers.findIndex(h => h.toLowerCase() === 'committed_by_category_json');
+    if (monthCol < 0 || ordCol < 0) return byMonth;
+    const nonCatHeaders = new Set(['month', 'source_era', 'regular_inflow_sgd', 'ordinary_spend_sgd',
+      'needs_total_sgd', 'wants_total_sgd', 'regular_savings_sgd', 'committed_by_category_json', 'отложения']);
+    const catCols = [];
+    headers.forEach((h, idx) => {
+      if (h && !nonCatHeaders.has(h.toLowerCase())) catCols.push({ name: h, col: idx });
+    });
+    for (let r = 1; r < values.length; r++) {
+      const row = values[r];
+      const ym = calendarText(row[monthCol]);
+      const match = /^(\d{4})-(\d{2})$/.exec(ym);
+      if (!match) continue;
+      const ordRaw = row[ordCol];
+      if (ordRaw === '' || ordRaw === null || ordRaw === undefined) continue;
+      const ordinary = monthlyCents(readMonthlyAmount(ordRaw, ''));
+      if (!Number.isFinite(ordinary) || ordinary < 0) continue;
+      const committedMap = {};
+      if (commCol >= 0 && row[commCol]) {
+        try {
+          const parsed = JSON.parse(String(row[commCol]));
+          if (parsed && typeof parsed === 'object') {
+            Object.keys(parsed).forEach(k => {
+              const v = Number(parsed[k]);
+              if (Number.isFinite(v) && v >= 0) committedMap[mandatoryLabelKey(k)] = monthlyCents(v);
+            });
+          }
+        } catch (_) {}
+      }
+      const categories = catCols.map(({ name, col }) => {
+        const raw = row[col];
+        if (raw === '' || raw === null || raw === undefined) return { name: name, actual: 0, actual_available: false };
+        const val = monthlyCents(readMonthlyAmount(raw, ''));
+        return Number.isFinite(val) && val >= 0
+          ? { name: name, actual: val, actual_available: true }
+          : { name: name, actual: 0, actual_available: false };
+      });
+      byMonth.set(ym, {
+        month: ym,
+        monthIndex: Number(match[1]) * 12 + Number(match[2]) - 1,
+        ordinary: ordinary,
+        needs_total: needsCol >= 0 && row[needsCol] !== '' ? monthlyCents(readMonthlyAmount(row[needsCol], '')) : null,
+        wants_total: wantsCol >= 0 && row[wantsCol] !== '' ? monthlyCents(readMonthlyAmount(row[wantsCol], '')) : null,
+        categories: categories,
+        committed_by_category: committedMap
+      });
+    }
+  } catch (_) {}
+  return byMonth;
+}
+
+/** Historical totals use each month's own sheet column, falling back to Historical_Benchmarks across years. */
 function readMonthlyReviewHistory(ss, reportDate, transactions) {
   const anchor = calendarDateParts(reportDate), history = [], unavailable = [];
+  const benchmarks = readHistoricalBenchmarkRows(ss);
   for (let offset = 1; offset < MONTHLY_REVIEW_LOOKBACK; offset++) {
     const date = new Date(Date.UTC(anchor.year, anchor.month - 1 - offset, 15, 12));
     const month = calendarDateParts(date);
     const label = Utilities.formatDate(date, 'Asia/Singapore', 'yyyy-MM');
     const rows = transactions.filter(row => row.monthIndex === month.monthIndex);
     const resolved = typeof resolveMonthSheet === 'function' ? resolveMonthSheet(ss, date) : { sheet: ss.getSheetByName(getCurrentMonthTabName(date)) };
-    if (!resolved.sheet || !rows.length) {
-      unavailable.push(label); continue; // Absent history is not a zero-spend month.
+    if (resolved.sheet && rows.length) {
+      const budget = get503020Status(ss, false, date, true);
+      if (!budget.error) {
+        history.push({ month: label, monthIndex: month.monthIndex,
+          ordinary: monthlyCents(rows.filter(row => row.type === TRANSACTION_TYPES.EXPENSE).reduce((total, row) => total + row.amount, 0)),
+          categories: [...budget.needs.sub_categories, ...budget.wants.sub_categories] });
+        continue;
+      }
     }
-    const budget = get503020Status(ss, false, date, true);
-    if (budget.error) { unavailable.push(label); continue; }
-    history.push({ month: label, monthIndex: month.monthIndex,
-      ordinary: monthlyCents(rows.filter(row => row.type === TRANSACTION_TYPES.EXPENSE).reduce((total, row) => total + row.amount, 0)),
-      categories: [...budget.needs.sub_categories, ...budget.wants.sub_categories] });
+    const bench = benchmarks.get(label);
+    if (bench) {
+      history.push({ month: label, monthIndex: month.monthIndex, ordinary: bench.ordinary,
+        categories: bench.categories, from_benchmarks: true, committed_by_category: bench.committed_by_category });
+      continue;
+    }
+    unavailable.push(label); // Absent history is not a zero-spend month.
   }
-  return { months: history.reverse(), unavailable: unavailable.reverse() };
+  const yoyLabel = (anchor.year - 1) + '-' + String(anchor.month).padStart(2, '0');
+  const yoyBench = benchmarks.get(yoyLabel) || null;
+  return {
+    months: history.reverse(),
+    unavailable: unavailable.reverse(),
+    yoy_same_month: yoyBench ? { month: yoyBench.month, ordinary: yoyBench.ordinary,
+      needs_total: yoyBench.needs_total, wants_total: yoyBench.wants_total } : null
+  };
 }
 
 /** Overall allocations come from the sheet's own unlabeled Total row, not a bucket sum. */
@@ -130,7 +210,8 @@ function analyzeMonthlyReview(transactions, reportDate, budget, history, ordinar
     ordinary_variance: ordinaryPlan.amount === null ? null : monthlyCents(ordinaryTotal - ordinaryPlan.amount),
     over_drivers: overs, discipline: unders.slice(0, 1), purchases: purchases,
     history: { months: history.months.map(month => month.month), unavailable: history.unavailable,
-      ordinary_median: history.months.length >= 3 ? monthlyCents(calendarMedian(history.months.map(month => month.ordinary))) : null },
+      ordinary_median: history.months.length >= 3 ? monthlyCents(calendarMedian(history.months.map(month => month.ordinary))) : null,
+      yoy_same_month: history.yoy_same_month || null },
     recommendations: recommendations };
 }
 
@@ -176,10 +257,13 @@ function renderMonthlyReview(payload) {
     paragraphs.push('<b>Category targets for next month:</b>\n' + review.recommendations.map(renderMonthlyTargetRecommendation).join('\n'));
     paragraphs.push('• Fund any increase by reducing another allocation or confirming more available income; these are suggested targets, not changes to the sheet.');
   } else paragraphs.push('<b>For next month:</b> fewer than three reconciled earlier months support a material target change. Keep commitments separate from ordinary spending while checking the history.');
+  const yoyClause = (review.history && review.history.yoy_same_month)
+    ? ' Same month last year (' + html(review.history.yoy_same_month.month) + '), Расходы was ' + money(review.history.yoy_same_month.ordinary) + '.'
+    : '';
   if (review.history.ordinary_median !== null) paragraphs.push('• For context, Расходы had a median of ' + money(review.history.ordinary_median) +
     ' across ' + review.history.months.length + ' earlier recorded months (' + review.history.months[0] + '–' + review.history.months[review.history.months.length - 1] +
-    ').');
-  else paragraphs.push('Fewer than three usable earlier months are available; no longer-term spending trend is claimed.');
+    ').' + yoyClause);
+  else paragraphs.push('Fewer than three usable earlier months are available; no longer-term spending trend is claimed.' + yoyClause);
   paragraphs.push('<i>Target basis: ' + html(payload.target_header) + '; historical comparisons use this current basis, not archived targets. Mandatory plan: ' + payload.mandatory_summary.paid + ' paid, ' + payload.mandatory_summary.unpaid + ' unpaid; unpaid commitments are not savings.</i>');
   return paragraphs.join('\n\n');
 }
@@ -247,6 +331,12 @@ function buildMonthlyTargetRecommendations(categories, transactions, history) {
       const source = month.categories.find(item => mandatoryLabelKey(item.name) === mandatoryLabelKey(category.name));
       if (!source || source.actual_available === false) return null;
       const rows = transactions.filter(row => row.monthIndex === month.monthIndex && mandatoryLabelKey(row.category) === mandatoryLabelKey(category.name));
+      if (month.from_benchmarks && !rows.length) {
+        const committed = monthlyCents((month.committed_by_category && month.committed_by_category[mandatoryLabelKey(category.name)]) || 0);
+        const ordinary = monthlyCents(source.actual - committed);
+        if (ordinary < 0 || committed < 0) return null;
+        return { ordinary: ordinary, committed: committed, total: monthlyCents(source.actual), month: month.month };
+      }
       const ordinary = monthlyCents(rows.filter(row => row.type === TRANSACTION_TYPES.EXPENSE).reduce((total, row) => total + row.amount, 0));
       const committed = monthlyCents(rows.filter(row => row.type === TRANSACTION_TYPES.FIXED_EXPENSE).reduce((total, row) => total + row.amount, 0));
       if (ordinary < 0 || committed < 0 || Math.abs(ordinary + committed - source.actual) > 0.02) return null;
