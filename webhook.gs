@@ -163,6 +163,18 @@ function doPost(e) {
           }
           return HtmlService.createHtmlOutput('OK');
         }
+        if (/^\/trips?(?:@\w+)?(?:\s|$)/i.test(textTrimmed)) {
+          if (typeof readTravelPlanStatus === 'function' && typeof renderTravelPlanTelegramSummary === 'function') {
+            sendTelegramMessage(renderTravelPlanTelegramSummary(readTravelPlanStatus()), chatId);
+          }
+          return HtmlService.createHtmlOutput('OK');
+        }
+        if (/^\/(?:tax|capital)(?:@\w+)?(?:\s|$)/i.test(textTrimmed)) {
+          if (typeof readCapitalPlanStatus === 'function' && typeof renderCapitalPlanTelegramSummary === 'function') {
+            sendTelegramMessage(renderCapitalPlanTelegramSummary(readCapitalPlanStatus()), chatId);
+          }
+          return HtmlService.createHtmlOutput('OK');
+        }
 
         // --- INTERCEPT MERCHANT RENAME ---
         const cache = CacheService.getScriptCache();

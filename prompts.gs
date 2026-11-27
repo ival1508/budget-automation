@@ -162,6 +162,11 @@ ${previousProposalText}
         - MUST classify under Type: "Получение денег".
         - Do NOT add "papa_charge" or "reimbursable" to flags.
         - MUST preserve "от папы" / "from dad" in "notes" (and if denominated in USD or EUR, include the currency and amount in "notes", e.g. "от папы USD 5000" or "from dad EUR 3000").
+   - TRIP & TAX-RELIEF TAGGING RULES:
+     1. When an expense or booking mentions a trip destination (e.g. London, Paris, Moscow, Tokyo, Australia/RWC, China/Ski/Beidahu/Harbin/Club Med, Grandparents, Tatiana) or explicit "[Trip: ...]":
+        - Append "[Trip: <Trip Name>]" in "notes" (keeping "where" as the clean airline/hotel/merchant name).
+        - If paid with miles/points or directly from Wise, mention "miles" or "paid from Wise" in "notes".
+     2. When a donation ("НКО"), SRS deposit, or CPF cash top-up (RSTU) mentions Val/Rita or SRS/RSTU, preserve "[Val]"/"[Rita]", "[SRS]", or "[CPF Top-up]" in "notes".
 
 7. MULTI-IMAGE / ALBUM & SCROLLING SCREENSHOT CONTINUITY:
    - CRITICAL: You MUST process EVERY single image/document provided in the payload. Do not stop after the first image.

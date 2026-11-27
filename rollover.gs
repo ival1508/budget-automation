@@ -28,6 +28,8 @@ const ROLLOVER_DEFAULT_FREEZE_SHEETS = Object.freeze([
   'CashCoverage',
   '[Automated] Папа debt',
   'Kids',
+  'CapitalPlan',
+  'Отдых 2027 Plan',
   'Assets',
   'Assets_details'
 ]);

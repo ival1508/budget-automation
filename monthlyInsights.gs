@@ -224,6 +224,8 @@ function buildMonthlyReview(ss, reportDate, budget, plans) {
   review.allocations = readMonthlyAllocationTotal(ss, reportDate);
   review.income = readMonthlyContextAmount(sheet, SHEET_FACTS.MONTHLY_TAB_STRUCTURE.MONTHLY_INCOME_CELL);
   review.reserved = readMonthlyContextAmount(sheet, SHEET_FACTS.MONTHLY_TAB_STRUCTURE.MANDATORY_TOTAL_CELL);
+  review.travel_plan = typeof readTravelPlanStatus === 'function' ? readTravelPlanStatus(ss, reportDate) : null;
+  review.capital_plan = typeof readCapitalPlanStatus === 'function' ? readCapitalPlanStatus(ss, reportDate) : null;
   return review;
 }
 
@@ -264,6 +266,30 @@ function renderMonthlyReview(payload) {
     ' across ' + review.history.months.length + ' earlier recorded months (' + review.history.months[0] + '–' + review.history.months[review.history.months.length - 1] +
     ').' + yoyClause);
   else paragraphs.push('Fewer than three usable earlier months are available; no longer-term spending trend is claimed.' + yoyClause);
+  if (review.travel_plan) {
+    const tp = review.travel_plan;
+    const travelAlerts = [];
+    if (tp.dbs_to_sweep_sgd > 0) travelAlerts.push('sweep ' + money(tp.dbs_to_sweep_sgd) + ' from Wise to DBS SGD');
+    if (tp.over_gate_trips && tp.over_gate_trips.length) {
+      travelAlerts.push('65% Flights+Hotel gate exceeded on ' + tp.over_gate_trips.map(t => html(t.name)).join(', '));
+    }
+    if (tp.pinch_points && tp.pinch_points.length) {
+      const nextPinch = tp.pinch_points[0];
+      travelAlerts.push('Wise cashflow watch (' + html(nextPinch.month) + ': ' + money(nextPinch.planned_outflow_sgd) +
+        ' planned outflow, ' + money(nextPinch.ending_balance_sgd) + ' ending Wise buffer)');
+    }
+    if (travelAlerts.length) {
+      paragraphs.push('• <b>Отдых 2027 Plan:</b> ' + travelAlerts.join('; ') + '.');
+    }
+  }
+  if (review.capital_plan && /^(?:\d{4})-(?:09|11|12)$/.test(String(payload.report_month || '')) &&
+      review.capital_plan.total_tax_advantaged_remaining_sgd > 0) {
+    const cp = review.capital_plan;
+    paragraphs.push('• <b>IRAS 31 Dec Tax-Relief Runway:</b> ' + money(cp.total_tax_advantaged_remaining_sgd) +
+      ' remaining across CPF RSTU (' + money(cp.cpf_topup_remaining_sgd) + '), SRS (' +
+      money(cp.srs_remaining_sgd) + '), and 250% IPC Charity (' + money(cp.charity_remaining_cash_sgd) +
+      ' left; ' + money(cp.charity_paid_ytd_sgd) + ' donated YTD).');
+  }
   paragraphs.push('<i>Target basis: ' + html(payload.target_header) + '; historical comparisons use this current basis, not archived targets. Mandatory plan: ' + payload.mandatory_summary.paid + ' paid, ' + payload.mandatory_summary.unpaid + ' unpaid; unpaid commitments are not savings.</i>');
   return paragraphs.join('\n\n');
 }

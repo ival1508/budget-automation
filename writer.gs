@@ -190,8 +190,13 @@ function appendTransactions(transactionsArray, ss, optDryRun) {
     const result = appendTransactionsUnlocked(transactionsArray, ss, optDryRun);
     if (!Array.isArray(transactionsArray) || !transactionsArray.length) return result;
     const dryRun = typeof optDryRun === 'boolean' ? optDryRun : Boolean(SHEET_FACTS.DRY_RUN);
-    return dryRun || typeof captureReceiptItemsAfterWrite !== 'function' ? result :
-      captureReceiptItemsAfterWrite(transactionsArray || [], result, ss);
+    if (dryRun) return result;
+    const afterReceipts = typeof captureReceiptItemsAfterWrite === 'function'
+      ? captureReceiptItemsAfterWrite(transactionsArray || [], result, ss)
+      : result;
+    return typeof syncTripLedgerAfterWrite === 'function'
+      ? syncTripLedgerAfterWrite(transactionsArray || [], afterReceipts, ss)
+      : afterReceipts;
   });
 }
 

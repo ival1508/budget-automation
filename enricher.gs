@@ -556,7 +556,18 @@ function enrichTransaction(parsedRow, categoryBucketMap) {
     }
   }
 
-  // 4. Deduplication Key Generation (§6.7)
+  // 4. Normalize optional [Trip: <Name>] tag in notes (keeps clean merchant in where)
+  if (typeof normalizeTransactionTripTag === 'function') {
+    const tripNormalized = normalizeTransactionTripTag({
+      ...parsedRow,
+      where: where,
+      category: category
+    });
+    where = tripNormalized.where || where;
+    parsedRow = { ...parsedRow, notes: tripNormalized.notes, trip_name: tripNormalized.trip_name };
+  }
+
+  // 5. Deduplication Key Generation (§6.7)
   const dedupeKey = generateDedupeKey(date, account, amount, where);
 
   return {
