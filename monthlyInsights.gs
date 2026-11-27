@@ -54,8 +54,9 @@ function readHistoricalBenchmarkRows(ss) {
     const wantsCol = headers.findIndex(h => h.toLowerCase() === 'wants_total_sgd');
     const commCol = headers.findIndex(h => h.toLowerCase() === 'committed_by_category_json');
     if (monthCol < 0 || ordCol < 0) return byMonth;
-    const nonCatHeaders = new Set(['month', 'source_era', 'regular_inflow_sgd', 'ordinary_spend_sgd',
-      'needs_total_sgd', 'wants_total_sgd', 'regular_savings_sgd', 'committed_by_category_json', 'отложения']);
+    const nonCatHeaders = new Set(['month', 'source_era', 'regular_inflow_sgd', 'bonus_gsu_inflow_sgd',
+      'total_inflow_sgd', 'ordinary_spend_sgd', 'needs_total_sgd', 'wants_total_sgd', 'total_outflow_sgd',
+      'regular_savings_sgd', 'committed_by_category_json', 'fx_note', 'отложения']);
     const catCols = [];
     headers.forEach((h, idx) => {
       if (h && !nonCatHeaders.has(h.toLowerCase())) catCols.push({ name: h, col: idx });

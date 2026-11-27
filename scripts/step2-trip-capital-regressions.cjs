@@ -121,15 +121,21 @@ function buildTravelSheetRows() {
 }
 
 function buildCapitalPlanRows() {
-  const rows = Array.from({ length: 40 }, () => Array(9).fill(''));
+  const rows = Array.from({ length: 46 }, () => Array(9).fill(''));
+  rows[9] = ['Mandatory CPF Employee', 20400, 20400, 40800, 0, 0];
   rows[10] = ['CPF Cash Top-Up (RSTU)', 8000, 8000, 16000, 0, 16000];
   rows[11] = ['SRS Contribution', 15300, 15300, 30600, 5000, 25600];
   rows[15] = ['Remaining S$80k Cap Headroom', 27300, 35300, 62600];
   rows[16] = ['Optimal IPC Charity Cash (250%)', 10920, 14120, 25040, 1450, 23590];
   rows[18] = ['Estimated Tax Saved', 11529, 12742, 24271];
-  rows[28] = ['Total Capital Inflows', 316000, 42000];
-  rows[36] = ['Total Priority Capital Uses', 137280, 6450, 130830];
-  rows[37] = ['Net Unallocated ETF Surplus', 178720, 35550];
+  rows[23] = ['Wise Travel Standing Transfer (Отдых)', 4000, 48000];
+  rows[24] = ['IPC 250% Charity Standing Budget (НКО)', 2086.67, 25040];
+  rows[25] = ['Regular Cash Savings (Отложения -> SAYE)', 4343.33, 47720];
+  rows[32] = ['TOTAL 2027 PURE CASH CAPITAL POOL', 227720, 42000];
+  rows[38] = ['P3 · Cash-Equivalent Rainy-Day Top-Up (SAYE -> S$120k)', 102022, 0, 102022];
+  rows[39] = ['SUBTOTAL P1-P3 CASH COMMITMENTS', 206262, 5000, 201262, 0.906, 21458];
+  rows[40] = ["P4 · Repay Dad's Loan (Папа Loan)", 21458, 0, 174482];
+  rows[43] = ['2027 GSU Vests — NASDAQ:GOOG', 100000, 0];
   return rows;
 }
 
@@ -320,6 +326,7 @@ module.exports = test => {
     assert.match(sent[0].text, /65% Gate Alert \(Paris \(Anniversary\)\)/);
     assert.match(sent[1].text, /CapitalPlan — IRAS S\$80k Tax Caps/);
     assert.match(sent[1].text, /S\$23,590<\/b> left/);
+    assert.match(sent[1].text, /SAYE S\$120k Rainy-Day Top-Up:.*S\$102,022.*S\$21,458.*Папа Loan.*S\$100,000 GSU held in GOOG/);
 
     // 2. January Monthly Review includes travel gate/sweep/pinch watch, omits Q3/Q4 IRAS tax countdown
     const janPayload = c.buildCoachPayload('monthly', wb, vm.runInContext("new Date('2027-01-31T12:00:00Z')", c));

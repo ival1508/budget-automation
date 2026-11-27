@@ -82,7 +82,11 @@ function makeMockWorkbook(id, name, initialSheets = {}, tz = 'Asia/Kuala_Lumpur'
               state.values[r - 1 + ri] ||= [];
               state.formulas[r - 1 + ri] ||= [];
               state.formulas[r - 1 + ri][c - 1 + ci] = f;
-              if (state.values[r - 1 + ri][c - 1 + ci] === undefined || state.values[r - 1 + ri][c - 1 + ci] === '') {
+              if (f === '=(0.17*8000+0.2*8000)+(0.17*8000+0.2*8000)') {
+                state.values[r - 1 + ri][c - 1 + ci] = 5920;
+              } else if (f === '=(0.09*8000+0.15*8000)+(0.17*8000+0.2*8000)') {
+                state.values[r - 1 + ri][c - 1 + ci] = 4880;
+              } else if (state.values[r - 1 + ri][c - 1 + ci] === undefined || state.values[r - 1 + ri][c - 1 + ci] === '') {
                 state.values[r - 1 + ri][c - 1 + ci] = 0;
               }
             }));
@@ -182,7 +186,7 @@ module.exports = test => {
     assert.throws(() => c.getActiveBudgetSpreadsheet(), /Active spreadsheet identity does not match/);
   });
 
-  test('2027+ uniform Full\'YY naming eliminates April/August collision and chains Stage 6 createMonthTab(2027, 2)', c => {
+  test('2027+ uniform Full\'YY naming eliminates April/August collision and chains Stage 6 createMonthTab(2027, 2) with Year-3 PR CPF step-up', c => {
     // 2026 legacy single-letter Jan-Apr preserved
     assert.equal(c.getCurrentMonthTabName(vm.runInContext("new Date('2026-01-15T04:00:00Z')", c)), "Я'26");
     assert.equal(c.getCurrentMonthTabName(vm.runInContext("new Date('2026-04-15T04:00:00Z')", c)), "А'26");
@@ -201,7 +205,11 @@ module.exports = test => {
     }
     assert.notEqual(expected2027[3], expected2027[7]); // Апрель'27 !== Август'27
 
-    // Build a valid Stage 6 Январь'27 template and chain createMonthTab(2027, 2) -> Февраль'27 and (2027, 3) -> Март'27
+    // Verify CPF config boundary: 2027-01 uses Dec 2026 Year-2 PR (15%+9%=1920); >=2027-02 uses Jan 2027+ Year-3 PR (20%+17%=2960)
+    assert.equal(c.getMonthCreationCpfTotalAndFormula(2027, 1).total, 4880);
+    assert.equal(c.getMonthCreationCpfTotalAndFormula(2027, 2).total, 5920);
+
+    // Build a valid Stage 6 Январь'27 template (Year-2 PR E13=4880) and chain createMonthTab(2027, 2) -> Февраль'27 and (2027, 3) -> Март'27
     c.LockService = { getScriptLock: () => ({ hasLock: () => false, tryLock: () => true, releaseLock: () => {} }) };
     const props = c.PropertiesService.getScriptProperties();
     props.setProperty('BUDGET_WORKBOOK_YEAR', '2027');
@@ -210,15 +218,15 @@ module.exports = test => {
     const janForms = Array.from({ length: 70 }, () => Array(12).fill(''));
     janVals[0][1] = serial('2027-01-01');
     janForms[0][3] = '=EOMONTH(B1;0)'; janVals[0][3] = serial('2027-01-31');
-    janVals[2][0] = 'Зарплата В'; janVals[2][1] = 35000;
-    janVals[3][0] = 'Зарплата Р'; janVals[3][1] = 14500;
+    janVals[2][0] = 'Зарплата В'; janVals[2][1] = 33860;
+    janVals[3][0] = 'Зарплата Р'; janVals[3][1] = 14439;
     janVals[4][1] = 0;
     janForms[5][1] = c.monthCreationLightIncomeFormula(); janVals[5][1] = 0;
-    janForms[13][1] = '=SUM(INDIRECT(ADDRESS(2;COLUMN())&":"&ADDRESS(ROW()-1;COLUMN())))'; janVals[13][1] = 49500;
+    janForms[13][1] = '=SUM(INDIRECT(ADDRESS(2;COLUMN())&":"&ADDRESS(ROW()-1;COLUMN())))'; janVals[13][1] = 48299;
     janForms[13][4] = '=SUM(INDIRECT(ADDRESS(3;COLUMN())&":"&ADDRESS(ROW()-1;COLUMN())))'; janVals[13][4] = 15000;
-    janForms[14][3] = '=B14-E14'; janVals[14][3] = 34500;
-    janForms[16][3] = '=D15/(DAYS360(B1;D1)+1)'; janVals[16][3] = 1150;
-    janForms[18][3] = '=(L33/(D1-TODAY()+1))'; janVals[18][3] = 1150;
+    janForms[14][3] = '=B14-E14'; janVals[14][3] = 33299;
+    janForms[16][3] = '=D15/(DAYS360(B1;D1)+1)'; janVals[16][3] = 1100;
+    janForms[18][3] = '=(L33/(D1-TODAY()+1))'; janVals[18][3] = 1100;
     janForms[1][10] = '=D17';
     const mandCategories = ['Аренда', 'Помощница', 'Коммунальные', 'Интернет', 'Мобильные', 'Дети', 'Страховка', 'Подписки', 'Родители', 'Отложения', 'CPF'];
     mandCategories.forEach((cat, idx) => {
@@ -244,10 +252,10 @@ module.exports = test => {
 
     const txRows = [
       ['Дата', 'Счёт', 'Тип', 'Сумма', 'Сумма в SGD', 'До', 'После', 'Категория', 'Где', 'Заметки', '50/30/20'],
-      [serial('2027-01-25'), 'DBS SGD', 'Доходы', 31000, 31000, 0, 31000, 'Зарплата', 'Google', '', ''],
-      [serial('2027-01-26'), 'DBS SGD', 'Доходы', 12600, 12600, 31000, 43600, 'Зарплата', 'Kaspersky', '', ''],
-      [serial('2027-02-25'), 'DBS SGD', 'Доходы', 31000, 31000, 43600, 74600, 'Зарплата', 'Google', '', ''],
-      [serial('2027-02-26'), 'DBS SGD', 'Доходы', 12600, 12600, 74600, 87200, 'Зарплата', 'Kaspersky', '', '']
+      [serial('2027-01-25'), 'DBS SGD', 'Доходы', 30900, 30900, 0, 30900, 'Зарплата', 'Google', '', ''],
+      [serial('2027-01-26'), 'DBS SGD', 'Доходы', 12119, 12119, 30900, 43019, 'Зарплата', 'Kaspersky', '', ''],
+      [serial('2027-02-25'), 'DBS SGD', 'Доходы', 30900, 30900, 43019, 73919, 'Зарплата', 'Google', '', ''],
+      [serial('2027-02-26'), 'DBS SGD', 'Доходы', 12119, 12119, 73919, 86038, 'Зарплата', 'Kaspersky', '', '']
     ];
 
     const wb2027 = makeMockWorkbook('wb-2027-id', 'Budget 2027', {
@@ -255,14 +263,25 @@ module.exports = test => {
       Transactions: { values: txRows }
     });
 
+    // Also verify provisional fallback for Февраль'27 adds +S$640 (+8% er CPF) to Year-2 template B4=14439 -> 15079
+    const provisionalFeb = c.buildMonthCreationSalaries([], 2027, 2, { name: "Январь'27", values: janVals, formulas: janForms });
+    assert.equal(provisionalFeb.entries[1].amount, 15079);
+
     const febRes = c.createMonthTab(2027, 2, { spreadsheet: wb2027, sandbox: false });
     assert.equal(febRes.created, true);
     assert.equal(febRes.sheetName, "Февраль'27");
     assert.equal(febRes.source, "Январь'27");
+    assert.equal(febRes.plan.salary.entries[1].amount, 15079); // 12,119 cash + 2,960 Year-3 CPF
+    const febSheet = wb2027.getSheetByName("Февраль'27");
+    assert.equal(febSheet.getRange('E13').getFormula(), '=(0.17*8000+0.2*8000)+(0.17*8000+0.2*8000)');
+    assert.equal(febSheet.getRange('E13').getValue(), 5920);
+    assert.match(febSheet.getRange('B4').getFormula(), /\(cents\+296000\)\/100/);
 
+    // Март'27 chains from Февраль'27 (already at Year-3 E13=5920, so no extra E13 edit needed)
     const marRes = c.createMonthTab(2027, 3, { spreadsheet: wb2027, sandbox: false });
     assert.equal(marRes.created, true);
     assert.equal(marRes.sheetName, "Март'27");
+    assert.ok(!marRes.plan.edits.some(e => e.range === 'E13'));
     assert.equal(wb2027.getSheetByName("Январь'27").isSheetHidden(), true);
     assert.equal(wb2027.getSheetByName("Февраль'27").isSheetHidden(), false);
   });
@@ -353,13 +372,14 @@ module.exports = test => {
     ];
 
     const benchRows = [
-      ['month', 'source_era', 'regular_inflow_sgd', 'ordinary_spend_sgd', 'needs_total_sgd', 'wants_total_sgd', 'regular_savings_sgd', 'Продукты', 'Рестораны', 'committed_by_category_json'],
-      ['2026-01', '2026', 35000, 14200, 16000, 8500, 10500, 1650, 950, '{}'],
-      ['2026-08', '2026', 35000, 15100, 16500, 9000, 9500, 1700, 880, '{}'],
-      ['2026-09', '2026', 35000, 14800, 16200, 8700, 10100, 1750, 910, '{}'],
-      ['2026-10', '2026', 35000, 15300, 16800, 8900, 9300, 1680, 920, '{}'],
-      ['2026-11', '2026', 35000, 14900, 16400, 8600, 10000, 1720, 850, '{}'],
-      ['2026-12', '2026', 35000, 15600, 17000, 9200, 8800, 1820, 980, '{}']
+      ['month', 'source_era', 'regular_inflow_sgd', 'ordinary_spend_sgd', 'needs_total_sgd', 'wants_total_sgd', 'regular_savings_sgd', 'Продукты', 'Рестораны', 'committed_by_category_json', 'bonus_gsu_inflow_sgd', 'total_inflow_sgd', 'total_outflow_sgd', 'fx_note'],
+      ['2015-09', '2015-Tokyo-Arrival', 5640, 3200, 3100, 2224, 1128, 480, 520, '{"Квартира":2124}', 0, 5640, 5324, 'JPY@83.3/SGD'],
+      ['2026-01', '2026', 35000, 14200, 16000, 8500, 10500, 1650, 950, '{}', 18000, 53000, 24500, 'SGD native'],
+      ['2026-08', '2026', 35000, 15100, 16500, 9000, 9500, 1700, 880, '{}', 0, 35000, 25500, 'SGD native'],
+      ['2026-09', '2026', 35000, 14800, 16200, 8700, 10100, 1750, 910, '{}', 25000, 60000, 24900, 'SGD native'],
+      ['2026-10', '2026', 35000, 15300, 16800, 8900, 9300, 1680, 920, '{}', 20000, 55000, 25700, 'SGD native'],
+      ['2026-11', '2026', 35000, 14900, 16400, 8600, 10000, 1720, 850, '{}', 0, 35000, 25000, 'SGD native'],
+      ['2026-12', '2026', 35000, 15600, 17000, 9200, 8800, 1820, 980, '{}', 25000, 60000, 26200, 'SGD native']
     ];
 
     const wb2027 = makeMockWorkbook('wb-2027', 'Budget 2027', {
@@ -368,6 +388,10 @@ module.exports = test => {
       Transactions: { values: txRows },
       Historical_Benchmarks: { values: benchRows }
     });
+
+    const parsedBench = c.readHistoricalBenchmarkRows(wb2027);
+    assert.ok(parsedBench.has('2015-09'));
+    assert.deepEqual(Array.from(parsedBench.get('2015-09').categories, x => x.name), ['Продукты', 'Рестораны']);
 
     const payload = c.buildCoachPayload('monthly', wb2027, reportDate);
     assert.equal(payload.error, undefined);

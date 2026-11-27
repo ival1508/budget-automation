@@ -479,7 +479,8 @@ function renderTravelPlanTelegramSummary(status) {
 
 /**
  * Reads live 'CapitalPlan' tab metrics (IRAS S$80k caps, 250% IPC Charity, SRS, CPF RSTU,
- * and Bonus/GSU Sinking-Fund Waterfall). Returns null when 'CapitalPlan' is absent.
+ * Monthly Salary Earmarks vs Pure Cash Capital Pool, SAYE S$120k Rainy-Day Top-Up,
+ * Папа Loan Paydown, and separate GSU Vests). Returns null when 'CapitalPlan' is absent.
  */
 function readCapitalPlanStatus(optSs, optAsOf) {
   try {
@@ -488,22 +489,26 @@ function readCapitalPlanStatus(optSs, optAsOf) {
     const sheet = ss.getSheetByName(CAPITAL_PLAN_SHEET);
     if (!sheet || sheet.getLastRow() < 35) return null;
 
-    const grid = sheet.getRange(1, 1, 40, 9).getValues();
+    const maxRow = Math.min(50, Math.max(46, sheet.getLastRow()));
+    const grid = sheet.getRange(1, 1, maxRow, 9).getValues();
     const num = (r, c) => Number(grid[r - 1] && grid[r - 1][c - 1]) || 0;
 
     // Section 1 coordinates (1-indexed rows in CapitalPlan):
-    // Row 11: CPF Cash Top-Up (RSTU) -> B=Val Target, C=Rita Target, D=Combined Target, E=Paid YTD, F=Remaining
-    // Row 12: SRS Contribution      -> B=Val Target, C=Rita Target, D=Combined Target, E=Paid YTD, F=Remaining
+    // Row 10: Mandatory CPF Employee  -> D=Combined Plan, E=Live 2027 Paid YTD
+    // Row 11: CPF Cash Top-Up (RSTU)  -> B=Val Target, C=Rita Target, D=Combined Target, E=Paid YTD, F=Remaining
+    // Row 12: SRS Contribution        -> B=Val Target, C=Rita Target, D=Combined Target, E=Paid YTD, F=Remaining
     // Row 16: Remaining S$80k Cap Headroom -> B=Val, C=Rita, D=Combined
     // Row 17: Optimal IPC Charity Cash (250%) -> B=Val, C=Rita, D=Combined, E=Paid YTD, F=Remaining
     // Row 19: Total Tax Saved (SRS + RSTU + Charity) -> B=Val, C=Rita, D=Combined
-    // Section 2 coordinates:
-    // Row 26: Regular Отложения -> B=Annual Plan, C=Live YTD
-    // Row 27: Cash Bonuses      -> B=Annual Plan, C=Live YTD
-    // Row 28: GSU Vests         -> B=Annual Plan, C=Live YTD
-    // Row 29: Total Capital Inflows -> B=Annual Plan, C=Live YTD
-    // Row 37: Total Priority Capital Uses -> B=Annual Target, C=Funded YTD, D=Remaining
-    // Row 38: Net Unallocated Capital Surplus -> B=Planned Surplus, C=Live Surplus
+    // Section 2 coordinates (v2 layout: 2A Monthly Earmarks, 2B Pure Cash Pool, 2C Cash Waterfall, 2D GSU):
+    // Row 24: Wise Travel Standing (Отдых)  -> B=Monthly, C=Annual
+    // Row 25: IPC Charity Monthly (НКО)     -> B=Monthly, C=Annual
+    // Row 26: Regular Cash Savings (Отложения) -> B=Monthly, C=Annual
+    // Row 33: TOTAL 2027 PURE CASH CAPITAL POOL -> B=Annual Plan, C=Live YTD
+    // Row 39: P3 · SAYE Rainy-Day Top-Up (->S$120k) -> B=Plan, C=Funded YTD, D=Remaining
+    // Row 40: SUBTOTAL P1-P3 CASH COMMITMENTS -> B=Plan, C=Funded YTD, D=Remaining, F=Pure Cash Left
+    // Row 41: P4 · Repay Dad's Loan (Папа Loan) -> B=Cash Applied, C=Paid YTD, D=Remaining Debt ex-GSU
+    // Row 44: 2027 GSU Vests (GOOG Held) -> B=Annual Plan, C=Vested YTD
     const cpfTopupRemaining = Number(num(11, 6).toFixed(2));
     const srsRemaining = Number(num(12, 6).toFixed(2));
     const charityTargetCash = Number(num(17, 4).toFixed(2));
@@ -514,22 +519,42 @@ function readCapitalPlanStatus(optSs, optAsOf) {
     const totalTaxSaved = Number(num(19, 4).toFixed(2));
     const totalTaxAdvantagedRemaining = Number((cpfTopupRemaining + srsRemaining + charityRemainingCash).toFixed(2));
 
+    const pureCashPoolPlan = Number(num(33, 2).toFixed(2));
+    const pureCashPoolYtd = Number(num(33, 3).toFixed(2));
+    const sayeTopupRemaining = Number(num(39, 4).toFixed(2));
+    const cashLeftAfterSaye = Number(num(40, 6).toFixed(2));
+    const papaCashApplied = Number(num(41, 2).toFixed(2));
+    const papaRemainingExGsu = Number(num(41, 4).toFixed(2));
+    const gsuVestsPlan = Number(num(44, 2).toFixed(2));
+    const gsuVestsYtd = Number(num(44, 3).toFixed(2));
+
     return {
       val_cap_headroom_sgd: valHeadroom,
       rita_cap_headroom_sgd: ritaHeadroom,
+      mandatory_cpf_ytd_sgd: Number(num(10, 5).toFixed(2)),
       cpf_topup_paid_sgd: Number(num(11, 5).toFixed(2)),
       cpf_topup_remaining_sgd: cpfTopupRemaining,
       srs_paid_sgd: Number(num(12, 5).toFixed(2)),
       srs_remaining_sgd: srsRemaining,
       charity_target_cash_sgd: charityTargetCash,
+      charity_monthly_plan_sgd: Number(num(25, 2).toFixed(2)),
       charity_paid_ytd_sgd: charityPaidYtd,
       charity_remaining_cash_sgd: charityRemainingCash,
       estimated_tax_saved_sgd: totalTaxSaved,
       total_tax_advantaged_remaining_sgd: totalTaxAdvantagedRemaining,
-      capital_inflows_plan_sgd: Number(num(29, 2).toFixed(2)),
-      capital_inflows_ytd_sgd: Number(num(29, 3).toFixed(2)),
-      capital_uses_target_sgd: Number(num(37, 2).toFixed(2)),
-      capital_surplus_plan_sgd: Number(num(38, 2).toFixed(2))
+      pure_cash_pool_plan_sgd: pureCashPoolPlan,
+      pure_cash_pool_ytd_sgd: pureCashPoolYtd,
+      saye_topup_remaining_sgd: sayeTopupRemaining,
+      cash_left_after_saye_sgd: cashLeftAfterSaye,
+      papa_cash_applied_sgd: papaCashApplied,
+      papa_remaining_ex_gsu_sgd: papaRemainingExGsu,
+      gsu_vests_plan_sgd: gsuVestsPlan,
+      gsu_vests_ytd_sgd: gsuVestsYtd,
+      // Backwards-compatible aliases
+      capital_inflows_plan_sgd: pureCashPoolPlan,
+      capital_inflows_ytd_sgd: pureCashPoolYtd,
+      capital_uses_target_sgd: Number(num(40, 2).toFixed(2)),
+      capital_surplus_plan_sgd: cashLeftAfterSaye
     };
   } catch (err) {
     Logger.log('readCapitalPlanStatus error: ' + err.message);
@@ -544,20 +569,23 @@ function renderCapitalPlanTelegramSummary(cap) {
   if (!cap) {
     return 'ℹ️ <b>CapitalPlan</b> tab is not present in the active workbook.';
   }
-  const money = val => 'S$' + Math.round(Math.abs(Number(val) || 0)).toLocaleString('en-US');
+  const money = val => (Number(val) < 0 ? '-' : '') + 'S$' + Math.round(Math.abs(Number(val) || 0)).toLocaleString('en-US');
   const lines = [
-    '🏛 <b>CapitalPlan — IRAS S$80k Tax Caps &amp; Bonus/GSU Runway</b>',
+    '🏛 <b>CapitalPlan — IRAS S$80k Tax Caps &amp; Pure-Cash Waterfall</b>',
     '• <b>CPF Cash Top-Up (RSTU):</b> ' + money(cap.cpf_topup_paid_sgd) + ' paid · <b>' +
       money(cap.cpf_topup_remaining_sgd) + '</b> left before 31 Dec.',
     '• <b>SRS Contributions:</b> ' + money(cap.srs_paid_sgd) + ' paid · <b>' +
       money(cap.srs_remaining_sgd) + '</b> left before 31 Dec.',
-    '• <b>IPC Charity (250% Deduction):</b> ' + money(cap.charity_paid_ytd_sgd) + ' paid of ' +
-      money(cap.charity_target_cash_sgd) + ' optimal cap-filler · <b>' + money(cap.charity_remaining_cash_sgd) + '</b> left.',
+    '• <b>IPC Charity (250% · Monthly НКО ' + money(cap.charity_monthly_plan_sgd || (cap.charity_target_cash_sgd / 12)) + '/mo):</b> ' +
+      money(cap.charity_paid_ytd_sgd) + ' paid of ' + money(cap.charity_target_cash_sgd) +
+      ' · <b>' + money(cap.charity_remaining_cash_sgd) + '</b> left.',
     '• <b>Estimated Tax Saved (Full Cap Plan):</b> <b>' + money(cap.estimated_tax_saved_sgd) +
-      '</b> (Val 23% + Rita 18% brackets).',
-    '• <b>2027 Capital Inflows (Отложения + Bonus + GSU):</b> ' + money(cap.capital_inflows_ytd_sgd) +
-      ' YTD vs ' + money(cap.capital_inflows_plan_sgd) + ' annual plan (' +
-      (cap.capital_surplus_plan_sgd >= 0 ? (money(cap.capital_surplus_plan_sgd) + ' unallocated ETF rebalance surplus') : (money(cap.capital_surplus_plan_sgd) + ' shortfall')) + ').'
+      '</b> (Val 23% + Rita 18% Year-3 PR).',
+    '• <b>2027 Pure Cash Pool (Отложения + Bonuses):</b> ' + money(cap.pure_cash_pool_ytd_sgd) +
+      ' YTD vs ' + money(cap.pure_cash_pool_plan_sgd) + ' plan.',
+    '• <b>SAYE S$120k Rainy-Day Top-Up:</b> <b>' + money(cap.saye_topup_remaining_sgd) +
+      '</b> needed → leaves <b>' + money(cap.cash_left_after_saye_sgd) + '</b> pure cash for <b>Папа Loan</b> (reduces debt to ' +
+      money(cap.papa_remaining_ex_gsu_sgd) + ' ex-GSU; ' + money(cap.gsu_vests_plan_sgd) + ' GSU held in GOOG).'
   ];
   return lines.join('\n');
 }

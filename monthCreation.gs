@@ -6,6 +6,30 @@ const MONTH_CREATION_CPF = Object.freeze({
   Google: { wageBase: 8000, employerPercent: 17, employeePercent: 20 },
   Kaspersky: { wageBase: 8000, employerPercent: 9, employeePercent: 15 }
 });
+const MONTH_CREATION_CPF_YEAR3 = Object.freeze({
+  Google: { wageBase: 8000, employerPercent: 17, employeePercent: 20 },
+  Kaspersky: { wageBase: 8000, employerPercent: 17, employeePercent: 20 }
+});
+const MONTH_CREATION_CPF_FORMULA_YEAR2 = '=(0.09*8000+0.15*8000)+(0.17*8000+0.2*8000)';
+const MONTH_CREATION_CPF_FORMULA_YEAR3 = '=(0.17*8000+0.2*8000)+(0.17*8000+0.2*8000)';
+
+/**
+ * Rita steps from Year-2 PR (15% emp + 9% er) to Year-3 PR (20% emp + 17% er)
+ * starting with her January 2027 payslip, which funds target months >= 2027-02.
+ */
+function getMonthCreationCpfConfig(year, month) {
+  const isYear3 = Number.isInteger(year) && Number.isInteger(month) &&
+    (year > 2027 || (year === 2027 && month >= 2));
+  return isYear3 ? MONTH_CREATION_CPF_YEAR3 : MONTH_CREATION_CPF;
+}
+
+function getMonthCreationCpfTotalAndFormula(year, month) {
+  const isYear3 = Number.isInteger(year) && Number.isInteger(month) &&
+    (year > 2027 || (year === 2027 && month >= 2));
+  return isYear3
+    ? { total: 5920, formula: MONTH_CREATION_CPF_FORMULA_YEAR3, isYear3: true }
+    : { total: 4880, formula: MONTH_CREATION_CPF_FORMULA_YEAR2, isYear3: false };
+}
 
 function monthCreationPeriod(year, month) {
   if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
@@ -64,7 +88,9 @@ function validateMonthCreationTemplate(source) {
   requireFormula(33, 11, '=K32');
   requireFormula(33, 12, '=L32');
   const cpfFormula = String(f(13, 5)).replace(/\s/g, '').replace(/(\d),(\d)/g, '$1.$2');
-  if (v(13, 4) !== 'CPF' || cpfFormula !== '=(0.09*8000+0.15*8000)+(0.17*8000+0.2*8000)' || v(13, 5) !== 4880) {
+  const validYear2Cpf = cpfFormula === MONTH_CREATION_CPF_FORMULA_YEAR2 && v(13, 5) === 4880;
+  const validYear3Cpf = cpfFormula === MONTH_CREATION_CPF_FORMULA_YEAR3 && v(13, 5) === 5920;
+  if (v(13, 4) !== 'CPF' || (!validYear2Cpf && !validYear3Cpf)) {
     throw new Error('Unsupported CPF plan at E13; review the contribution rates and wage base.');
   }
   let hasDescriptionFormulas = false;
@@ -142,14 +168,19 @@ function buildMonthCreationSalaries(transactions, year, month, template) {
       date: periodLabel + '-' + String(date.day).padStart(2, '0'), source: source, amount: amount });
   });
   const blockers = [], warnings = [];
+  const cpfConfig = getMonthCreationCpfConfig(year, month);
+  const sourceCpfTotal = template ? monthCreationCell(template, 13, 5, false) : null;
   entries.forEach(entry => {
     delete entry.pattern;
-    entry.cpf = { ...MONTH_CREATION_CPF[entry.employer] };
+    entry.cpf = { ...cpfConfig[entry.employer] };
     entry.cpf.amount = entry.cpf.wageBase * (entry.cpf.employerPercent + entry.cpf.employeePercent) / 100;
     entry.cashAmount = null;
     const templateAmount = template && monthCreationCell(template, Number(entry.cell.slice(1)), 2);
     if (typeof templateAmount === 'number' && Number.isFinite(templateAmount) && templateAmount >= 0 && Number.isSafeInteger(Math.round(templateAmount * 100))) {
-      entry.fallback = { sheet: template.name, cell: entry.cell, amount: Math.round(templateAmount * 100) / 100 };
+      const erStepDelta = (entry.employer === 'Kaspersky' && entry.cpf.employerPercent === 17 && sourceCpfTotal === 4880)
+        ? entry.cpf.wageBase * (17 - 9) / 100
+        : 0;
+      entry.fallback = { sheet: template.name, cell: entry.cell, amount: Math.round((templateAmount + erStepDelta) * 100) / 100 };
     }
     const cents = entry.transactions.reduce((total, transaction) =>
       total + Math.sign(transaction.amount) * Math.round(Math.abs(transaction.amount) * 100), 0);
@@ -216,7 +247,7 @@ function monthCreationSalaryFormula(entry) {
   if (!['Google', 'Kaspersky'].includes(entry.employer)) throw new Error('Unsupported salary employer.');
   const employer = entry.employer.toLowerCase(), other = employer === 'google' ? 'kaspersky' : 'google';
   const fallback = entry.fallback ? Math.round(entry.fallback.amount * 100) + '/100' : 'NA()';
-  const cpf = MONTH_CREATION_CPF[entry.employer];
+  const cpf = entry.cpf || MONTH_CREATION_CPF[entry.employer];
   const cpfCents = cpf.wageBase * (cpf.employerPercent + cpf.employeePercent);
   return '=IFERROR(LET(dates;' + monthCreationLedgerColumn('A') + ';types;' + monthCreationLedgerColumn('C') +
     ';amounts;' + monthCreationLedgerColumn('E') + ';sources;' + monthCreationLedgerColumn('I') +
@@ -307,9 +338,15 @@ function buildMonthCreationPlan(snapshot, year, month) {
   validateMonthCreationTemplate(source);
   const salary = buildMonthCreationSalaries(snapshot.transactions, year, month, source);
   const lightIncome = buildMonthCreationLightIncome(snapshot.transactions, year, month, snapshot.asOf);
+  const targetCpf = getMonthCreationCpfTotalAndFormula(year, month);
+  const sourceCpfFormula = String(monthCreationCell(source, 13, 5, true)).replace(/\s/g, '').replace(/(\d),(\d)/g, '$1.$2');
+  const needsCpfStepUp = sourceCpfFormula !== targetCpf.formula;
+  const cpfWarning = targetCpf.isYear3
+    ? 'Salary B3:B4 adds employee and employer CPF: Google 20% + 17%; Kaspersky year 3 PR 20% + 17%, on the existing wage base. E13 deducts full CPF (S$5,920) once.'
+    : 'Salary B3:B4 adds employee and employer CPF: Google 20% + 17%; Kaspersky year 2 PR 15% + 9%, on the existing wage base. E13 deducts full CPF once. Provisional template compensation is carried unchanged.';
   const warnings = ['Read-only plan; formulas have not been evaluated by Google Sheets.',
     'Creation, live reader integration and deployment are separate steps.',
-    'Salary B3:B4 adds employee and employer CPF: Google 20% + 17%; Kaspersky year 2 PR 15% + 9%, on the existing wage base. E13 deducts full CPF once. Provisional template compensation is carried unchanged.',
+    cpfWarning,
     'B6 tracks this tab\'s month-to-date light income, including signed corrections; B5 starts at zero.',
     'Native sandbox must verify formula recalculation, Russian number formatting, long descriptions and wrapped status layout.',
     'Summary and 50/30/20 are not modified.'].concat(salary.warnings);
@@ -325,6 +362,9 @@ function buildMonthCreationPlan(snapshot, year, month) {
     { range: 'G3:G13', values: Array.from({ length: 11 }, () => ['']), purpose: 'Clear mandatory payment status column G (leave blank)' },
     { range: 'I2:I32', formulas: Array.from({ length: 31 }, (_, index) => [monthCreationDescriptionFormula(index + 2)]), purpose: 'Live descriptions matching daily spending filters' }
   ];
+  if (needsCpfStepUp) {
+    edits.push({ range: 'E13', formula: targetCpf.formula, purpose: 'Update CPF plan at E13 to Year-3 PR rates (S$' + targetCpf.total + ')' });
+  }
   return { status: 'preview', target: target, source: source.name, sourceId: source.id,
     salary: salary,
     lightIncome: lightIncome,
@@ -416,6 +456,10 @@ function verifyCreatedMonthSheet(sheet, plan) {
   const lightEdit = plan.edits.find(edit => edit.range === 'B6');
   if (normal(formulas[5][1]) !== normal(lightEdit.formula)) {
     throw new Error('Created sheet B6 light-income formula verification failed.');
+  }
+  const cpfEdit = plan.edits.find(edit => edit.range === 'E13');
+  if (cpfEdit && normal(formulas[12][4]) !== normal(cpfEdit.formula)) {
+    throw new Error('Created sheet E13 CPF formula verification failed.');
   }
   const checkNoError = (r, c, label) => {
     const val = (values[r - 1] || [])[c - 1];
