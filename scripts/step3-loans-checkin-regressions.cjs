@@ -476,4 +476,21 @@ module.exports = test => {
     assert.equal(dstWb.getSheetByName('Kids').getRange('C35').getValue(), 39400);
     assert.equal(dstWb.getSheetByName('Kids').getRange('G35').getValue(), 109.5);
   });
+
+  test('Step 3: Portfolio Health Watch detects Rainy-Day Runway (SAYE) on Summary!G13:I13 with 4m / S$120k target', c => {
+    const sumSpec = buildPromotedSummarySpec();
+    sumSpec.values[12][6] = 'Rainy-Day Runway (SAYE)';
+    sumSpec.values[12][8] = 0.6;
+    sumSpec.values[12][9] = '⚠ Build +S$102k to S$120k';
+    const wb = makeWorkbook(Object.assign({ Summary: sumSpec }, buildCheckinFixtureSheets()), 'wb-saye-runway');
+    const health = c.readPortfolioHealthStatus(wb, new Date('2026-11-28T00:00:00Z'));
+    assert.ok(health);
+    assert.equal(health.runway_kind, 'saye');
+    assert.equal(health.runway_target_months, 4);
+    assert.equal(health.runway_months, 0.6);
+    assert.equal(health.runway_low, true);
+    const line = c.renderPortfolioHealthCoachLine(health);
+    assert.match(line, /SAYE rainy-day cash at <b>S\$17,978<\/b> \(0\.6 mos\) — S\$102,022 below S\$120k target/);
+    assert.doesNotMatch(line, /&lt;12m target/);
+  });
 };

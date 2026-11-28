@@ -433,7 +433,10 @@ function readPortfolioHealthStatus(optSs, optAsOf) {
     const netWorthSgd = parseNumericCell_(summary.getRange('C36').getValue());
     const gsuNwPct = parseNumericCell_(summary.getRange('I11').getValue());
     const gsuLiquidPct = parseNumericCell_(summary.getRange('I12').getValue());
+    const runwayLabel = String(summary.getRange('G13').getValue() || '').trim();
+    const isSayeRunway = /SAYE|Rainy-Day/i.test(runwayLabel);
     const runwayMonths = parseNumericCell_(summary.getRange('I13').getValue());
+    const runwayTargetMonths = isSayeRunway ? 4 : 12;
 
     if (parentsLiquid === null || netWorthSgd === null) return null;
 
@@ -457,8 +460,10 @@ function readPortfolioHealthStatus(optSs, optAsOf) {
       gsu_liquid_pct: Number(effectiveGsuLiquidPct.toFixed(4)),
       gsu_nw_pct: Number(effectiveGsuNwPct.toFixed(4)),
       gsu_concentrated: effectiveGsuLiquidPct > 0.35,
+      runway_kind: isSayeRunway ? 'saye' : 'total_liquid',
+      runway_target_months: runwayTargetMonths,
       runway_months: runwayMonths !== null ? Number(runwayMonths.toFixed(1)) : null,
-      runway_low: runwayMonths !== null && runwayMonths < 12,
+      runway_low: runwayMonths !== null && runwayMonths < runwayTargetMonths,
       checkins_month: checkinStatus ? checkinStatus.month : null,
       checkins_locked: checkinStatus ? checkinStatus.locked_count : null,
       checkins_expected: checkinStatus ? checkinStatus.expected_count : null,
@@ -484,15 +489,25 @@ function renderPortfolioHealthCoachLine(health) {
       '%</b> of Parents’ liquid assets (&gt;35% concentration watch; ' +
       (health.gsu_nw_pct * 100).toFixed(1) + '% of Net Worth)');
   }
-  if (health.runway_months !== null) {
-    if (health.runway_low) {
-      alerts.push('⚠️ Liquid runway at <b>' + health.runway_months.toFixed(1) + ' mos</b> (&lt;12m target)');
-    } else if (health.gsu_concentrated) {
-      alerts.push('Liquid runway ' + health.runway_months.toFixed(1) + ' mos');
+  if (health.runway_kind === 'saye') {
+    if (health.saye_shortfall_sgd > 0 || health.runway_low) {
+      const mosTxt = health.runway_months !== null ? ' (' + health.runway_months.toFixed(1) + ' mos)' : '';
+      alerts.push('⚠️ SAYE rainy-day cash at <b>' + m0(health.saye_balance_sgd) + '</b>' + mosTxt +
+        (health.saye_shortfall_sgd > 0 ? ' — ' + m0(health.saye_shortfall_sgd) + ' below S$120k target' : ''));
+    } else if (health.gsu_concentrated && health.runway_months !== null) {
+      alerts.push('SAYE rainy-day runway ' + health.runway_months.toFixed(1) + ' mos');
     }
-  }
-  if (health.saye_shortfall_sgd > 0) {
-    alerts.push('SAYE rainy-day cash at ' + m0(health.saye_balance_sgd) + ' (' + m0(health.saye_shortfall_sgd) + ' below S$120k target)');
+  } else {
+    if (health.runway_months !== null) {
+      if (health.runway_low) {
+        alerts.push('⚠️ Liquid runway at <b>' + health.runway_months.toFixed(1) + ' mos</b> (&lt;12m target)');
+      } else if (health.gsu_concentrated) {
+        alerts.push('Liquid runway ' + health.runway_months.toFixed(1) + ' mos');
+      }
+    }
+    if (health.saye_shortfall_sgd > 0) {
+      alerts.push('SAYE rainy-day cash at ' + m0(health.saye_balance_sgd) + ' (' + m0(health.saye_shortfall_sgd) + ' below S$120k target)');
+    }
   }
   if (health.checkins_expected !== null && !health.checkins_all_locked) {
     alerts.push('Asset check-ins (' + checkinHtmlEscape_(health.checkins_month || 'current') + '): <b>' +
