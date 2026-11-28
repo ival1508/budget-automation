@@ -31,6 +31,11 @@ function makeWorkbook(sheetsSpec, id = 'wb-step3') {
       getName: () => name,
       getLastRow: () => values.length,
       getLastColumn: () => Math.max(0, ...values.map(r => r.length)),
+      insertRowBefore: beforeRow => {
+        const idx = Math.max(0, beforeRow - 1);
+        values.splice(idx, 0, Array(12).fill(''));
+        formulas.splice(idx, 0, Array(12).fill(''));
+      },
       getRange: (rowOrA1, col, height = 1, width = 1) => {
         let r = rowOrA1, c = col, h = height, w = width;
         if (typeof rowOrA1 === 'string') {
@@ -492,5 +497,95 @@ module.exports = test => {
     const line = c.renderPortfolioHealthCoachLine(health);
     assert.match(line, /SAYE rainy-day cash at <b>S\$17,978<\/b> \(0\.6 mos\) — S\$102,022 below S\$120k target/);
     assert.doesNotMatch(line, /&lt;12m target/);
+  });
+
+  test('Step 3: /checkin +/- flows insert dated Deposit/Withdrawal rows before monthly drafts, update draft units/cash, and deduplicate idempotently', c => {
+    const cacheMap = new Map();
+    c.CacheService = {
+      getScriptCache: () => ({
+        get: k => cacheMap.get(k) || null,
+        put: (k, v) => { cacheMap.set(k, String(v)); },
+        remove: k => { cacheMap.delete(k); }
+      })
+    };
+    c.LockService = { getScriptLock: () => ({ hasLock: () => false, tryLock: () => true, waitLock: () => {}, releaseLock: () => {} }) };
+
+    const sheetsSpec = Object.assign({
+      Summary: buildPromotedSummarySpec(),
+      Loans: buildLoansSheetRows()
+    }, buildCheckinFixtureSheets());
+    const wb = makeWorkbook(sheetsSpec, 'wb-flow');
+
+    // 1. Parse GOOG vest flow (`goog +46.361 sh 2026-11-25`) + SAYE cash deposit (`saye +2000 25.11.2026`)
+    const prop = c.prepareTelegramCheckinProposal({
+      ss: wb,
+      asOf: new Date('2026-11-28T12:00:00Z'),
+      textArgs: 'goog +46.361 sh 2026-11-25, saye +2000 25.11.2026'
+    });
+    assert.equal(prop.status, 'ready');
+    assert.equal(prop.proposal.entries.length, 2);
+    assert.equal(prop.proposal.entries[0].kind, 'flow');
+    assert.equal(prop.proposal.entries[0].flow_action, 'Deposit');
+    assert.equal(prop.proposal.entries[0].flow_date_iso, '2026-11-25');
+    assert.equal(prop.proposal.entries[0].units_delta, 46.361);
+    assert.equal(prop.proposal.entries[0].units, 977.079);
+    assert.equal(prop.proposal.entries[1].kind, 'flow');
+    assert.equal(prop.proposal.entries[1].id, 'saye');
+    assert.equal(prop.proposal.entries[1].flow_sgd, 2000);
+    assert.match(prop.html, /Proposed Asset Flow/);
+    assert.match(prop.html, /\+46\.361 sh/);
+    assert.match(prop.html, /977\.079 sh/);
+    assert.equal(prop.reply_markup.inline_keyboard[0][0].text, '✅ Record 2 Flows');
+
+    // 2. Commit flows -> inserted chronologically BEFORE the 2026-11 draft rows (rows 2 & 3), shifting drafts down!
+    const commitRes = c.commitPendingCheckin(prop.token, wb, new Date('2026-11-28T12:05:00Z'));
+    assert.equal(commitRes.status, 'committed');
+    assert.equal(commitRes.committed.length, 2);
+    assert.equal(commitRes.committed[0].already_logged, false);
+    assert.equal(commitRes.committed[0].draft_updated, true);
+    assert.equal(commitRes.committed[0].new_total_units, 977.079);
+
+    const det = wb.getSheetByName('Assets_details');
+    // Row 2 = GOOG Deposit inserted before drafts; Row 3 = SAYE Deposit inserted before drafts
+    assert.equal(det.getRange('B2').getValue(), 'GSU GOOG');
+    assert.equal(det.getRange('C2').getValue(), 'Deposit');
+    assert.equal(det.getRange('I2').getValue(), 46.361);
+    assert.equal(det.getRange('D2').getFormula(), '=I2*H2');
+    assert.match(det.getRange('H2').getFormula(), /GOOGLEFINANCE\("NASDAQ:GOOG"/);
+    assert.equal(det.getRange('L2').getValue(), 'flow|2026-11-25|goog|deposit|46.361');
+
+    assert.equal(det.getRange('B3').getValue(), 'SAYE');
+    assert.equal(det.getRange('C3').getValue(), 'Deposit');
+    assert.equal(det.getRange('D3').getValue(), 2000);
+    assert.equal(det.getRange('L3').getValue(), 'flow|2026-11-25|saye|deposit|2000');
+
+    // Original 2026-11|saye (was R2 -> now R4) had its carried draft bumped 17978.30 -> 19978.30
+    assert.equal(det.getRange('L4').getValue(), '2026-11|saye');
+    assert.equal(det.getRange('E4').getValue(), 19978.30);
+
+    // Original 2026-11|goog (was R4 -> now R6) had its draft units bumped 930.718 -> 977.079 (still Pending!)
+    assert.equal(det.getRange('L6').getValue(), '2026-11|goog');
+    assert.equal(det.getRange('J6').getValue(), 977.079);
+    const chk = wb.getSheetByName('Asset_checkins');
+    assert.equal(chk.getRange('C4').getValue(), 'Pending');
+    assert.equal(chk.getRange('P4').getValue(), 977.079);
+
+    // 3. Re-submitting the exact same vest flow in a brand-new command is 100% idempotent (no duplicate row!)
+    const dupProp = c.prepareTelegramCheckinProposal({
+      ss: wb,
+      asOf: new Date('2026-11-28T12:10:00Z'),
+      textArgs: 'vest goog 46.361 sh on Nov 25'
+    });
+    assert.equal(dupProp.status, 'ready');
+    const dupCommit = c.commitPendingCheckin(dupProp.token, wb, new Date('2026-11-28T12:11:00Z'));
+    assert.equal(dupCommit.committed[0].already_logged, true);
+    assert.equal(det.getLastRow(), 8); // Still 8 rows total (1 header + 2 flows + 5 drafts)
+
+    // 4. Verify Withdrawal verb & negative sign (`goog -123 sh 2026-12-10`)
+    const sellEntries = c.parseCheckinTextEntries('goog -123 sh 2026-12-10', null, wb, new Date('2026-12-10T10:00:00Z'));
+    assert.equal(sellEntries.length, 1);
+    assert.equal(sellEntries[0].flow_action, 'Withdrawal');
+    assert.equal(sellEntries[0].units_delta, 123);
+    assert.equal(sellEntries[0].flow_date_iso, '2026-12-10');
   });
 };
