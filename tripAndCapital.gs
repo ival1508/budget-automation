@@ -487,81 +487,103 @@ function readCapitalPlanStatus(optSs, optAsOf) {
     const ss = optSs || (typeof getActiveBudgetSpreadsheet === 'function' ? getActiveBudgetSpreadsheet() : null);
     if (!ss || typeof ss.getSheetByName !== 'function') return null;
     const sheet = ss.getSheetByName(CAPITAL_PLAN_SHEET);
-    if (!sheet || sheet.getLastRow() < 35) return null;
+    if (!sheet || sheet.getLastRow() < 30) return null;
 
-    const maxRow = Math.min(50, Math.max(46, sheet.getLastRow()));
+    const maxRow = Math.min(55, Math.max(34, sheet.getLastRow()));
     const grid = sheet.getRange(1, 1, maxRow, 9).getValues();
-    const num = (r, c) => Number(grid[r - 1] && grid[r - 1][c - 1]) || 0;
+    const num = (r, c) => (r > 0 && grid[r - 1] ? (Number(grid[r - 1][c - 1]) || 0) : 0);
+    const findRow = pattern => {
+      for (let i = 0; i < grid.length; i++) {
+        if (pattern.test(String((grid[i] && grid[i][0]) || '').trim())) return i + 1;
+      }
+      return -1;
+    };
 
-    // Section 1 coordinates (1-indexed rows in CapitalPlan):
-    // Row 10: Mandatory CPF Employee  -> D=Combined Plan, E=Live 2027 Paid YTD
-    // Row 11: CPF Cash Top-Up (RSTU)  -> B=Val Target, C=Rita Target, D=Combined Target, E=Paid YTD, F=Remaining
-    // Row 12: SRS Contribution        -> B=Val Target, C=Rita Target, D=Combined Target, E=Paid YTD, F=Remaining
-    // Row 16: Remaining S$80k Cap Headroom -> B=Val, C=Rita, D=Combined
-    // Row 17: Optimal IPC Charity Cash (250%) -> B=Val, C=Rita, D=Combined, E=Paid YTD, F=Remaining
-    // Row 19: Total Tax Saved (SRS + RSTU + Charity) -> B=Val, C=Rita, D=Combined
-    // Section 2 coordinates (v2 layout: 2A Monthly Earmarks, 2B Pure Cash Pool, 2C Cash Waterfall, 2D GSU):
-    // Row 24: Wise Travel Standing (Отдых)  -> B=Monthly, C=Annual
-    // Row 25: IPC Charity Monthly (НКО)     -> B=Monthly, C=Annual
-    // Row 26: Regular Cash Savings (Отложения) -> B=Monthly, C=Annual
-    // Row 33: TOTAL 2027 PURE CASH CAPITAL POOL -> B=Annual Plan, C=Live YTD
-    // Row 39: P3 · SAYE Rainy-Day Top-Up (->S$120k) -> B=Plan, C=Funded YTD, D=Remaining
-    // Row 40: SUBTOTAL P1-P3 CASH COMMITMENTS -> B=Plan, C=Funded YTD, D=Remaining, F=Pure Cash Left
-    // Row 41: P4 · Repay Dad's Loan (Папа Loan) -> B=Cash Applied, C=Paid YTD, D=Remaining Debt ex-GSU
-    // Row 44: 2027 GSU Vests (GOOG Held) -> B=Annual Plan, C=Vested YTD
-    const cpfTopupRemaining = Number(num(11, 6).toFixed(2));
-    const srsRemaining = Number(num(12, 6).toFixed(2));
-    const charityTargetCash = Number(num(17, 4).toFixed(2));
-    const charityPaidYtd = Number(num(17, 5).toFixed(2));
-    const charityRemainingCash = Number(num(17, 6).toFixed(2));
-    const valHeadroom = Number(num(16, 2).toFixed(2));
-    const ritaHeadroom = Number(num(16, 3).toFixed(2));
-    const totalTaxSaved = Number(num(19, 4).toFixed(2));
+    const rCpfEmp = findRow(/Mandatory CPF Employee/i) || 10;
+    const rRstu = findRow(/CPF Cash Top-Up|CPF Top-Up/i) || 11;
+    const rSrs = findRow(/SRS Contribution|\bSRS\b/i) || 12;
+    const rHeadroom = findRow(/Cap Headroom|^Headroom$/i) || 16;
+    const rIpc = findRow(/Optimal IPC Charity|IPC Charity/i) || 17;
+    const rTaxSaved = findRow(/Estimated Tax Saved|^Tax Saved$/i) || 19;
+
+    const cpfTopupRemaining = Number(num(rRstu, 6).toFixed(2));
+    const srsRemaining = Number(num(rSrs, 6).toFixed(2));
+    const charityTargetCash = Number(num(rIpc, 4).toFixed(2));
+    const charityPaidYtd = Number(num(rIpc, 5).toFixed(2));
+    const charityRemainingCash = Number(num(rIpc, 6).toFixed(2));
+    const valHeadroom = Number(num(rHeadroom, 2).toFixed(2));
+    const ritaHeadroom = Number(num(rHeadroom, 3).toFixed(2));
+    const totalTaxSaved = Number(num(rTaxSaved, 4).toFixed(2));
+    const remainingTaxSaved = Number(num(rTaxSaved, 6).toFixed(2));
     const totalTaxAdvantagedRemaining = Number((cpfTopupRemaining + srsRemaining + charityRemainingCash).toFixed(2));
-
-    const pureCashPoolPlan = Number(num(33, 2).toFixed(2));
-    const pureCashPoolYtd = Number(num(33, 3).toFixed(2));
-    const sayeTopupRemaining = Number(num(39, 4).toFixed(2));
-    const cashLeftAfterSaye = Number(num(40, 6).toFixed(2));
-    const papaCashApplied = Number(num(41, 2).toFixed(2));
-    const papaRemainingExGsu = Number(num(41, 4).toFixed(2));
-    const gsuVestsPlan = Number(num(44, 2).toFixed(2));
-    const gsuVestsYtd = Number(num(44, 3).toFixed(2));
 
     const titleBanner = String((grid[0] && grid[0][0]) || '');
     const yearMatch = /\b(202[6-9]|203\d)\b/.exec(titleBanner);
     const planYear = yearMatch ? Number(yearMatch[1]) : 2027;
-    const taxRateLabel = String((grid[18] && grid[18][7]) || '').trim() ||
+    const isDecClosingMode = /DECEMBER|DEC'26|P0 IRAS/i.test(titleBanner);
+    const taxRateLabel = String((grid[rTaxSaved - 1] && grid[rTaxSaved - 1][7]) || '').trim() ||
       (planYear <= 2026 ? 'Val 23% + Rita 18% Year-2 PR' : 'Val 23% + Rita 18% Year-3 PR');
+
+    // Locate cash pool / Dec cash availability, SAYE, P4, and GSU rows dynamically
+    const rDecCashTotal = findRow(/^TOTAL PURE CASH AVAILABLE FOR DEC/i);
+    const rCashPool = rDecCashTotal > 0 ? rDecCashTotal : (findRow(/^TOTAL .*PURE CASH/i) || 33);
+    const rMonthlyIpc = findRow(/IPC 250% Charity Standing|IPC Standing/i);
+    const rSaye = findRow(/Cash-Equivalent Rainy-Day|^P3\s*·?\s*SAYE|^1\.\s*SAYE/i);
+    const rSubP13 = findRow(/^SUBTOTAL P1/i);
+    const rPapa = findRow(/Repay Dad's Loan|P4.*Papa Loan/i);
+    const rGsu = findRow(/GSU Vests/i);
+    const rScenB = findRow(/^Scenario B/i);
+
+    const pureCashPoolPlan = Number((rDecCashTotal > 0 ? num(rDecCashTotal, 2) : num(rCashPool, 2)).toFixed(2));
+    const pureCashPoolYtd = Number((rDecCashTotal > 0 ? num(rDecCashTotal, 2) : num(rCashPool, 3)).toFixed(2));
+    const decP0CashGap = rDecCashTotal > 0 ? Number(num(rDecCashTotal, 4).toFixed(2)) : null;
+
+    const sayeTopupRemaining = rDecCashTotal > 0
+      ? Number(Math.max(0, 120000 - num(rSaye > 0 ? rSaye : 23, 2)).toFixed(2))
+      : Number(num(rSaye > 0 ? rSaye : 39, 4).toFixed(2));
+    const cashLeftAfterSaye = rDecCashTotal > 0
+      ? Number((decP0CashGap || 0).toFixed(2))
+      : Number(num(rSubP13 > 0 ? rSubP13 : 40, 6).toFixed(2));
+    const papaCashApplied = rPapa > 0 ? Number(num(rPapa, 2).toFixed(2)) : 0;
+    const papaRemainingExGsu = rPapa > 0 ? Number(num(rPapa, 4).toFixed(2)) : 0;
+    const gsuVestsPlan = rGsu > 0 ? Number((num(rGsu, 2) || 100000).toFixed(2)) : 100000;
+    const gsuVestsYtd = rGsu > 0 ? Number(num(rGsu, 3).toFixed(2)) : 0;
+    const charityMonthlyPlan = rMonthlyIpc > 0
+      ? Number(num(rMonthlyIpc, 2).toFixed(2))
+      : Number((charityTargetCash / 12).toFixed(2));
 
     return {
       plan_year: planYear,
+      dec_closing_mode: isDecClosingMode,
       tax_rate_label: taxRateLabel,
       val_cap_headroom_sgd: valHeadroom,
       rita_cap_headroom_sgd: ritaHeadroom,
-      mandatory_cpf_ytd_sgd: Number(num(10, 5).toFixed(2)),
-      cpf_topup_paid_sgd: Number(num(11, 5).toFixed(2)),
+      mandatory_cpf_ytd_sgd: Number(num(rCpfEmp, 5).toFixed(2)),
+      cpf_topup_paid_sgd: Number(num(rRstu, 5).toFixed(2)),
       cpf_topup_remaining_sgd: cpfTopupRemaining,
-      srs_paid_sgd: Number(num(12, 5).toFixed(2)),
+      srs_paid_sgd: Number(num(rSrs, 5).toFixed(2)),
       srs_remaining_sgd: srsRemaining,
       charity_target_cash_sgd: charityTargetCash,
-      charity_monthly_plan_sgd: Number(num(25, 2).toFixed(2)),
+      charity_monthly_plan_sgd: charityMonthlyPlan,
       charity_paid_ytd_sgd: charityPaidYtd,
       charity_remaining_cash_sgd: charityRemainingCash,
       estimated_tax_saved_sgd: totalTaxSaved,
+      estimated_tax_saved_remaining_sgd: remainingTaxSaved || totalTaxSaved,
       total_tax_advantaged_remaining_sgd: totalTaxAdvantagedRemaining,
       pure_cash_pool_plan_sgd: pureCashPoolPlan,
       pure_cash_pool_ytd_sgd: pureCashPoolYtd,
+      dec_p0_cash_gap_sgd: decP0CashGap,
       saye_topup_remaining_sgd: sayeTopupRemaining,
       cash_left_after_saye_sgd: cashLeftAfterSaye,
       papa_cash_applied_sgd: papaCashApplied,
       papa_remaining_ex_gsu_sgd: papaRemainingExGsu,
       gsu_vests_plan_sgd: gsuVestsPlan,
       gsu_vests_ytd_sgd: gsuVestsYtd,
+      goog_vt_dca_monthly_scen_b_sgd: rScenB > 0 ? Number(num(rScenB, 3).toFixed(2)) : null,
       // Backwards-compatible aliases
       capital_inflows_plan_sgd: pureCashPoolPlan,
       capital_inflows_ytd_sgd: pureCashPoolYtd,
-      capital_uses_target_sgd: Number(num(40, 2).toFixed(2)),
+      capital_uses_target_sgd: rSubP13 > 0 ? Number(num(rSubP13, 2).toFixed(2)) : totalTaxAdvantagedRemaining,
       capital_surplus_plan_sgd: cashLeftAfterSaye
     };
   } catch (err) {
@@ -581,9 +603,28 @@ function renderCapitalPlanTelegramSummary(cap) {
   const html = typeof escapeCoachHtml === 'function' ? escapeCoachHtml : s => String(s);
   const yr = cap.plan_year || 2027;
   const rateNote = html(cap.tax_rate_label || (yr <= 2026 ? '23% Val / 18% Rita Yr-2 PR' : '23% Val / 18% Rita Yr-3 PR'));
+
+  if (cap.dec_closing_mode) {
+    const gapAbs = Math.abs(Number(cap.dec_p0_cash_gap_sgd) || 0);
+    const remTax = cap.estimated_tax_saved_remaining_sgd || cap.estimated_tax_saved_sgd;
+    return [
+      '🏛 <b>CapitalPlan (' + yr + ') — Dec\'26 P0 IRAS Cutoff &amp; Funding Options</b>',
+      '• <b>P0 Left Before 31 Dec:</b> <b>' + money(cap.total_tax_advantaged_remaining_sgd) +
+        '</b> (RSTU ' + money(cap.cpf_topup_remaining_sgd) + ' · SRS ' + money(cap.srs_remaining_sgd) +
+        ' · IPC ' + money(cap.charity_remaining_cash_sgd) + ').',
+      '• <b>YA ' + (yr + 1) + ' Tax Saved by P0:</b> <b>' + money(remTax) + '</b> (' + money(cap.estimated_tax_saved_sgd) + ' full yr · ' + rateNote + ').',
+      '• <b>Available Pure Cash (SAYE + Nov/Dec Savings):</b> <b>' + money(cap.pure_cash_pool_plan_sgd) +
+        '</b> → Net P0 Cash Gap: <b>-' + money(gapAbs) + '</b>.',
+      '• <b>Recommended P0 Execution:</b> Deploy ' + money(cap.pure_cash_pool_plan_sgd) +
+        ' cash + trim ~' + money(gapAbs) + ' GOOG (swaps ' + money(cap.srs_remaining_sgd) +
+        ' GOOG into Endowus SRS global equity + locks full tax rebate).'
+    ].join('\n');
+  }
+
   const sayeTail = cap.cash_left_after_saye_sgd >= 0
     ? ('leaves <b>' + money(cap.cash_left_after_saye_sgd) + '</b> pure cash for <b>Папа Loan</b> (reduces debt to ' +
-       money(cap.papa_remaining_ex_gsu_sgd) + ' ex-GSU; ' + money(cap.gsu_vests_plan_sgd) + ' GSU held in GOOG).')
+       money(cap.papa_remaining_ex_gsu_sgd) + ' ex-GSU; ' + money(cap.gsu_vests_plan_sgd) + ' GSU held in GOOG' +
+       (cap.goog_vt_dca_monthly_scen_b_sgd ? ', or Scenario B ' + money(cap.goog_vt_dca_monthly_scen_b_sgd) + '/mo GOOG→VT DCA hits &lt;35% GSU' : '') + ').')
     : ('prioritize 31 Dec tax caps first; carry remaining <b>' + money(Math.abs(cap.cash_left_after_saye_sgd)) +
        '</b> SAYE build + <b>Папа Loan</b> (' + money(cap.papa_remaining_ex_gsu_sgd) + ') into Q1 ' + (yr + 1) +
        ' bonus (' + money(cap.gsu_vests_plan_sgd) + ' GSU held in GOOG).');

@@ -317,16 +317,19 @@ function syncYearEndRollover(source2026OrId, target2027OrId, options) {
 
   const srcKids = sourceSs.getSheetByName('Kids');
   const dstKids = targetSs.getSheetByName('Kids');
-  if (srcKids && dstKids && srcKids.getLastRow() >= 30) {
-    const row30 = srcKids.getRange(30, 1, 1, 10).getValues()[0] || [];
-    if (String(row30[0] || '').indexOf('2026') !== -1 && typeof row30[1] === 'number' && typeof row30[4] === 'number') {
+  if (srcKids && dstKids && srcKids.getLastRow() >= 29) {
+    const scanStart = 28;
+    const scanCount = Math.min(5, srcKids.getLastRow() - scanStart + 1);
+    const candidateRows = srcKids.getRange(scanStart, 1, scanCount, 10).getValues();
+    const totalRow = candidateRows.find(r => /2026/.test(String(r[0] || '')) && typeof r[1] === 'number' && typeof r[4] === 'number');
+    if (totalRow) {
       plan.kidsSummary2026 = {
-        glashaActualCore: Number(row30[1].toFixed(2)),
-        glashaNlcs: Number(row30[2].toFixed(2)),
-        glashaVt: Number(row30[4].toFixed(4)),
-        temaActualCore: Number(row30[5].toFixed(2)),
-        temaNlcs: Number(row30[6].toFixed(2)),
-        temaVt: Number(row30[8].toFixed(4))
+        glashaActualCore: Number(totalRow[1].toFixed(2)),
+        glashaNlcs: Number(totalRow[2].toFixed(2)),
+        glashaVt: Number(totalRow[4].toFixed(4)),
+        temaActualCore: Number(totalRow[5].toFixed(2)),
+        temaNlcs: Number(totalRow[6].toFixed(2)),
+        temaVt: Number(totalRow[8].toFixed(4))
       };
     }
   }
@@ -404,9 +407,10 @@ function syncYearEndRollover(source2026OrId, target2027OrId, options) {
     // 4. Update 2026 — Глаша & 2026 — Тёма rows in target Kids Section 3
     if (dstKids && plan.kidsSummary2026) {
       const kidsLastRow = dstKids.getLastRow();
-      const colA = kidsLastRow >= 34 ? dstKids.getRange(34, 1, kidsLastRow - 33, 2).getValues() : [];
+      const startSec3 = 32;
+      const colA = kidsLastRow >= startSec3 ? dstKids.getRange(startSec3, 1, kidsLastRow - startSec3 + 1, 2).getValues() : [];
       colA.forEach((pair, idx) => {
-        const rNum = 34 + idx;
+        const rNum = startSec3 + idx;
         const label = String(pair[0] || '') + ' ' + String(pair[1] || '');
         if (/2026/.test(label) && /Глаша|G3|P3/i.test(label)) {
           dstKids.getRange(rNum, 3, 1, 2).setValues([[plan.kidsSummary2026.glashaNlcs, plan.kidsSummary2026.glashaActualCore]]);

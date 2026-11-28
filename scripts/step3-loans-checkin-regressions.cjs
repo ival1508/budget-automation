@@ -396,4 +396,84 @@ module.exports = test => {
     assert.equal(wb27.getSheetByName('Loans').getRange('H13').getValue(), 2317584.43);
     assert.equal(wb27.getSheetByName('Loans').getRange('H30').getValue(), 76116.43);
   });
+
+  test("Step 3: Dec'26 P0 Closing CapitalPlan, 2027 v3 GOOG→VT DCA CapitalPlan, and shifted Kids Row 29 rollover", c => {
+    // 1. Budget 2026 34-row December'26 Closing & P0 Funding Options layout
+    const dec26Rows = Array.from({ length: 34 }, () => Array(9).fill(''));
+    dec26Rows[0][0] = "BUDGET 2026 — DECEMBER'26 CLOSING & P0 IRAS TAX-CAP FUNDING PLAN (YA 2027 · CUTOFF 31 DEC 2026)";
+    dec26Rows[9] = ['Mandatory CPF Employee (Ord. + Bonus Cap)', 20400, 15300, 35700, 32900, 0];
+    dec26Rows[10] = ['P0a · CPF Cash Top-Up Relief (RSTU · S$8k each)', 8000, 8000, 16000, 0, 16000];
+    dec26Rows[11] = ['P0b · SRS Contribution Relief (S$15.3k each)', 15300, 15300, 30600, 0, 30600];
+    dec26Rows[15] = ['Remaining S$80k Cap Headroom (Deduction)', 27300, 40400, 67700];
+    dec26Rows[16] = ['P0c · Optimal IPC Charity Cash (at 2.5× IPC)', 10920, 16160, 27080, 1279, 25801];
+    dec26Rows[18] = ['Estimated Tax Saved (SRS + RSTU + Charity)', 11638, 11466, 23104, 735, 22369, 'YA 2027 Tax Bill', '23% Val / 18% Rita Yr-2 PR'];
+    dec26Rows[22] = ['1. SAYE Liquid Cash Reserve (Summary!C21)', 17978.30];
+    dec26Rows[25] = ["TOTAL PURE CASH AVAILABLE FOR DEC'26 P0", 29220.11, 72401, -43180.89];
+
+    const stDec = c.readCapitalPlanStatus(makeWorkbook({ CapitalPlan: dec26Rows }, 'wb-dec26'));
+    assert.equal(stDec.plan_year, 2026);
+    assert.equal(stDec.dec_closing_mode, true);
+    assert.equal(stDec.total_tax_advantaged_remaining_sgd, 72401);
+    assert.equal(stDec.estimated_tax_saved_remaining_sgd, 22369);
+    assert.equal(stDec.pure_cash_pool_plan_sgd, 29220.11);
+    assert.equal(stDec.dec_p0_cash_gap_sgd, -43180.89);
+
+    const decHtml = c.renderCapitalPlanTelegramSummary(stDec);
+    assert.match(decHtml, /Dec'26 P0 IRAS Cutoff/);
+    assert.match(decHtml, /S\$72,401/);
+    assert.match(decHtml, /S\$22,369/);
+    assert.match(decHtml, /trim ~S\$43,181 GOOG/);
+
+    // 2. Budget 2027 42-row v3 CapitalPlan with IBKR VT stock deduction & GOOG -> Parents' VT DCA scenarios
+    const cp27Rows = Array.from({ length: 42 }, () => Array(9).fill(''));
+    cp27Rows[0][0] = 'BUDGET 2027 — CAPITAL & IRAS TAX-RELIEF PLAN (YA 2028 · VAL 23% + RITA 18% YR-3 PR)';
+    cp27Rows[9] = ['Mandatory CPF Employee (Ord. + Bonus Cap)', 20400, 20400, 40800, 0, 40800];
+    cp27Rows[10] = ['CPF Cash Top-Up Relief (RSTU · S$8k each)', 8000, 8000, 16000, 0, 16000];
+    cp27Rows[11] = ['SRS Contribution Relief (S$15.3k each)', 15300, 15300, 30600, 0, 30600];
+    cp27Rows[15] = ['Remaining S$80k Cap Headroom (Deduction)', 27300, 35300, 62600];
+    cp27Rows[16] = ['Optimal IPC Charity Cash (at 2.5× IPC)', 10920, 14120, 25040, 0, 25040];
+    cp27Rows[18] = ['Estimated Tax Saved (SRS + RSTU + Charity)', 11638, 10548, 22186, 0, 22186, 'YA 2028 Tax Bill', '23% Val / 18% Rita Yr-3 PR'];
+    cp27Rows[25] = ['TOTAL 2027 PURE CASH CAPITAL POOL', 227720, 0, 227720];
+    cp27Rows[31] = ['P2 · Kids Model 2A VT Cash (Net of 91.8 IBKR VT in Stock)', 39858, 0, 39858];
+    cp27Rows[32] = ['P3 · Cash-Equivalent Rainy-Day Top-Up (SAYE → S$120k)', 102022, 0, 102022];
+    cp27Rows[33] = ['SUBTOTAL P1–P3 CASH COMMITMENTS (Tax + Kids + SAYE)', 188480, 0, 188480, 0.828, 39240];
+    cp27Rows[34] = ["P4 · Repay Dad's Loan (Папа Loan — Pure Cash Portion)", 39240, 0, 156699];
+    cp27Rows[38] = ['2027 GSU Vests Baseline · Hold 100% GOOG (No VT DCA)', 0, 0];
+    cp27Rows[40] = ['Scenario B · 2027 Vests + 25% Trim Existing GOOG → VT', 181775, 15148];
+
+    const st27 = c.readCapitalPlanStatus(makeWorkbook({ CapitalPlan: cp27Rows }, 'wb-2027-v3'));
+    assert.equal(st27.plan_year, 2027);
+    assert.equal(st27.dec_closing_mode, false);
+    assert.equal(st27.cash_left_after_saye_sgd, 39240);
+    assert.equal(st27.papa_remaining_ex_gsu_sgd, 156699);
+    assert.equal(st27.goog_vt_dca_monthly_scen_b_sgd, 15148);
+
+    const html27 = c.renderCapitalPlanTelegramSummary(st27);
+    assert.match(html27, /S\$39,240<\/b> pure cash for <b>Папа Loan<\/b>/);
+    assert.match(html27, /Scenario B S\$15,148\/mo GOOG→VT DCA hits &lt;35% GSU/);
+
+    // 3. Kids shifted layout (Row 29 = Total 2026 after Row 13 deleted; Section 3 rows at 34..35)
+    c.LockService = { getScriptLock: () => ({ hasLock: () => false, tryLock: () => true, releaseLock: () => {} }) };
+    const srcKids = Array.from({ length: 42 }, () => Array(10).fill(''));
+    srcKids[28] = ['Total 2026', 24800, 48200, 23400, 120.75, 18100, 39400, 21300, 109.5];
+    const dstKids = Array.from({ length: 42 }, () => Array(10).fill(''));
+    dstKids[33] = ['2026', 'Глаша (G3)', 0, 0, 0, 0, 0];
+    dstKids[34] = ['2026', 'Тёма (Pre-KG)', 0, 0, 0, 0, 0];
+
+    const dstWb = makeWorkbook({
+      Transactions: [['Дата', 'Счёт', 'Тип', 'Сумма', 'Сумма в SGD', 'На счете до', 'На счете после', 'Категория', 'Где', 'Заметки', '50/30/20']],
+      Kids: dstKids
+    }, 'dst-k');
+    const rollKids = c.syncYearEndRollover(
+      makeWorkbook({ Summary: buildPromotedSummarySpec(), Kids: srcKids }, 'src-k'),
+      dstWb,
+      { dryRun: false, activate: false, targetYear: 2027 }
+    );
+    assert.equal(rollKids.plan.kidsSummary2026.glashaVt, 120.75);
+    assert.equal(rollKids.plan.kidsSummary2026.temaVt, 109.5);
+    assert.equal(dstWb.getSheetByName('Kids').getRange('C34').getValue(), 48200);
+    assert.equal(dstWb.getSheetByName('Kids').getRange('G34').getValue(), 120.75);
+    assert.equal(dstWb.getSheetByName('Kids').getRange('C35').getValue(), 39400);
+    assert.equal(dstWb.getSheetByName('Kids').getRange('G35').getValue(), 109.5);
+  });
 };
