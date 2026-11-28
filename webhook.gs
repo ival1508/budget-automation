@@ -175,6 +175,19 @@ function doPost(e) {
           }
           return HtmlService.createHtmlOutput('OK');
         }
+        if (/^\/loans?(?:@\w+)?(?:\s|$)/i.test(textTrimmed)) {
+          if (typeof readLoansStatus === 'function' && typeof renderLoansTelegramSummary === 'function') {
+            sendTelegramMessage(renderLoansTelegramSummary(readLoansStatus()), chatId);
+          }
+          return HtmlService.createHtmlOutput('OK');
+        }
+        const checkinCmd = /^\/checkin(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(textTrimmed);
+        if (checkinCmd) {
+          if (typeof handleTelegramCheckinInput === 'function') {
+            handleTelegramCheckinInput({ chatId: chatId, textArgs: (checkinCmd[1] || '').trim() });
+          }
+          return HtmlService.createHtmlOutput('OK');
+        }
 
         // --- INTERCEPT MERCHANT RENAME ---
         const cache = CacheService.getScriptCache();
@@ -262,6 +275,25 @@ function doPost(e) {
 
       const hasPhotoMedia = Boolean((Array.isArray(message.photo) && message.photo.length > 0) || isImageDoc);
       const rawCaption = !message.text && message.caption ? String(message.caption) : '';
+      // Intercept photo/screenshot uploads explicitly captioned with /checkin
+      const checkinCaptionMatch = hasPhotoMedia ? /^\/checkin(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(rawCaption.trim()) : null;
+      if (checkinCaptionMatch && typeof handleTelegramCheckinInput === 'function') {
+        const mediaInputs = [];
+        if (Array.isArray(message.photo) && message.photo.length > 0) {
+          const largestPhoto = message.photo[message.photo.length - 1];
+          const filePath = getTelegramFilePath(largestPhoto.file_id, botToken);
+          mediaInputs.push(fetchTelegramFileAsBase64(filePath, botToken));
+        } else if (doc && isImageDoc) {
+          const filePath = getTelegramFilePath(doc.file_id, botToken);
+          mediaInputs.push(fetchTelegramFileAsBase64(filePath, botToken, docMime));
+        }
+        handleTelegramCheckinInput({
+          chatId: chatId,
+          textArgs: (checkinCaptionMatch[1] || '').trim(),
+          mediaInputs: mediaInputs
+        });
+        return HtmlService.createHtmlOutput('OK');
+      }
       // Ignore OS/client auto-generated screenshot filename captions (e.g. "Screenshot (22 Nov 2026 4:30:42 am)")
       // so screenshots extract independently without resending or locking prior proposals.
       const effectiveCaption = (hasPhotoMedia && isBoilerplateMediaCaption(rawCaption)) ? '' : rawCaption;

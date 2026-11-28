@@ -346,10 +346,13 @@ function readCashCoverage(optSs, optAsOf) {
     const isV3 = contractVersion === CASH_COVERAGE_VERSION_V3;
     const expectedRows = isV3 ? buildCashCoverageRowsV3() : buildCashCoverageRows('');
     const actualFormulas = config.getRange('A1:F25').getFormulas();
+    const activeYearB3Id = cashCoverageFormulaIdentity('=DATE(YEAR(TODAY());MONTH(TODAY());1)');
     expectedRows.forEach((row, r) => row.forEach((value, col) => {
-      if (typeof value === 'string' && value[0] === '=' && cashCoverageFormulaIdentity((actualFormulas[r] || [])[col]) !== cashCoverageFormulaIdentity(value)) {
-        throw new Error('A managed cash-coverage formula changed; review the calculation.');
-      }
+      if (typeof value !== 'string' || value[0] !== '=') return;
+      const actualId = cashCoverageFormulaIdentity((actualFormulas[r] || [])[col]);
+      if (actualId === cashCoverageFormulaIdentity(value)) return;
+      if (isV3 && r === 2 && col === 1 && actualId === activeYearB3Id) return;
+      throw new Error('A managed cash-coverage formula changed; review the calculation.');
     }));
     if (isV3) {
       result.source = 'CashCoverage!B12';

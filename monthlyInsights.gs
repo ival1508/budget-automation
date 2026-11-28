@@ -227,6 +227,7 @@ function buildMonthlyReview(ss, reportDate, budget, plans) {
   review.reserved = readMonthlyContextAmount(sheet, SHEET_FACTS.MONTHLY_TAB_STRUCTURE.MANDATORY_TOTAL_CELL);
   review.travel_plan = typeof readTravelPlanStatus === 'function' ? readTravelPlanStatus(ss, reportDate) : null;
   review.capital_plan = typeof readCapitalPlanStatus === 'function' ? readCapitalPlanStatus(ss, reportDate) : null;
+  review.portfolio_health = typeof readPortfolioHealthStatus === 'function' ? readPortfolioHealthStatus(ss, reportDate) : null;
   return review;
 }
 
@@ -290,6 +291,10 @@ function renderMonthlyReview(payload) {
       ' remaining across CPF RSTU (' + money(cp.cpf_topup_remaining_sgd) + '), SRS (' +
       money(cp.srs_remaining_sgd) + '), and 250% IPC Charity (' + money(cp.charity_remaining_cash_sgd) +
       ' left; ' + money(cp.charity_paid_ytd_sgd) + ' donated YTD).');
+  }
+  if (review.portfolio_health && typeof renderPortfolioHealthCoachLine === 'function') {
+    const healthLine = renderPortfolioHealthCoachLine(review.portfolio_health);
+    if (healthLine) paragraphs.push(healthLine);
   }
   paragraphs.push('<i>Target basis: ' + html(payload.target_header) + '; historical comparisons use this current basis, not archived targets. Mandatory plan: ' + payload.mandatory_summary.paid + ' paid, ' + payload.mandatory_summary.unpaid + ' unpaid; unpaid commitments are not savings.</i>');
   return paragraphs.join('\n\n');

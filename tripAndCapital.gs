@@ -528,7 +528,15 @@ function readCapitalPlanStatus(optSs, optAsOf) {
     const gsuVestsPlan = Number(num(44, 2).toFixed(2));
     const gsuVestsYtd = Number(num(44, 3).toFixed(2));
 
+    const titleBanner = String((grid[0] && grid[0][0]) || '');
+    const yearMatch = /\b(202[6-9]|203\d)\b/.exec(titleBanner);
+    const planYear = yearMatch ? Number(yearMatch[1]) : 2027;
+    const taxRateLabel = String((grid[18] && grid[18][7]) || '').trim() ||
+      (planYear <= 2026 ? 'Val 23% + Rita 18% Year-2 PR' : 'Val 23% + Rita 18% Year-3 PR');
+
     return {
+      plan_year: planYear,
+      tax_rate_label: taxRateLabel,
       val_cap_headroom_sgd: valHeadroom,
       rita_cap_headroom_sgd: ritaHeadroom,
       mandatory_cpf_ytd_sgd: Number(num(10, 5).toFixed(2)),
@@ -570,8 +578,17 @@ function renderCapitalPlanTelegramSummary(cap) {
     return 'ℹ️ <b>CapitalPlan</b> tab is not present in the active workbook.';
   }
   const money = val => (Number(val) < 0 ? '-' : '') + 'S$' + Math.round(Math.abs(Number(val) || 0)).toLocaleString('en-US');
+  const html = typeof escapeCoachHtml === 'function' ? escapeCoachHtml : s => String(s);
+  const yr = cap.plan_year || 2027;
+  const rateNote = html(cap.tax_rate_label || (yr <= 2026 ? '23% Val / 18% Rita Yr-2 PR' : '23% Val / 18% Rita Yr-3 PR'));
+  const sayeTail = cap.cash_left_after_saye_sgd >= 0
+    ? ('leaves <b>' + money(cap.cash_left_after_saye_sgd) + '</b> pure cash for <b>Папа Loan</b> (reduces debt to ' +
+       money(cap.papa_remaining_ex_gsu_sgd) + ' ex-GSU; ' + money(cap.gsu_vests_plan_sgd) + ' GSU held in GOOG).')
+    : ('prioritize 31 Dec tax caps first; carry remaining <b>' + money(Math.abs(cap.cash_left_after_saye_sgd)) +
+       '</b> SAYE build + <b>Папа Loan</b> (' + money(cap.papa_remaining_ex_gsu_sgd) + ') into Q1 ' + (yr + 1) +
+       ' bonus (' + money(cap.gsu_vests_plan_sgd) + ' GSU held in GOOG).');
   const lines = [
-    '🏛 <b>CapitalPlan — IRAS S$80k Tax Caps &amp; Pure-Cash Waterfall</b>',
+    '🏛 <b>CapitalPlan (' + yr + ') — IRAS S$80k Tax Caps &amp; Pure-Cash Waterfall</b>',
     '• <b>CPF Cash Top-Up (RSTU):</b> ' + money(cap.cpf_topup_paid_sgd) + ' paid · <b>' +
       money(cap.cpf_topup_remaining_sgd) + '</b> left before 31 Dec.',
     '• <b>SRS Contributions:</b> ' + money(cap.srs_paid_sgd) + ' paid · <b>' +
@@ -580,12 +597,11 @@ function renderCapitalPlanTelegramSummary(cap) {
       money(cap.charity_paid_ytd_sgd) + ' paid of ' + money(cap.charity_target_cash_sgd) +
       ' · <b>' + money(cap.charity_remaining_cash_sgd) + '</b> left.',
     '• <b>Estimated Tax Saved (Full Cap Plan):</b> <b>' + money(cap.estimated_tax_saved_sgd) +
-      '</b> (Val 23% + Rita 18% Year-3 PR).',
-    '• <b>2027 Pure Cash Pool (Отложения + Bonuses):</b> ' + money(cap.pure_cash_pool_ytd_sgd) +
+      '</b> (' + rateNote + ').',
+    '• <b>' + yr + ' Pure Cash Pool (Отложения + Bonuses):</b> ' + money(cap.pure_cash_pool_ytd_sgd) +
       ' YTD vs ' + money(cap.pure_cash_pool_plan_sgd) + ' plan.',
     '• <b>SAYE S$120k Rainy-Day Top-Up:</b> <b>' + money(cap.saye_topup_remaining_sgd) +
-      '</b> needed → leaves <b>' + money(cap.cash_left_after_saye_sgd) + '</b> pure cash for <b>Папа Loan</b> (reduces debt to ' +
-      money(cap.papa_remaining_ex_gsu_sgd) + ' ex-GSU; ' + money(cap.gsu_vests_plan_sgd) + ' GSU held in GOOG).'
+      '</b> needed → ' + sayeTail
   ];
   return lines.join('\n');
 }

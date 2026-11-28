@@ -29,6 +29,7 @@ const ROLLOVER_DEFAULT_FREEZE_SHEETS = Object.freeze([
   '[Automated] Папа debt',
   'Kids',
   'CapitalPlan',
+  'Loans',
   'Отдых 2027 Plan',
   'Assets',
   'Assets_details'
@@ -330,6 +331,20 @@ function syncYearEndRollover(source2026OrId, target2027OrId, options) {
     }
   }
 
+  const srcLoans = sourceSs.getSheetByName('Loans');
+  const dstLoans = targetSs.getSheetByName('Loans');
+  plan.loansClosing = null;
+  if (srcLoans && dstLoans && srcLoans.getLastRow() >= 9) {
+    const scLive = Number(srcLoans.getRange(6, 4, 1, 1).getValues()[0][0]);
+    const bmwLive = Number(srcLoans.getRange(7, 4, 1, 1).getValues()[0][0]);
+    if (Number.isFinite(scLive) && scLive >= 0 && Number.isFinite(bmwLive) && bmwLive >= 0) {
+      plan.loansClosing = {
+        scMortgageSgd: Number(scLive.toFixed(2)),
+        bmwLoanSgd: Number(bmwLive.toFixed(2))
+      };
+    }
+  }
+
   if (dryRun) {
     return {
       status: 'dry_run',
@@ -401,6 +416,12 @@ function syncYearEndRollover(source2026OrId, target2027OrId, options) {
           dstKids.getRange(rNum, 7, 1, 1).setValues([[plan.kidsSummary2026.temaVt]]);
         }
       });
+    }
+
+    // 4b. Stamp Dec 2026 closing loan principals into target Loans (Row 13 Col H for SC Mortgage, Row 30 Col H for BMW 640i)
+    if (dstLoans && plan.loansClosing) {
+      dstLoans.getRange(13, 8, 1, 1).setValues([[plan.loansClosing.scMortgageSgd]]);
+      dstLoans.getRange(30, 8, 1, 1).setValues([[plan.loansClosing.bmwLoanSgd]]);
     }
 
     // 5. Optional Script Properties cutover

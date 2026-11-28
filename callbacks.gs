@@ -46,6 +46,13 @@ function handleCallbackQuery(callbackQuery) {
     return;
   }
 
+  // 1c. ACTION: ASSET / LOAN CHECK-IN CONFIRM OR CANCEL (Step 3)
+  if ((action === 'checkin_confirm' || action === 'checkin_cancel') &&
+      typeof handleCheckinCallbackQuery === 'function') {
+    handleCheckinCallbackQuery(action, token, queryId, chatId, messageId);
+    return;
+  }
+
   // 2. Retrieve pending transactions for all other actions
   let transactions = getPendingTransactions(token);
   

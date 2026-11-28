@@ -324,7 +324,7 @@ module.exports = test => {
     assert.equal(sent.length, 2);
     assert.match(sent[0].text, /DBS Sweep Needed:.*S\$3,200/);
     assert.match(sent[0].text, /65% Gate Alert \(Paris \(Anniversary\)\)/);
-    assert.match(sent[1].text, /CapitalPlan — IRAS S\$80k Tax Caps/);
+    assert.match(sent[1].text, /CapitalPlan (?:\(\d{4}\) )?— IRAS S\$80k Tax Caps/);
     assert.match(sent[1].text, /S\$23,590<\/b> left/);
     assert.match(sent[1].text, /SAYE S\$120k Rainy-Day Top-Up:.*S\$102,022.*S\$21,458.*Папа Loan.*S\$100,000 GSU held in GOOG/);
 
