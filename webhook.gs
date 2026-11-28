@@ -181,6 +181,12 @@ function doPost(e) {
           }
           return HtmlService.createHtmlOutput('OK');
         }
+        if (/^\/(?:subs|subscriptions)(?:@\w+)?(?:\s|$)/i.test(textTrimmed)) {
+          if (typeof readSubscriptionRadarStatus === 'function' && typeof renderSubscriptionRadarTelegramSummary === 'function') {
+            sendTelegramMessage(renderSubscriptionRadarTelegramSummary(readSubscriptionRadarStatus()), chatId);
+          }
+          return HtmlService.createHtmlOutput('OK');
+        }
         const checkinCmd = /^\/checkin(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(textTrimmed);
         if (checkinCmd) {
           if (typeof handleTelegramCheckinInput === 'function') {

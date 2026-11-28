@@ -194,9 +194,12 @@ function appendTransactions(transactionsArray, ss, optDryRun) {
     const afterReceipts = typeof captureReceiptItemsAfterWrite === 'function'
       ? captureReceiptItemsAfterWrite(transactionsArray || [], result, ss)
       : result;
-    return typeof syncTripLedgerAfterWrite === 'function'
+    const afterTrips = typeof syncTripLedgerAfterWrite === 'function'
       ? syncTripLedgerAfterWrite(transactionsArray || [], afterReceipts, ss)
       : afterReceipts;
+    return typeof syncSubscriptionsAfterWrite === 'function'
+      ? syncSubscriptionsAfterWrite(transactionsArray || [], afterTrips, ss)
+      : afterTrips;
   });
 }
 

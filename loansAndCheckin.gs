@@ -422,9 +422,14 @@ function readPortfolioHealthStatus(optSs, optAsOf) {
     if (a11 !== 'DBS SGD') return null;
 
     const parentsLiquid = parseNumericCell_(summary.getRange('E5').getValue());
-    const sayeSgd = parseNumericCell_(summary.getRange('C21').getValue());
-    const gsuVestedSgd = parseNumericCell_(summary.getRange('C24').getValue());
-    const kidsEarmarkedSgd = parseNumericCell_(summary.getRange('C25').getValue());
+    const bsRows = summary.getRange('B20:C29').getValues();
+    const findBsVal = pattern => {
+      const hit = bsRows.find(r => pattern.test(String(r[0] || '').trim()));
+      return hit ? parseNumericCell_(hit[1]) : null;
+    };
+    const sayeSgd = findBsVal(/^SAYE\b/i) ?? parseNumericCell_(summary.getRange('C21').getValue());
+    const gsuVestedSgd = findBsVal(/GSU|GOOG/i) ?? parseNumericCell_(summary.getRange('C23').getValue());
+    const kidsEarmarkedSgd = findBsVal(/^Kids Funds/i) ?? parseNumericCell_(summary.getRange('C24').getValue());
     const netWorthSgd = parseNumericCell_(summary.getRange('C36').getValue());
     const gsuNwPct = parseNumericCell_(summary.getRange('I11').getValue());
     const gsuLiquidPct = parseNumericCell_(summary.getRange('I12').getValue());

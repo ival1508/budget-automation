@@ -30,6 +30,7 @@ const ROLLOVER_DEFAULT_FREEZE_SHEETS = Object.freeze([
   'Kids',
   'CapitalPlan',
   'Loans',
+  'Подписки',
   'Отдых 2027 Plan',
   'Assets',
   'Assets_details'
@@ -348,6 +349,28 @@ function syncYearEndRollover(source2026OrId, target2027OrId, options) {
     }
   }
 
+  const srcSubs = sourceSs.getSheetByName('Подписки');
+  const dstSubs = targetSs.getSheetByName('Подписки');
+  plan.subscriptionsCarryover = null;
+  if (srcSubs && dstSubs && srcSubs.getLastRow() >= 31 && dstSubs.getLastRow() >= 31) {
+    const subRows = srcSubs.getRange(10, 1, 22, 7).getValues();
+    const carried = subRows.map(r => {
+      const svc = String(r[0] || '').trim();
+      if (!svc) return ['', '', '', '', '', ''];
+      const cyc = String(r[2] || '').trim();
+      const baseNum = Number(r[5]) || 0;
+      const latestNum = Number(r[6]) || 0;
+      const nextBase = ((cyc === 'Monthly' || cyc === 'Annual') && latestNum > 0)
+        ? Number(latestNum.toFixed(2))
+        : Number(baseNum.toFixed(2));
+      return [svc, r[1] || '', cyc, r[3] || '', r[4] || '', nextBase];
+    });
+    plan.subscriptionsCarryover = {
+      activeCount: carried.filter(r => r[2] === 'Monthly' || r[2] === 'Annual').length,
+      rowsAtoF: carried
+    };
+  }
+
   if (dryRun) {
     return {
       status: 'dry_run',
@@ -426,6 +449,11 @@ function syncYearEndRollover(source2026OrId, target2027OrId, options) {
     if (dstLoans && plan.loansClosing) {
       dstLoans.getRange(13, 8, 1, 1).setValues([[plan.loansClosing.scMortgageSgd]]);
       dstLoans.getRange(30, 8, 1, 1).setValues([[plan.loansClosing.bmwLoanSgd]]);
+    }
+
+    // 4c. Carry forward Подписки service definitions & latest baseline rates (A10:F31), preserving target formulas in G10:L31
+    if (dstSubs && plan.subscriptionsCarryover) {
+      dstSubs.getRange(10, 1, plan.subscriptionsCarryover.rowsAtoF.length, 6).setValues(plan.subscriptionsCarryover.rowsAtoF);
     }
 
     // 5. Optional Script Properties cutover
