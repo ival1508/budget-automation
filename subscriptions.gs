@@ -324,8 +324,8 @@ function syncSubscriptionsAfterWrite(transactionsArray, writeResult, optSs) {
     const subRows = writeResult.writtenRows.filter(rawTxn =>
       String(rawTxn.category || '').trim() === 'Подписки' &&
       (rawTxn.type === TRANSACTION_TYPES.EXPENSE ||
-       rawTxn.type === TRANSACTION_TYPES.MANDATORY_EXPENSE ||
-       rawTxn.type === TRANSACTION_TYPES.BIG_EXPENSE) &&
+       rawTxn.type === TRANSACTION_TYPES.FIXED_EXPENSE ||
+       rawTxn.type === 'Большие расходы') &&
       (Number(rawTxn.amount_sgd !== undefined ? rawTxn.amount_sgd : rawTxn.amount) || 0) > 0
     );
     if (!subRows.length) return writeResult;

@@ -229,6 +229,7 @@ function buildMonthlyReview(ss, reportDate, budget, plans) {
   review.capital_plan = typeof readCapitalPlanStatus === 'function' ? readCapitalPlanStatus(ss, reportDate) : null;
   review.portfolio_health = typeof readPortfolioHealthStatus === 'function' ? readPortfolioHealthStatus(ss, reportDate) : null;
   review.subscriptions = typeof readSubscriptionRadarStatus === 'function' ? readSubscriptionRadarStatus(ss, reportDate) : null;
+  review.kids = typeof readKidsStatus === 'function' ? readKidsStatus(ss, reportDate) : null;
   return review;
 }
 
@@ -300,6 +301,10 @@ function renderMonthlyReview(payload) {
   if (review.subscriptions && typeof renderSubscriptionCoachLine === 'function') {
     const subLine = renderSubscriptionCoachLine(review.subscriptions, payload.report_month);
     if (subLine) paragraphs.push(subLine);
+  }
+  if (review.kids && typeof renderKidsCoachLine === 'function') {
+    const kidsLine = renderKidsCoachLine(review.kids, payload.report_month);
+    if (kidsLine) paragraphs.push(kidsLine);
   }
   paragraphs.push('<i>Target basis: ' + html(payload.target_header) + '; historical comparisons use this current basis, not archived targets. Mandatory plan: ' + payload.mandatory_summary.paid + ' paid, ' + payload.mandatory_summary.unpaid + ' unpaid; unpaid commitments are not savings.</i>');
   return paragraphs.join('\n\n');

@@ -1362,6 +1362,12 @@ function insertAssetFlowRowUnlocked_(ss, entry, acctSpec, isoNow, sourceLabel) {
   if (typeof dateCell.setNumberFormat === 'function') {
     dateCell.setNumberFormat('dd.mm.yyyy');
   }
+  if (entry.is_units) {
+    const unitsRange = details.getRange(r, 9, 1, 2);
+    if (typeof unitsRange.setNumberFormat === 'function') {
+      unitsRange.setNumberFormat('#,##0.###');
+    }
+  }
 
   // If the same month has a Pending Value check-in draft for this asset, keep its running units/balance in sync!
   let draftUpdated = false;
@@ -1626,6 +1632,14 @@ function handleCheckinCallbackQuery(action, token, queryId, chatId, messageId) {
     }
     if (result.health && Number.isFinite(result.health.net_worth_sgd)) {
       lines.push('💎 <b>Live Net Worth:</b> <b>' + m0(result.health.net_worth_sgd) + '</b>');
+    }
+    if (typeof readKidsStatus === 'function') {
+      const kidsSt = readKidsStatus();
+      if (kidsSt && kidsSt.custody && (kidsSt.custody.vt_deficit || kidsSt.custody.vt_low_buffer)) {
+        lines.push(kidsSt.custody.vt_deficit
+          ? ('🚨 <b>Kids VT Custody Alert:</b> Buy <b>' + kidsSt.custody.vt_buy_needed_shares.toFixed(1) + ' VT</b> (~' + m0(kidsSt.custody.vt_buy_needed_sgd) + ') in IBKR (run <code>/kids</code>).')
+          : ('⚠️ <b>Kids VT Buffer Low:</b> +' + kidsSt.custody.vt_buffer_shares.toFixed(1) + ' spare VT left in IBKR (run <code>/kids</code>).'));
+      }
     }
 
     if (typeof answerCallbackQuery === 'function') answerCallbackQuery(queryId, onlyFlows ? 'Flow recorded! ✅' : 'Check-in locked! ✅');

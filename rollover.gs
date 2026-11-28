@@ -427,7 +427,7 @@ function syncYearEndRollover(source2026OrId, target2027OrId, options) {
       });
     }
 
-    // 4. Update 2026 — Глаша & 2026 — Тёма rows in target Kids Section 3
+    // 4. Update 2026 — Глаша & 2026 — Тёма rows in target Kids Section 3 (+ carry over IBKR VT custody in Section 5)
     if (dstKids && plan.kidsSummary2026) {
       const kidsLastRow = dstKids.getLastRow();
       const startSec3 = 32;
@@ -443,6 +443,18 @@ function syncYearEndRollover(source2026OrId, target2027OrId, options) {
           dstKids.getRange(rNum, 7, 1, 1).setValues([[plan.kidsSummary2026.temaVt]]);
         }
       });
+    }
+    if (srcKids && dstKids && typeof findKidsCustodyRows_ === 'function' && srcKids.getLastRow() >= 45 && dstKids.getLastRow() >= 45) {
+      const srcGrid = srcKids.getRange(1, 1, Math.min(55, srcKids.getLastRow()), 4).getValues();
+      const dstGrid = dstKids.getRange(1, 1, Math.min(55, dstKids.getLastRow()), 4).getValues();
+      const srcLoc = findKidsCustodyRows_(srcGrid);
+      const dstLoc = findKidsCustodyRows_(dstGrid);
+      if (srcLoc.vtRow > 0 && dstLoc.vtRow > 0) {
+        const vtHeld = Number(srcGrid[srcLoc.vtRow - 1][2]);
+        if (Number.isFinite(vtHeld) && vtHeld > 0) {
+          dstKids.getRange(dstLoc.vtRow, 3, 1, 1).setValues([[vtHeld]]);
+        }
+      }
     }
 
     // 4b. Stamp Dec 2026 closing loan principals into target Loans (Row 13 Col H for SC Mortgage, Row 30 Col H for BMW 640i)

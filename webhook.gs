@@ -187,6 +187,13 @@ function doPost(e) {
           }
           return HtmlService.createHtmlOutput('OK');
         }
+        const kidsCmd = /^\/kids(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(textTrimmed);
+        if (kidsCmd) {
+          if (typeof handleTelegramKidsCommand === 'function') {
+            handleTelegramKidsCommand(chatId, (kidsCmd[1] || '').trim());
+          }
+          return HtmlService.createHtmlOutput('OK');
+        }
         const checkinCmd = /^\/checkin(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(textTrimmed);
         if (checkinCmd) {
           if (typeof handleTelegramCheckinInput === 'function') {
